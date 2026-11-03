@@ -50,40 +50,42 @@ const LEVEL_LAB = {
         // =====================================================================
         const obstacles = [
             // -----------------------------------------------------------------
-            // A. 中间房间最上方几何结构底部封闭外墙 (不可进入，完全隔断)
-            // 中间倒梯形下底宽 310px (X: 1445 ~ 1755, Y: 740)，精确等同于圆台直径 310px
+            // A. 中间房间最上方 3 大显示屏的封闭外墙 (顶边与左右最外侧斜边封死)
             // -----------------------------------------------------------------
+            // 1. 顶角封口墙 (Y: 483 ~ 497, X: 1055 ~ 2145)
             {
                 type: 'solid',
                 points: [
-                    { x: 1105, y: 814 },
-                    { x: 1440, y: 734 },
-                    { x: 1450, y: 746 },
-                    { x: 1115, y: 826 }
+                    { x: 1055, y: 483 },
+                    { x: 2145, y: 483 },
+                    { x: 2145, y: 497 },
+                    { x: 1055, y: 497 }
                 ],
-                label: 'TOP CHAMBER BASE LEFT',
+                label: 'TOP SCREEN UPPER WALL',
                 hideLabel: true
             },
+            // 2. 左侧显示屏最外侧斜外墙 (1055, 490) -> (1110, 820)
             {
-                type: 'solid',
+                type: 'poly_wall',
                 points: [
-                    { x: 1440, y: 733 },
-                    { x: 1760, y: 733 },
-                    { x: 1760, y: 747 },
-                    { x: 1440, y: 747 }
+                    { x: 1048, y: 490 },
+                    { x: 1062, y: 490 },
+                    { x: 1117, y: 820 },
+                    { x: 1103, y: 820 }
                 ],
-                label: 'TOP INVERTED TRAPEZOID BASE',
+                label: 'TOP LEFT SCREEN OUTER WALL',
                 hideLabel: true
             },
+            // 3. 右侧显示屏最外侧斜外墙 (2145, 490) -> (2090, 820)
             {
-                type: 'solid',
+                type: 'poly_wall',
                 points: [
-                    { x: 1750, y: 746 },
-                    { x: 2085, y: 826 },
-                    { x: 2095, y: 814 },
-                    { x: 1760, y: 734 }
+                    { x: 2138, y: 490 },
+                    { x: 2152, y: 490 },
+                    { x: 2097, y: 820 },
+                    { x: 2083, y: 820 }
                 ],
-                label: 'TOP CHAMBER BASE RIGHT',
+                label: 'TOP RIGHT SCREEN OUTER WALL',
                 hideLabel: true
             },
 
@@ -428,11 +430,11 @@ const LEVEL_LAB = {
                 draw: (ctx) => {
                     ctx.save();
 
-                    // --- 1. 巨型眼睛三大房间地坪底色（多边形整铺） ---
+                    // --- 1. 巨型眼睛三大房间地坪底色（多边形整铺，向上拓展延伸至 Y:470 完美覆盖屏后与外围） ---
                     ctx.beginPath();
                     ctx.moveTo(150, 1200);      // 西端眼睛顶点
-                    ctx.lineTo(1055, 490);     // 中室西北角
-                    ctx.lineTo(2145, 490);     // 中室东北角
+                    ctx.lineTo(1055, 470);     // 中室西北角 (覆盖屏后外围)
+                    ctx.lineTo(2145, 470);     // 中室东北角 (覆盖屏后外围)
                     ctx.lineTo(3050, 1200);    // 东端眼睛顶点
                     ctx.lineTo(1896, 1960);    // 中室东南角
                     ctx.lineTo(1304, 1960);    // 中室西南角
@@ -453,50 +455,582 @@ const LEVEL_LAB = {
                     ctx.lineWidth = 2;
                     ctx.stroke();
 
-                    // --- 3. 最上方 3 个几何结构 (中间倒梯形 + 左右共用倾斜边) ---
+                    // --- 3. 最上方 3 大高科技控制显示屏 (High-Tech Tactical Display Screens) ---
+                    // 屏背景边缘渐变色完全融于 Level 7 墨绿科技地坪色 (#05100c / #022c22)，无任何黑色边框
                     ctx.save();
-                    ctx.strokeStyle = '#10b981';
-                    ctx.lineWidth = 2.5;
 
-                    // 顶端水平通线 (Y: 490，X: 1055 ~ 2145)
+                    // =========================================================================
+                    // 3A. LEFT SCREEN: ABYSSAL DEEP MONITOR & CERBERUS DIAGRAM
+                    // Quad: (1055, 490) -> (1403, 490) -> (1445, 740) -> (1110, 820)
+                    // =========================================================================
+                    ctx.save();
                     ctx.beginPath();
                     ctx.moveTo(1055, 490);
-                    ctx.lineTo(2145, 490);
-                    ctx.stroke();
-
-                    // 左侧最外侧斜边 (X: 1055, Y: 490 至 X: 1110, Y: 820)
-                    ctx.beginPath();
-                    ctx.moveTo(1055, 490);
+                    ctx.lineTo(1403, 490);
+                    ctx.lineTo(1445, 740);
                     ctx.lineTo(1110, 820);
+                    ctx.closePath();
+
+                    // Radial illuminated backlight gradient blending to Level 7 floor color (#05100c)
+                    const radLeft = ctx.createRadialGradient(1250, 650, 20, 1250, 650, 320);
+                    radLeft.addColorStop(0, '#0b355c');
+                    radLeft.addColorStop(0.45, '#061c3a');
+                    radLeft.addColorStop(1, '#05100c');
+                    ctx.fillStyle = radLeft;
+                    ctx.fill();
+
+                    // Smooth cyan border
+                    ctx.strokeStyle = '#00CCFF';
+                    ctx.lineWidth = 2.5;
                     ctx.stroke();
 
-                    // 右侧最外侧斜边 (X: 2145, Y: 490 至 X: 2090, Y: 820)
-                    ctx.beginPath();
-                    ctx.moveTo(2145, 490);
-                    ctx.lineTo(2090, 820);
-                    ctx.stroke();
+                    ctx.clip(); // clip contents to left screen quad
 
-                    // 中间倒梯形左侧斜边 (平行于左侧最外侧斜边：(1403, 490) -> (1445, 740))
-                    ctx.beginPath();
-                    ctx.moveTo(1403, 490);
-                    ctx.lineTo(1445, 740);
-                    ctx.stroke();
+                    // CRT Scanlines
+                    ctx.strokeStyle = 'rgba(0, 204, 255, 0.04)';
+                    ctx.lineWidth = 1;
+                    for (let gy = 480; gy < 830; gy += 3) {
+                        ctx.beginPath(); ctx.moveTo(1000, gy); ctx.lineTo(1500, gy); ctx.stroke();
+                    }
 
-                    // 中间倒梯形右侧斜边 (平行于右侧最外侧斜边：(1797, 490) -> (1755, 740))
+                    // Glass Glare
                     ctx.beginPath();
-                    ctx.moveTo(1797, 490);
-                    ctx.lineTo(1755, 740);
-                    ctx.stroke();
+                    ctx.moveTo(1055, 490); ctx.lineTo(1250, 490); ctx.lineTo(1120, 750); ctx.closePath();
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.04)'; ctx.fill();
 
-                    // 底边折角线：左斜段 (1110, 820)->(1445, 740)，中平底边 (1445, 740)->(1755, 740)，右斜段 (1755, 740)->(2090, 820)
+                    // Header Bar
+                    ctx.fillStyle = 'rgba(0, 204, 255, 0.18)';
+                    ctx.fillRect(1070, 495, 325, 22);
+                    ctx.strokeStyle = '#00CCFF';
+                    ctx.lineWidth = 1.2;
+                    ctx.strokeRect(1070, 495, 325, 22);
+
+                    ctx.font = 'bold 11px monospace';
+                    ctx.fillStyle = '#00E5FF';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('INFERNAL DEEP MONITOR', 1232, 510);
+
+                    // --- UPPER HALF: Abyssal Sector Map Outline ---
+                    ctx.fillStyle = 'rgba(0, 204, 255, 0.08)';
+                    ctx.fillRect(1075, 523, 318, 112);
+                    ctx.strokeStyle = 'rgba(0, 204, 255, 0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(1075, 523, 318, 112);
+
+                    ctx.font = 'bold 8.5px monospace';
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.textAlign = 'left';
+                    ctx.fillText('ABYSSAL DEEP SECTOR OUTLINE:', 1082, 535);
+
+                    // Sector 1: Demon Wings (Satan)
+                    ctx.strokeStyle = '#FF3344'; ctx.lineWidth = 1.2;
+                    ctx.strokeRect(1080, 542, 90, 88);
+                    ctx.fillStyle = 'rgba(255, 51, 68, 0.10)'; ctx.fillRect(1080, 542, 90, 88);
+
+                    // Demon Wings Vector Drawing
+                    ctx.save();
+                    ctx.translate(1125, 580);
+                    ctx.strokeStyle = '#ff3344';
+                    ctx.fillStyle = 'rgba(255, 51, 68, 0.25)';
+                    ctx.lineWidth = 1.5;
                     ctx.beginPath();
-                    ctx.moveTo(1110, 820);
-                    ctx.lineTo(1445, 740);
-                    ctx.lineTo(1755, 740);
-                    ctx.lineTo(2090, 820);
+                    ctx.moveTo(0, 5);
+                    ctx.bezierCurveTo(-12, -15, -30, -12, -33, 2);
+                    ctx.bezierCurveTo(-24, 8, -18, 18, -10, 10);
+                    ctx.bezierCurveTo(-6, 15, -3, 12, 0, 5);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+                    ctx.beginPath();
+                    ctx.moveTo(0, 5);
+                    ctx.bezierCurveTo(12, -15, 30, -12, 33, 2);
+                    ctx.bezierCurveTo(24, 8, 18, 18, 10, 10);
+                    ctx.bezierCurveTo(6, 15, 3, 12, 0, 5);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+                    ctx.beginPath(); ctx.moveTo(0, 5); ctx.lineTo(-33, 2); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(0, 5); ctx.lineTo(33, 2); ctx.stroke();
+                    ctx.restore();
+
+                    ctx.font = 'bold 7px monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#FF3344';
+                    ctx.fillText('SEC 1: SATAN DOMAIN', 1125, 622);
+
+                    // Sector 2: Irregular Lava Lake Polygon
+                    ctx.strokeStyle = '#FFCC00'; ctx.lineWidth = 1.2;
+                    ctx.strokeRect(1178, 542, 90, 88);
+                    ctx.fillStyle = 'rgba(255, 204, 0, 0.10)'; ctx.fillRect(1178, 542, 90, 88);
+
+                    // Irregular Lava Lake Vector
+                    ctx.save();
+                    ctx.translate(1223, 578);
+                    ctx.strokeStyle = '#ffaa00';
+                    ctx.fillStyle = 'rgba(255, 170, 0, 0.3)';
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.moveTo(-28, -10);
+                    ctx.lineTo(-10, -20);
+                    ctx.lineTo(16, -16);
+                    ctx.lineTo(28, -4);
+                    ctx.lineTo(24, 16);
+                    ctx.lineTo(2, 22);
+                    ctx.lineTo(-22, 14);
+                    ctx.lineTo(-28, 4);
+                    ctx.closePath();
+                    ctx.fill(); ctx.stroke();
+                    ctx.strokeStyle = '#ffe600'; ctx.lineWidth = 1;
+                    ctx.beginPath(); ctx.moveTo(-10, -20); ctx.lineTo(2, 22); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(-28, 4); ctx.lineTo(16, -16); ctx.stroke();
+                    ctx.restore();
+
+                    ctx.font = 'bold 7px monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#FFCC00';
+                    ctx.fillText('SEC 2: MOLTEN BASIN', 1223, 622);
+
+                    // Sector 3: Sacrificial Altar Hexagon
+                    ctx.strokeStyle = '#00FF66'; ctx.lineWidth = 1.2;
+                    ctx.strokeRect(1276, 542, 112, 88);
+                    ctx.fillStyle = 'rgba(0, 255, 102, 0.10)'; ctx.fillRect(1276, 542, 112, 88);
+
+                    // Altar Hexagon Vector
+                    ctx.save();
+                    ctx.translate(1332, 578);
+                    ctx.strokeStyle = '#00ff66';
+                    ctx.fillStyle = 'rgba(0, 255, 102, 0.25)';
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    for (let a = 0; a < 6; a++) {
+                        const ang = (Math.PI / 3) * a;
+                        const hx = 20 * Math.cos(ang);
+                        const hy = 20 * Math.sin(ang);
+                        if (a === 0) ctx.moveTo(hx, hy); else ctx.lineTo(hx, hy);
+                    }
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+                    ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.stroke();
+                    ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, Math.PI * 2); ctx.fill();
+                    ctx.restore();
+
+                    ctx.font = 'bold 7px monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#00FF66';
+                    ctx.fillText('SEC 3: SACRIFICE ALTAR', 1332, 622);
+
+
+                    // --- LOWER HALF: Cerberus Diagram & Hazard Status ---
+                    // Shifted right to X = 1098 to prevent clipping from inward sloping left wall
+                    ctx.fillStyle = 'rgba(0, 204, 255, 0.08)';
+                    ctx.fillRect(1098, 642, 330, 138);
+                    ctx.strokeStyle = 'rgba(0, 204, 255, 0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(1098, 642, 330, 138);
+
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillStyle = '#ef4444'; ctx.textAlign = 'left';
+                    ctx.fillText('SUBJECT: CERBERUS / HELLHOUND DIAGRAM', 1106, 655);
+
+                    // Detailed Cerberus Graphic
+                    ctx.save();
+                    ctx.translate(1150, 712);
+
+                    // 4 Legs
+                    ctx.strokeStyle = '#ef4444';
+                    ctx.lineWidth = 1.8;
+                    ctx.beginPath(); ctx.moveTo(-16, 8); ctx.lineTo(-22, 24); ctx.lineTo(-18, 25); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(-8, 8); ctx.lineTo(-12, 24); ctx.lineTo(-8, 25); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(10, 8); ctx.lineTo(8, 24); ctx.lineTo(12, 25); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(18, 8); ctx.lineTo(18, 24); ctx.lineTo(22, 25); ctx.stroke();
+
+                    // Hound Body Torso
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.25)';
+                    ctx.beginPath(); ctx.ellipse(0, 2, 22, 11, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+                    // Curved Tail
+                    ctx.beginPath();
+                    ctx.moveTo(-22, 2);
+                    ctx.quadraticCurveTo(-32, -8, -28, -18);
                     ctx.stroke();
+                    ctx.fillStyle = '#ff2200';
+                    ctx.beginPath(); ctx.arc(-28, -18, 3, 0, Math.PI * 2); ctx.fill();
+
+                    // 3 Heads
+                    const drawHead = (hx, hy, angle) => {
+                        ctx.save();
+                        ctx.translate(hx, hy);
+                        ctx.rotate(angle);
+                        ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2;
+                        ctx.beginPath(); ctx.moveTo(0, 10); ctx.lineTo(0, 0); ctx.stroke();
+                        ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
+                        ctx.beginPath(); ctx.arc(0, -2, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                        ctx.beginPath(); ctx.moveTo(3, -4); ctx.lineTo(10, -2); ctx.lineTo(3, 1); ctx.closePath(); ctx.fill(); ctx.stroke();
+                        ctx.beginPath(); ctx.moveTo(-2, -6); ctx.lineTo(-4, -11); ctx.lineTo(1, -6); ctx.fill(); ctx.stroke();
+                        ctx.fillStyle = '#ff0000';
+                        ctx.beginPath(); ctx.arc(2, -3, 1.2, 0, Math.PI * 2); ctx.fill();
+                        ctx.restore();
+                    };
+
+                    drawHead(-12, -8, -0.35);
+                    drawHead(0, -12, 0);
+                    drawHead(12, -8, 0.35);
 
                     ctx.restore();
+
+                    // Specs Info Text
+                    ctx.font = 'bold 8.5px monospace'; ctx.textAlign = 'left';
+                    ctx.fillStyle = '#f87171';
+                    ctx.fillText('ENTITY ID: CERBERUS-X', 1208, 672);
+                    ctx.fillText('THREAT LEVEL: OMEGA-MAX', 1208, 687);
+                    ctx.fillStyle = '#FFCC00';
+                    ctx.fillText('STATUS: UNKNOWN', 1208, 702);
+                    ctx.fillText('ANATOMY DATA: UNKNOWN', 1208, 717);
+                    ctx.fillText('WEAKNESS: UNKNOWN', 1208, 732);
+
+                    // Warning Bar
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+                    ctx.fillRect(1106, 746, 314, 20);
+                    ctx.strokeStyle = '#ef4444';
+                    ctx.strokeRect(1106, 746, 314, 20);
+                    ctx.font = 'bold 8.5px monospace';
+                    ctx.fillStyle = '#ff6666';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('⚠️ DETAILED SPECIFICATIONS: UNKNOWN', 1263, 760);
+
+                    ctx.restore(); // end Screen 1
+
+
+                    // =========================================================================
+                    // 3B. CENTER SCREEN: GLOBAL STRATEGIC COMMAND & WORLD THEATER MAP
+                    // Quad / Inverted Trapezoid: (1403, 490) -> (1797, 490) -> (1755, 740) -> (1445, 740)
+                    // =========================================================================
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.moveTo(1403, 490);
+                    ctx.lineTo(1797, 490);
+                    ctx.lineTo(1755, 740);
+                    ctx.lineTo(1445, 740);
+                    ctx.closePath();
+
+                    // Radial illuminated backlight gradient centered at (1600, 630), blending into Level 7 floor color (#05100c)
+                    const gradCenter = ctx.createRadialGradient(1600, 630, 20, 1600, 630, 300);
+                    gradCenter.addColorStop(0, '#0c3a6b');
+                    gradCenter.addColorStop(0.45, '#071f40');
+                    gradCenter.addColorStop(1, '#05100c');
+                    ctx.fillStyle = gradCenter;
+                    ctx.fill();
+
+                    ctx.strokeStyle = '#00E5FF';
+                    ctx.lineWidth = 2.5;
+                    ctx.stroke();
+
+                    ctx.clip(); // clip to center screen quad
+
+                    // CRT Scanlines
+                    ctx.strokeStyle = 'rgba(0, 229, 255, 0.04)';
+                    ctx.lineWidth = 1;
+                    for (let gy = 480; gy < 750; gy += 3) {
+                        ctx.beginPath(); ctx.moveTo(1400, gy); ctx.lineTo(1800, gy); ctx.stroke();
+                    }
+
+                    // Glass Glare
+                    ctx.beginPath();
+                    ctx.moveTo(1403, 490); ctx.lineTo(1620, 490); ctx.lineTo(1480, 740); ctx.closePath();
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.04)'; ctx.fill();
+
+                    // Header Bar
+                    ctx.fillStyle = 'rgba(0, 229, 255, 0.18)';
+                    ctx.fillRect(1410, 495, 380, 24);
+                    ctx.strokeStyle = '#00E5FF';
+                    ctx.lineWidth = 1.2;
+                    ctx.strokeRect(1410, 495, 380, 24);
+
+                    ctx.font = 'bold 11px monospace';
+                    ctx.fillStyle = '#ffffff';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('GLOBAL STRATEGIC COMMAND - WORLD THEATER MAP', 1600, 511);
+
+                    // Latitude & Longitude Grid Lines & Internal Ticks (at X = 1432, untouched by map)
+                    ctx.strokeStyle = 'rgba(0, 229, 255, 0.22)';
+                    ctx.lineWidth = 0.8;
+                    for (let latY = 530; latY <= 720; latY += 22) {
+                        ctx.beginPath(); ctx.moveTo(1400, latY); ctx.lineTo(1800, latY); ctx.stroke();
+                        ctx.font = 'bold 7px monospace'; ctx.fillStyle = 'rgba(0, 229, 255, 0.75)';
+                        ctx.textAlign = 'left';
+                        ctx.fillText(`${90 - Math.round((latY - 530) * 0.9)}°N`, 1432, latY - 2);
+                    }
+                    for (let lonX = 1430; lonX <= 1770; lonX += 30) {
+                        ctx.beginPath();
+                        ctx.moveTo(lonX, 525);
+                        ctx.bezierCurveTo(lonX + (1600 - lonX) * 0.12, 600, lonX + (1600 - lonX) * 0.12, 680, lonX, 735);
+                        ctx.stroke();
+                    }
+
+                    // Accurate World Continents Outline Perfectly Centered Vertically (+35px shift)
+                    ctx.strokeStyle = 'rgba(0, 229, 255, 0.85)';
+                    ctx.fillStyle = 'rgba(0, 229, 255, 0.18)';
+                    ctx.lineWidth = 1.2;
+
+                    // North America (Center X = 1500, Y = 595)
+                    ctx.beginPath();
+                    ctx.moveTo(1465, 580);
+                    ctx.lineTo(1490, 573);
+                    ctx.lineTo(1530, 577);
+                    ctx.lineTo(1525, 610);
+                    ctx.lineTo(1512, 617); // Florida
+                    ctx.lineTo(1508, 613);
+                    ctx.lineTo(1495, 635); // Central America
+                    ctx.lineTo(1480, 615);
+                    ctx.lineTo(1468, 595);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+                    // South America (Center X = 1515, Y = 670)
+                    ctx.beginPath();
+                    ctx.moveTo(1495, 635);
+                    ctx.lineTo(1528, 643);
+                    ctx.lineTo(1522, 700);
+                    ctx.lineTo(1502, 685);
+                    ctx.lineTo(1490, 653);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+                    // Eurasia (Europe + Asia, Center X = 1635, Y = 595)
+                    ctx.beginPath();
+                    ctx.moveTo(1560, 583);
+                    ctx.lineTo(1578, 567); // Scandinavia
+                    ctx.lineTo(1595, 567);
+                    ctx.lineTo(1645, 565); // Russia
+                    ctx.lineTo(1740, 573); // Kamchatka
+                    ctx.lineTo(1745, 610); // East Asia coast
+                    ctx.lineTo(1700, 630); // SE Asia
+                    ctx.lineTo(1670, 650); // India
+                    ctx.lineTo(1655, 623);
+                    ctx.lineTo(1615, 625); // Arabia
+                    ctx.lineTo(1610, 607); // Med coast
+                    ctx.lineTo(1560, 587);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+                    // Africa (Center X = 1595, Y = 650)
+                    ctx.beginPath();
+                    ctx.moveTo(1570, 610);
+                    ctx.lineTo(1615, 613);
+                    ctx.lineTo(1622, 645); // Horn of Africa
+                    ctx.lineTo(1595, 687);
+                    ctx.lineTo(1568, 650);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+                    // Australia (Center X = 1715, Y = 680)
+                    ctx.beginPath();
+                    ctx.moveTo(1705, 665);
+                    ctx.lineTo(1748, 660);
+                    ctx.lineTo(1742, 700);
+                    ctx.lineTo(1702, 691);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+                    // Japan Islands Dot
+                    ctx.beginPath(); ctx.arc(1748, 595, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+                    // --- 6 CAMPAIGN LOCATIONS MARKERS & CENTERED CALLOUTS ---
+                    const campaignLocations = [
+                        { name: 'LOC-01 AIRPORT', lat: '37.6° N', lon: '122.3° W', x: 1485, y: 600, boxX: 1438, boxY: 617 },
+                        { name: 'LOC-02 SUBWAY',  lat: '40.7° N', lon: '73.9° W',  x: 1520, y: 593, boxX: 1452, boxY: 563 },
+                        { name: 'LOC-03 BANK',    lat: '51.5° N', lon: '0.1° W',   x: 1570, y: 575, boxX: 1545, boxY: 545 },
+                        { name: 'LOC-04 YACHT',   lat: '25.7° N', lon: '80.1° W',  x: 1510, y: 630, boxX: 1448, boxY: 655 },
+                        { name: 'LOC-05 HOTEL',   lat: '47.3° N', lon: '8.5° E',   x: 1592, y: 585, boxX: 1602, boxY: 600 },
+                        { name: 'LOC-06 EXPRESS', lat: '55.7° N', lon: '37.6° E',  x: 1640, y: 571, boxX: 1660, boxY: 550 },
+                    ];
+
+                    campaignLocations.forEach(loc => {
+                        // Dot & pulse circle
+                        ctx.fillStyle = '#00FF66';
+                        ctx.beginPath(); ctx.arc(loc.x, loc.y, 3, 0, Math.PI * 2); ctx.fill();
+                        ctx.strokeStyle = '#00FF66'; ctx.lineWidth = 1;
+                        ctx.beginPath(); ctx.arc(loc.x, loc.y, 6, 0, Math.PI * 2); ctx.stroke();
+
+                        // Callout Leader Line
+                        ctx.strokeStyle = 'rgba(0, 229, 255, 0.6)';
+                        ctx.lineWidth = 0.8;
+                        ctx.beginPath(); ctx.moveTo(loc.x, loc.y); ctx.lineTo(loc.boxX + 35, loc.boxY + 9); ctx.stroke();
+
+                        // Callout Tag Box (translucent emerald-teal background matching Level 7)
+                        ctx.fillStyle = 'rgba(6, 28, 22, 0.88)';
+                        ctx.strokeStyle = '#00E5FF';
+                        ctx.lineWidth = 0.8;
+                        const w = 92;
+                        const h = 18;
+                        ctx.fillRect(loc.boxX, loc.boxY, w, h);
+                        ctx.strokeRect(loc.boxX, loc.boxY, w, h);
+
+                        ctx.font = 'bold 6.5px monospace';
+                        ctx.fillStyle = '#00E5FF'; ctx.textAlign = 'left';
+                        ctx.fillText(loc.name, loc.boxX + 3, loc.boxY + 7);
+                        ctx.fillStyle = '#ffffff';
+                        ctx.fillText(`[${loc.lat}, ${loc.lon}]`, loc.boxX + 3, loc.boxY + 15);
+                    });
+
+                    ctx.restore(); // end Screen 2
+
+
+                    // =========================================================================
+                    // 3C. RIGHT SCREEN: PERSONNEL VITAL SIGNS & ARMORED EXPRESS SPECS
+                    // Quad: (1797, 490) -> (2145, 490) -> (2090, 820) -> (1755, 740)
+                    // =========================================================================
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.moveTo(1797, 490);
+                    ctx.lineTo(2145, 490);
+                    ctx.lineTo(2090, 820);
+                    ctx.lineTo(1755, 740);
+                    ctx.closePath();
+
+                    // Radial illuminated backlight gradient blending into Level 7 floor color (#05100c)
+                    const gradRight = ctx.createRadialGradient(1950, 650, 20, 1950, 650, 320);
+                    gradRight.addColorStop(0, '#0b355c');
+                    gradRight.addColorStop(0.45, '#061c3a');
+                    gradRight.addColorStop(1, '#05100c');
+                    ctx.fillStyle = gradRight;
+                    ctx.fill();
+
+                    ctx.strokeStyle = '#00CCFF';
+                    ctx.lineWidth = 2.0;
+                    ctx.stroke();
+
+                    ctx.clip(); // clip to right screen quad
+
+                    // CRT Scanlines
+                    ctx.strokeStyle = 'rgba(0, 204, 255, 0.04)';
+                    ctx.lineWidth = 1;
+                    for (let gy = 480; gy < 830; gy += 3) {
+                        ctx.beginPath(); ctx.moveTo(1750, gy); ctx.lineTo(2200, gy); ctx.stroke();
+                    }
+
+                    // Glass Glare
+                    ctx.beginPath();
+                    ctx.moveTo(1797, 490); ctx.lineTo(1980, 490); ctx.lineTo(1850, 750); ctx.closePath();
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.04)'; ctx.fill();
+
+                    // Header Bar
+                    ctx.fillStyle = 'rgba(0, 204, 255, 0.15)';
+                    ctx.fillRect(1805, 495, 330, 22);
+                    ctx.strokeStyle = '#00CCFF';
+                    ctx.lineWidth = 1.2;
+                    ctx.strokeRect(1805, 495, 330, 22);
+
+                    ctx.font = 'bold 11px monospace';
+                    ctx.fillStyle = '#00E5FF';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('PERSONNEL & TRAIN TELEMETRY', 1970, 510);
+
+                    // --- UPPER HALF: Personnel Status & Vital Signs ---
+                    ctx.fillStyle = 'rgba(0, 204, 255, 0.08)';
+                    ctx.fillRect(1808, 523, 324, 112);
+                    ctx.strokeStyle = 'rgba(0, 204, 255, 0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(1808, 523, 324, 112);
+
+                    ctx.font = 'bold 8.5px monospace';
+                    ctx.fillStyle = '#38bdf8'; ctx.textAlign = 'left';
+                    ctx.fillText('PERSONNEL VITAL SIGNS MONITORING:', 1814, 535);
+
+                    // 3 Personnel Profiles
+                    const personnelList = [
+                        { name: 'SPECTRE (AGENT)', status: 'ACTIVE', bpm: 72, o2: '98%', hp: '100%' },
+                        { name: 'NEXUS (OPERATOR)', status: 'ONLINE', bpm: 68, o2: '99%', hp: '100%' },
+                        { name: 'APEX (COMMANDER)', status: 'STANDBY', bpm: 75, o2: '97%', hp: '100%' },
+                    ];
+
+                    personnelList.forEach((p, i) => {
+                        const py = 544 + i * 27;
+                        // Avatar Icon Box
+                        ctx.fillStyle = '#0a1a30'; ctx.fillRect(1814, py, 20, 20);
+                        ctx.strokeStyle = '#00E5FF'; ctx.strokeRect(1814, py, 20, 20);
+                        ctx.fillStyle = '#00E5FF';
+                        ctx.beginPath(); ctx.arc(1824, py + 7, 3.5, 0, Math.PI * 2); ctx.fill();
+                        ctx.beginPath(); ctx.arc(1824, py + 18, 6, Math.PI, 0); ctx.fill();
+
+                        ctx.font = 'bold 7.5px monospace';
+                        ctx.fillStyle = '#ffffff'; ctx.fillText(p.name, 1838, py + 7);
+                        ctx.fillStyle = '#00FF66'; ctx.fillText(`[${p.status}]`, 1838, py + 16);
+
+                        ctx.fillStyle = '#38bdf8';
+                        ctx.fillText(`HR: ${p.bpm} BPM | O2: ${p.o2} | VITAL: ${p.hp}`, 1930, py + 11);
+
+                        // ECG Heartbeat Waveform
+                        ctx.strokeStyle = '#00FF66'; ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        const ecgX = 2065;
+                        ctx.moveTo(ecgX, py + 9);
+                        ctx.lineTo(ecgX + 8, py + 9);
+                        ctx.lineTo(ecgX + 11, py + 2);
+                        ctx.lineTo(ecgX + 15, py + 16);
+                        ctx.lineTo(ecgX + 18, py + 9);
+                        ctx.lineTo(ecgX + 30, py + 9);
+                        ctx.stroke();
+                    });
+
+                    // --- LOWER HALF: Armored Express & Bridge Layout ---
+                    ctx.fillStyle = 'rgba(0, 204, 255, 0.08)';
+                    ctx.fillRect(1795, 642, 335, 138);
+                    ctx.strokeStyle = 'rgba(0, 204, 255, 0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(1795, 642, 335, 138);
+
+                    ctx.font = 'bold 8.5px monospace';
+                    ctx.fillStyle = '#38bdf8'; ctx.textAlign = 'left';
+                    ctx.fillText('ARMORED EXPRESS & BRIDGE LAYOUT:', 1802, 655);
+
+                    // 1. Armored Train Exterior Silhouette Diagram (6 Carriages)
+                    ctx.strokeStyle = '#00E5FF';
+                    ctx.lineWidth = 1.2;
+                    ctx.fillStyle = 'rgba(0, 229, 255, 0.15)';
+
+                    const trainStartX = 1802;
+                    const trainY = 663;
+                    for (let c = 0; c < 6; c++) {
+                        const cx = trainStartX + c * 22;
+                        ctx.fillRect(cx, trainY, 19, 9);
+                        ctx.strokeRect(cx, trainY, 19, 9);
+                    }
+                    ctx.beginPath();
+                    ctx.moveTo(trainStartX + 132, trainY);
+                    ctx.lineTo(trainStartX + 144, trainY + 4.5);
+                    ctx.lineTo(trainStartX + 132, trainY + 9);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+                    // 2. Control Room Floor Plan Diagram (Mirror of Train Bridge / Car 4)
+                    ctx.fillStyle = '#081220';
+                    ctx.fillRect(1802, 678, 145, 45);
+                    ctx.strokeStyle = '#00E5FF';
+                    ctx.lineWidth = 1.2;
+                    ctx.strokeRect(1802, 678, 145, 45);
+
+                    // Server Racks & Command Consoles in Floor Plan
+                    ctx.fillStyle = '#00CCFF';
+                    ctx.fillRect(1808, 682, 24, 7); // Rack 1
+                    ctx.fillRect(1836, 682, 24, 7); // Rack 2
+                    ctx.fillRect(1874, 682, 32, 7); // Main Console
+
+                    ctx.fillRect(1808, 712, 24, 7); // Lower Console
+                    ctx.fillRect(1874, 712, 32, 7); // Comms Desk
+
+                    ctx.font = 'bold 6.5px monospace'; ctx.fillStyle = '#00FF66';
+                    ctx.fillText('COMMAND BRIDGE (CAR 4)', 1806, 702);
+
+                    // 3. Train Specifications Text (SPEED 240 KM/H)
+                    ctx.font = 'bold 8px monospace';
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillText('ARMORED EXPRESS SPECS:', 1955, 682);
+
+                    ctx.font = '7.5px monospace'; ctx.fillStyle = '#38bdf8';
+                    ctx.fillText('SPEED: 240 KM/H', 1955, 695);
+                    ctx.fillText('STATUS: CRUISING', 1955, 707);
+                    ctx.fillText('CARRIAGES: 06 UNITS', 1955, 719);
+                    ctx.fillText('DEFENSE: MAX LOCKDOWN', 1955, 731);
+
+                    // Bottom System Status Banner
+                    ctx.fillStyle = 'rgba(0, 255, 102, 0.15)';
+                    ctx.fillRect(1802, 752, 318, 18);
+                    ctx.strokeStyle = '#00FF66';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(1802, 752, 318, 18);
+                    ctx.font = 'bold 8.5px monospace'; ctx.fillStyle = '#00FF66';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('SYSTEM STATUS: ALL SECURE', 1961, 765);
+
+                    ctx.restore(); // end Screen 3
+
+                    ctx.restore(); // end 3 screens block
 
                     // --- 4. 左右三角房间大圆弧结构 ---
                     ctx.save();
@@ -569,9 +1103,9 @@ const LEVEL_LAB = {
                 id: 'apex_chamber_1',
                 name: '顶石中央指挥大厅 (Room 01)',
                 x: 1055,
-                y: 490,
+                y: 830,
                 w: 1090,
-                h: 1470
+                h: 1130
             },
             {
                 id: 'apex_chamber_west',
