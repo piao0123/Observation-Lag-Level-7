@@ -1,0 +1,21831 @@
+if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, radii) {
+        if (typeof radii === 'number') radii = [radii];
+        if (!Array.isArray(radii)) radii = [0];
+        const r = Math.min(Math.abs(w) / 2, Math.abs(h) / 2, radii[0] || 0);
+        this.beginPath();
+        this.moveTo(x + r, y);
+        this.arcTo(x + w, y, x + w, y + h, r);
+        this.arcTo(x + w, y + h, x, y + h, r);
+        this.arcTo(x, y + h, x, y, r);
+        this.arcTo(x, y, x + w, y, r);
+        this.closePath();
+        return this;
+    };
+}
+
+let canvas = document.getElementById('canvas');
+let ctx = canvas ? canvas.getContext('2d') : null;
+let listenersAttached = false;
+
+function ensureCanvas() {
+    if (!canvas) {
+        canvas = document.getElementById('canvas');
+        if (canvas) {
+            ctx = canvas.getContext('2d');
+            width = window.innerWidth || 1280;
+            height = window.innerHeight || 720;
+            canvas.width = width;
+            canvas.height = height;
+            if (!listenersAttached) {
+                setupCanvasListeners();
+                listenersAttached = true;
+            }
+            initMapLayout();
+        }
+    } else if (!listenersAttached) {
+        setupCanvasListeners();
+        listenersAttached = true;
+    }
+    if (canvas) {
+        const targetW = window.innerWidth || 1280;
+        const targetH = window.innerHeight || 720;
+        if (targetW > 0 && targetH > 0 && (canvas.width !== targetW || canvas.height !== targetH)) {
+            width = targetW;
+            height = targetH;
+            canvas.width = targetW;
+            canvas.height = targetH;
+            initMapLayout();
+        }
+    }
+    return canvas && ctx;
+}
+
+var width = window.innerWidth;
+var height = window.innerHeight;
+window.width = width;
+window.height = height;
+
+// Ensure levelManager is bound correctly from window to avoid modular scope resolution issues in Vite bundle
+const levelManager = new Proxy({}, {
+    get: (target, prop) => {
+        if (prop === 'then') return undefined; // Avoid promise resolution issues if passed around
+        return window.levelManager ? window.levelManager[prop] : undefined;
+    },
+    set: (target, prop, value) => {
+        if (window.levelManager) {
+            window.levelManager[prop] = value;
+            return true;
+        }
+        return false;
+    }
+});
+
+function getCurrentLevelId() {
+    if (typeof levelManager !== 'undefined' && levelManager && levelManager.getCurrentLevel) {
+        const lvl = levelManager.getCurrentLevel();
+        if (lvl && lvl.id) return lvl.id;
+    }
+    return 'level1_airport';
+}
+
+const LEVEL_TARGET_WAVES = [3, 3, 3, 4, 4, 4, 5, 5];
+function getLevelTargetWave() {
+    if (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) {
+        const lvl = levelManager.getCurrentLevel();
+        if (lvl && lvl.id === 'level0_test') return 3;
+    }
+    const idx = (typeof levelManager !== 'undefined' && levelManager.currentIndex !== undefined) ? levelManager.currentIndex : 1;
+    return LEVEL_TARGET_WAVES[idx] || 3;
+}
+window.getLevelTargetWave = getLevelTargetWave;
+window.__levelObjectiveAchieved = false;
+window.__endlessMode = false;
+window.__storyBriefingEnabled = false;
+
+// --- 武器系统 ---
+const WEAPONS = {
+    RIFLE:          { id: 1, name: "步枪",       nameEn: "Rifle", range: 650, cooldown: 9,  damage: 28, speed: 17, radius: 3.5, type: 'bullet' },
+    PISTOL:         { id: 2, name: "手枪",       nameEn: "Pistol", range: 450, cooldown: 11, damage: 34, speed: 16, radius: 4.0, type: 'bullet' },
+    SMG:            { id: 3, name: "冲锋枪",     nameEn: "SMG", range: 380, cooldown: 6,  damage: 16, speed: 18, radius: 2.8, type: 'bullet' },
+    SNIPER:         { id: 4, name: "狙击枪",     nameEn: "Sniper", range: 1100,cooldown: 45, damage: 140,speed: 26, radius: 3.0, type: 'bullet' },
+    GRENADE:        { id: 5, name: "手榴弹",     nameEn: "Grenade", range: 400, cooldown: 65, damage: 130,speed: 9,  radius: 6.0, type: 'grenade', blastRadius: 120 },
+    MACHINE_GUN:    { id: 6, name: "机枪",       nameEn: "Machine Gun", range: 800, cooldown: 7,  damage: 42, speed: 19, radius: 4.0, type: 'bullet' },
+    UAV:            { id: 7, name: "UAV空袭",    nameEn: "UAV Strike", range: 2000,cooldown: 20, damage: 99999,speed:30, radius: 10.0, type: 'uav', blastRadius: 180 },
+    TRIPLE_SHOTGUN: { id: 8, name: "重型三管猎枪", nameEn: "Triple Shotgun", range: 380, cooldown: 35, damage: 32, pellets: 12, spread: 0.28, speed: 20, radius: 3.8, type: 'shotgun' },
+    RUNE_SCYTHE:    { id: 9, name: "符文光镰",   nameEn: "Rune Scythe", range: 560, cooldown: 36, damage: 88, speed: 15, radius: 16, type: 'rune_scythe' },
+    LAVA_CIRCLE:    { id: 10, name: "地狱熔岩阵", nameEn: "Lava Circle", range: 680, cooldown: 65, damage: 170, radius: 95, type: 'lava_circle' },
+    SOUL_SIPHON:    { id: 11, name: "灵魂汲取",   nameEn: "Soul Siphon", range: 420, cooldown: 7,  damage: 26, speed: 22, radius: 8, type: 'soul_siphon' }
+};
+
+let currentWeapon = WEAPONS.RIFLE;
+let unlockedWeapons = [WEAPONS.RIFLE.id];
+
+function isKillstreakSupportedLevel(levelId) {
+    if (levelId === 'level0_test') return false;
+    return true;
+}
+
+// 连杀奖励机制专有变量 (在 level0_test 与 level1_airport 关卡测试生效，绝不影响 level2/3/4)
+let level0StreakCount = 0;
+let level0MgAmmo = 0;
+let level0MgFirstUseDone = false;
+let level0UavAmmo = 0;
+let level0UavFirstUseDone = false;
+let level0InfiniteBlindTimer = 0;
+let level0InfiniteBlindActiveLast = false;
+let level0InfiniteBlindPaused = false;
+
+function settleAllPendingDamage() {
+    let totalSettled = 0;
+    if (typeof enemies !== 'undefined' && Array.isArray(enemies)) {
+        enemies.forEach(e => {
+            if (e.pendingDamage > 0) {
+                applyDamageToEnemy(e, e.pendingDamage);
+                e.pendingDamage = 0;
+                e.hitTimer = 8;
+                const isDemon = e.isDemon || (getCurrentLevelId() === 'level0_test');
+                createExplosion(e.x, e.y, 20, isDemon ? '#ff2200' : '#00FF66');
+                totalSettled++;
+            }
+        });
+    }
+    return totalSettled;
+}
+
+function pauseInfiniteBlindZone() {
+    blindActive = false;
+    blindZone = null;
+    level0InfiniteBlindPaused = true;
+    level0InfiniteBlindActiveLast = false;
+    if (typeof soundManager !== 'undefined') {
+        soundManager.stopBlindZone();
+    }
+    
+    // 盲区暂停时，立刻结算盲区内积累的所有延迟伤害 (pendingDamage)
+    let totalSettled = settleAllPendingDamage();
+
+    if (typeof addLog === 'function') {
+        const secLeft = (level0InfiniteBlindTimer / 60).toFixed(1);
+        if (totalSettled > 0) {
+            addLog(`⚡ [全图盲区暂停/结算] 剩余 ${secLeft}s，结算盲区延迟伤害 (${totalSettled} 个敌人)`);
+        } else {
+            addLog(`⏸ [全图盲区已暂停] 剩余 ${secLeft}s (按 Space 或 8 键可随时重新开启)`);
+        }
+    }
+}
+
+function resumeInfiniteBlindZone() {
+    blindActive = true;
+    blindEnergy = MAX_BLIND_ENERGY;
+    blindZone = { x: player.x, y: player.y, radius: 4000 };
+    level0InfiniteBlindPaused = false;
+    if (level0StreakCount >= 7) {
+        level0StreakCount = 0;
+        if (typeof addLog === 'function') addLog("⚡ [连杀数重置] 全图盲区开启，连杀数归零");
+    }
+    if (typeof soundManager !== 'undefined') {
+        soundManager.playBlindZone();
+    }
+    if (typeof addLog === 'function') {
+        const secLeft = (level0InfiniteBlindTimer / 60).toFixed(1);
+        addLog(`⚡ [全图盲区已手动开启] 剩余 ${secLeft}s`);
+    }
+}
+
+function activateLevel0KillstreakReward(num) {
+    const currentLevelId = getCurrentLevelId();
+    if (!isKillstreakSupportedLevel(currentLevelId)) return;
+
+    if (num === 1) {
+        // 机枪 (3 连杀) -> 30 发子弹
+        if (level0StreakCount >= 3 || level0MgAmmo > 0) {
+            if (!unlockedWeapons.includes(WEAPONS.MACHINE_GUN.id)) {
+                unlockedWeapons.push(WEAPONS.MACHINE_GUN.id);
+            }
+            if (currentWeapon.id === WEAPONS.MACHINE_GUN.id) {
+                if (level0StreakCount >= 3 && level0MgFirstUseDone) {
+                    level0MgAmmo += 30;
+                    level0MgFirstUseDone = false;
+                    if (typeof addLog === 'function') addLog(`⚡ [再次解锁连杀] 补充 30 发机枪弹药！(当前弹药: ${level0MgAmmo})`);
+                    createExplosion(player.x, player.y, 18, '#FF9900');
+                } else {
+                    if (typeof addLog === 'function') addLog(`机枪装备中 (当前弹药: ${level0MgAmmo})`);
+                }
+            } else {
+                if (level0MgAmmo <= 0 && level0StreakCount >= 3) {
+                    level0MgAmmo = 30;
+                    level0MgFirstUseDone = false;
+                    if (typeof addLog === 'function') addLog("⚡ 已装备 [机枪] (30发子弹)。首次开火时将重置连杀数");
+                } else if (level0MgAmmo > 0 && level0StreakCount >= 3 && level0MgFirstUseDone) {
+                    level0MgAmmo += 30;
+                    level0MgFirstUseDone = false;
+                    if (typeof addLog === 'function') addLog(`⚡ 再次达到 3 连杀！装备机枪并补充 30 发子弹 (当前: ${level0MgAmmo})`);
+                } else {
+                    if (typeof addLog === 'function') addLog(`装备机枪 (剩余弹药: ${level0MgAmmo})`);
+                }
+                switchWeapon(WEAPONS.MACHINE_GUN);
+                createExplosion(player.x, player.y, 18, '#FF9900');
+            }
+        } else {
+            if (typeof addLog === 'function') addLog(`❌ [机枪] 未解锁！需 3 连杀 (当前: ${level0StreakCount}/3)`);
+        }
+    } else if (num === 2) {
+        // UAV 打击 (5 连杀) -> 5 次爆破打击
+        if (level0StreakCount >= 5 || level0UavAmmo > 0) {
+            if (!unlockedWeapons.includes(WEAPONS.UAV.id)) {
+                unlockedWeapons.push(WEAPONS.UAV.id);
+            }
+            if (currentWeapon.id === WEAPONS.UAV.id) {
+                if (level0StreakCount >= 5 && level0UavFirstUseDone) {
+                    level0UavAmmo += 5;
+                    level0UavFirstUseDone = false;
+                    if (typeof addLog === 'function') addLog(`⚡ [再次解锁连杀] 补充 5 次 UAV 爆破打击！(当前次数: ${level0UavAmmo})`);
+                    createExplosion(player.x, player.y, 22, '#00E5FF');
+                } else {
+                    if (typeof addLog === 'function') addLog(`UAV 打击准备中 (当前剩余: ${level0UavAmmo} 次)`);
+                }
+            } else {
+                if (level0UavAmmo <= 0 && level0StreakCount >= 5) {
+                    level0UavAmmo = 5;
+                    level0UavFirstUseDone = false;
+                    if (typeof addLog === 'function') addLog("⚡ 已装备 [UAV打击] (5次爆破)。首次打击时将重置连杀数");
+                } else if (level0UavAmmo > 0 && level0StreakCount >= 5 && level0UavFirstUseDone) {
+                    level0UavAmmo += 5;
+                    level0UavFirstUseDone = false;
+                    if (typeof addLog === 'function') addLog(`⚡ 再次达到 5 连杀！装备 UAV 并补充 5 次爆破打击 (当前: ${level0UavAmmo})`);
+                } else {
+                    if (typeof addLog === 'function') addLog(`装备 UAV打击 (剩余次数: ${level0UavAmmo})`);
+                }
+                switchWeapon(WEAPONS.UAV);
+                createExplosion(player.x, player.y, 22, '#00E5FF');
+            }
+        } else {
+            if (typeof addLog === 'function') addLog(`❌ [UAV打击] 未解锁！需 5 连杀 (当前: ${level0StreakCount}/5)`);
+        }
+    } else if (num === 3) {
+        // 全图无限盲区 (7 连杀) -> 选中仅就绪，开启需手动操作 (开启时才扣除连杀数)
+        if (level0InfiniteBlindTimer > 0) {
+            if (level0StreakCount >= 7) {
+                level0InfiniteBlindTimer = 420; // 刷新 7 秒
+                level0InfiniteBlindPaused = true;
+                blindActive = false;
+                if (typeof addLog === 'function') addLog("⚡ 再次达到 7 连杀！刷新 [全图无限盲区] 预备时间为 7 秒！(按 Space 键或 8 键开启)");
+                createExplosion(player.x, player.y, 28, '#E024FF');
+            } else {
+                if (blindActive) {
+                    pauseInfiniteBlindZone();
+                } else {
+                    resumeInfiniteBlindZone();
+                }
+            }
+        } else if (level0StreakCount >= 7) {
+            level0InfiniteBlindTimer = 420; // 7秒 (420帧)
+            level0InfiniteBlindPaused = true;
+            blindActive = false;
+            if (typeof addLog === 'function') addLog("⚡ 已选中 [全图无限盲区] (7秒就绪)！(按 Space 键或 8 键手动开启)");
+            createExplosion(player.x, player.y, 28, '#E024FF');
+        } else {
+            if (typeof addLog === 'function') addLog(`❌ [全图无限盲区] 未解锁！需 7 连杀 (当前: ${level0StreakCount}/7)`);
+        }
+    }
+}
+
+function triggerLevel0KillstreakReward(num) {
+    activateLevel0KillstreakReward(num);
+}
+window.activateLevel0KillstreakReward = activateLevel0KillstreakReward;
+window.triggerLevel0KillstreakReward = triggerLevel0KillstreakReward;
+
+let shootCooldownTimer = 0;
+
+let wave = 1;
+let killCount = 0;
+let isGameOver = false;
+let isPaused = true;
+let waveTransitionTimer = 0;
+let gateAlarmCooldown = 0;
+
+const player = { 
+    x: 100, y: 350, angle: 0, speed: 3.8, walkCycle: 0, 
+    flashTimer: 0, hp: 100, maxHp: 100,
+    shield: 100, maxShield: 100, shieldActive: true, lastHitTimer: 0,
+    fov: Math.PI / 2.2, viewDistance: 500
+};
+
+let blindActive = false;
+let blindEnergy = 100;
+const MAX_BLIND_ENERGY = 100;
+const BLIND_CONSUME_RATE = 0.20; 
+const BLIND_RECOVER_RATE = 0.12; 
+let blindZone = null;
+let cachedIsPlayerInPool = false;
+
+const mouse = { x: width / 2, y: height / 2 };
+function getWorldMouse() {
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+    if (levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') {
+        return { x: mouse.x + (window.cameraX || 0), y: mouse.y - (window.cameraY || 0) };
+    }
+    return mouse;
+}
+const keys = {};
+
+const playerBullets = [];
+const grenades = [];
+const enemyBullets = [];
+const particles = [];
+const dropItems = []; 
+const traps = []; 
+const runeScythes = [];
+const lavaCircles = []; 
+const bloodSacrificeSeals = [];
+
+// Level 3 specific structures and fog variables
+let lasers = [];
+let laserAlarmCooldown = 0;
+
+let bankRevealGrid = [];
+let bankGridRows = 0;
+let bankGridCols = 0;
+let totalBankCells = 0;
+let scannableBankCellsCount = 0;
+let revealedBankCellsCount = 0;
+let allBankCellsRevealed = true;
+let level3TargetSecured = false;
+
+function initBankRevealGrid() {
+    bankRevealGrid = [];
+    const cellSize = 60;
+    bankGridCols = Math.ceil(width / cellSize);
+    bankGridRows = Math.ceil(height / cellSize);
+    scannableBankCellsCount = 0;
+    revealedBankCellsCount = 0;
+    allBankCellsRevealed = true;
+    
+    for (let r = 0; r < bankGridRows; r++) {
+        bankRevealGrid[r] = [];
+        for (let c = 0; c < bankGridCols; c++) {
+            const cx = c * cellSize + cellSize / 2;
+            const cy = r * cellSize + cellSize / 2;
+            // Check if cell center is inside a solid wall
+            const inSolid = checkObstacleCollision(cx, cy, 10);
+            if (inSolid) {
+                bankRevealGrid[r][c] = true;
+            } else {
+                bankRevealGrid[r][c] = false;
+                scannableBankCellsCount++;
+            }
+        }
+    }
+}
+
+function circleIntersectsSegment(cx, cy, r, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) {
+        return Math.hypot(cx - x1, cy - y1) <= r;
+    }
+    let t = ((cx - x1) * dx + (cy - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const projX = x1 + t * dx;
+    const projY = y1 + t * dy;
+    const distSq = (cx - projX) * (cx - projX) + (cy - projY) * (cy - projY);
+    return distSq <= r * r;
+}
+
+function isCellRevealed(x, y) {
+    return true;
+}
+
+function isObjectRevealed(x, y, w = 1, h = 1) {
+    return true;
+}
+
+function drawLasers() {
+    if (typeof levelManager === 'undefined' || !levelManager.getCurrentLevel || !levelManager.getCurrentLevel() || levelManager.getCurrentLevel().id !== 'level3_bank') return;
+    lasers.forEach(laser => {
+        if (!laser.active) return;
+        
+        // Only draw if laser is revealed
+        if (!allBankCellsRevealed) {
+            const midX = (laser.x1 + laser.x2) / 2;
+            const midY = (laser.y1 + laser.y2) / 2;
+            if (!isCellRevealed(midX, midY) && !isCellRevealed(laser.x1, laser.y1) && !isCellRevealed(laser.x2, laser.y2)) {
+                return;
+            }
+        }
+
+        ctx.save();
+        ctx.strokeStyle = '#FF3344';
+        ctx.lineWidth = 3.0;
+        ctx.shadowColor = '#FF3344';
+        ctx.shadowBlur = 12;
+        
+        ctx.beginPath();
+        ctx.moveTo(laser.x1, laser.y1);
+        ctx.lineTo(laser.x2, laser.y2);
+        ctx.stroke();
+        
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#64748B';
+        ctx.beginPath();
+        ctx.arc(laser.x1, laser.y1, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(laser.x2, laser.y2, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    });
+}
+
+var obstacles = [];
+var securityGates = [];
+var zones = [];
+var props = [];
+var waypoints = [];
+var cameras = [];
+var enemies = [];
+
+let cachedVisionSegments = null;
+let cachedVisionFrame = -1;
+let currentFrameCount = 0;
+
+function setMapData(obs, sec, prp, zns, way, cam, lsr) {
+    obstacles = obs || [];
+    securityGates = sec || [];
+    props = prp || [];
+    zones = zns || [];
+    waypoints = way || [];
+    cameras = cam || [];
+    lasers = lsr || [];
+    cachedVisionSegments = null;
+    cachedVisionFrame = -1;
+    if (typeof navWaypointAdjacency !== 'undefined') navWaypointAdjacency = null;
+    window.obstacles = obstacles;
+    window.securityGates = securityGates;
+    window.props = props;
+    window.zones = zones;
+    window.waypoints = waypoints;
+    window.cameras = cameras;
+    window.lasers = lasers;
+}
+window.setMapData = setMapData;
+
+window.obstacles = obstacles;
+window.securityGates = securityGates;
+window.zones = zones;
+window.props = props;
+window.waypoints = waypoints;
+window.cameras = cameras;
+window.enemies = enemies;
+window.lasers = lasers;
+window.player = player;
+
+function initMapLayout() {
+    level3TargetSecured = false;
+    levelManager.loadCurrentLevel();
+    const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    if (currentLevelId === 'level0_test') {
+        unlockedWeapons = [WEAPONS.TRIPLE_SHOTGUN.id, WEAPONS.RUNE_SCYTHE.id, WEAPONS.LAVA_CIRCLE.id, WEAPONS.SOUL_SIPHON.id];
+        currentWeapon = WEAPONS.TRIPLE_SHOTGUN;
+    } else {
+        unlockedWeapons = [WEAPONS.RIFLE.id];
+        if (!currentWeapon || (currentWeapon.id === WEAPONS.MACHINE_GUN.id || currentWeapon.id === WEAPONS.UAV.id || currentWeapon.id === WEAPONS.TRIPLE_SHOTGUN.id || currentWeapon.id === WEAPONS.RUNE_SCYTHE.id || currentWeapon.id === WEAPONS.LAVA_CIRCLE.id || currentWeapon.id === WEAPONS.SOUL_SIPHON.id)) {
+            currentWeapon = WEAPONS.RIFLE;
+        }
+    }
+    window.currentWeapon = currentWeapon;
+    if (typeof window.onWeaponChange === 'function' && currentWeapon) {
+        window.onWeaponChange(currentWeapon.id);
+    }
+    level0StreakCount = 0;
+    level0MgAmmo = 0;
+    level0MgFirstUseDone = false;
+    level0UavAmmo = 0;
+    level0UavFirstUseDone = false;
+    level0InfiniteBlindTimer = 0;
+    level0InfiniteBlindPaused = false;
+    level0InfiniteBlindActiveLast = false;
+    if (currentLevelId === 'level3_bank') {
+        const cashRack = props.find(p => p.type === 'cash_rack' || (p.label && p.label.includes('CASH')));
+        let itemX = width - 180;
+        let itemY = height / 2;
+        if (cashRack) {
+            const x_vault_left = cashRack.x - 60;
+            itemX = x_vault_left + 110;
+            itemY = cashRack.y - 70;
+        }
+        dropItems.push({
+            x: itemX,
+            y: itemY,
+            type: 'classified_drive',
+            timer: Infinity
+        });
+    }
+    clampEntitiesOnResize();
+}
+
+function resizeCanvas() {
+    if (!ensureCanvas()) return;
+    width = window.innerWidth; height = window.innerHeight;
+    canvas.width = width; canvas.height = height;
+    initMapLayout();
+    clampEntitiesOnResize();
+}
+window.addEventListener('resize', resizeCanvas);
+
+function getRayIntersection(ray, segment) {
+    const r_px = ray.x, r_py = ray.y, r_dx = ray.dx, r_dy = ray.dy;
+    const s_px = segment.x1, s_py = segment.y1, s_dx = segment.x2 - segment.x1, s_dy = segment.y2 - segment.y1;
+
+    const denom = s_dx * r_dy - s_dy * r_dx;
+    if (denom > -1e-6 && denom < 1e-6) return null;
+
+    const T2 = (r_dx * (s_py - r_py) + r_dy * (r_px - s_px)) / denom;
+    if (T2 < 0 || T2 > 1) return null;
+
+    let T1;
+    if (Math.abs(r_dx) > 1e-6) {
+        T1 = (s_px + s_dx * T2 - r_px) / r_dx;
+    } else if (Math.abs(r_dy) > 1e-6) {
+        T1 = (s_py + s_dy * T2 - r_py) / r_dy;
+    } else {
+        return null;
+    }
+
+    if (T1 < 0) return null;
+    return { x: r_px + r_dx * T1, y: r_py + r_dy * T1, param: T1 };
+}
+
+function getVisionBlockingSegments() {
+    if (cachedVisionSegments && cachedVisionFrame === currentFrameCount) {
+        return cachedVisionSegments;
+    }
+    const segments = [];
+    obstacles.forEach(obs => {
+        if (obs.type === 'solid' || obs.type === 'low_wall' || obs.type === 'rock' || obs.type === 'poly_wall' || obs.type === 'stalagmite' || obs.type === 'obsidian' || obs.type === 'volcano' || obs.type === 'altar' || obs.type === 'monolith') {
+            if (obs.points && Array.isArray(obs.points)) {
+                const pts = obs.points;
+                for (let i = 0; i < pts.length; i++) {
+                    const p1 = pts[i];
+                    const p2 = pts[(i + 1) % pts.length];
+                    const minX = Math.min(p1.x, p2.x), maxX = Math.max(p1.x, p2.x);
+                    const minY = Math.min(p1.y, p2.y), maxY = Math.max(p1.y, p2.y);
+                    segments.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, minX, maxX, minY, maxY });
+                }
+            } else if (obs.arc) {
+                if (!obs._polyCache) obs._polyCache = arcToPolygon(obs.arc);
+                const pts = obs._polyCache;
+                for (let i = 0; i < pts.length; i++) {
+                    const p1 = pts[i];
+                    const p2 = pts[(i + 1) % pts.length];
+                    const minX = Math.min(p1.x, p2.x), maxX = Math.max(p1.x, p2.x);
+                    const minY = Math.min(p1.y, p2.y), maxY = Math.max(p1.y, p2.y);
+                    segments.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, minX, maxX, minY, maxY });
+                }
+            } else if (obs.x !== undefined && obs.w !== undefined && obs.h !== undefined) {
+                const x1 = obs.x, y1 = obs.y, x2 = obs.x + obs.w, y2 = obs.y + obs.h;
+                const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+                const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
+                segments.push(
+                    { x1: x1, y1: y1, x2: x2, y2: y1, minX: minX, maxX: maxX, minY: y1, maxY: y1 },
+                    { x1: x2, y1: y1, x2: x2, y2: y2, minX: x2, maxX: x2, minY: minY, maxY: maxY },
+                    { x1: x2, y1: y2, x2: x1, y2: y2, minX: minX, maxX: maxX, minY: y2, maxY: y2 },
+                    { x1: x1, y1: y2, x2: x1, y2: y1, minX: x1, maxX: x1, minY: minY, maxY: maxY }
+                );
+            }
+        }
+    });
+    // Closed heavy armored doors block vision like solid walls; open doors or glass doors do not block vision
+    if (typeof props !== 'undefined' && Array.isArray(props)) {
+        props.forEach(p => {
+            const isHeavyDoor = (p.type === 'heavy_auto_door' || (p.label && (p.label.includes('HEAVY AUTO DOOR') || p.label.includes('FIREPROOF') || p.label.includes('HEAVY DOOR'))));
+            if (isHeavyDoor && (p.openProgress === undefined || p.openProgress <= 0.4)) {
+                const x1 = p.x, y1 = p.y, x2 = p.x + p.w, y2 = p.y + p.h;
+                const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+                const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
+                segments.push(
+                    { x1: x1, y1: y1, x2: x2, y2: y1, minX: minX, maxX: maxX, minY: y1, maxY: y1 },
+                    { x1: x2, y1: y1, x2: x2, y2: y2, minX: x2, maxX: x2, minY: minY, maxY: maxY },
+                    { x1: x2, y1: y2, x2: x1, y2: y2, minX: minX, maxX: maxX, minY: y2, maxY: y2 },
+                    { x1: x1, y1: y2, x2: x1, y2: y1, minX: x1, maxX: x1, minY: minY, maxY: maxY }
+                );
+            }
+        });
+    }
+    cachedVisionSegments = segments;
+    cachedVisionFrame = currentFrameCount;
+    return segments;
+}
+
+function drawTacticalFOV(x, y, angle, fovAngle, maxDist, fillColor, strokeColor) {
+    const camX = window.cameraX || 0;
+    if (x < camX - maxDist - 80 || x > camX + width + maxDist + 80) {
+        return;
+    }
+    const allSegments = getVisionBlockingSegments();
+    
+    // Filter segments to only those within range of this field of view to vastly improve performance
+    const segments = allSegments.filter(seg => {
+        if (seg.maxX < x - maxDist - 10 || seg.minX > x + maxDist + 10) return false;
+        if (seg.maxY < y - maxDist - 10 || seg.minY > y + maxDist + 10) return false;
+        return true;
+    });
+
+    const rayCount = 64;
+    const startAngle = angle - fovAngle / 2;
+    const step = fovAngle / rayCount;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+
+    for (let i = 0; i <= rayCount; i++) {
+        const a = startAngle + step * i;
+        const ray = { x: x, y: y, dx: Math.cos(a) * maxDist, dy: Math.sin(a) * maxDist };
+
+        let closestHit = null;
+        let minParam = 1;
+
+        for (let j = 0; j < segments.length; j++) {
+            const hit = getRayIntersection(ray, segments[j]);
+            if (hit && hit.param < minParam) {
+                minParam = hit.param;
+                closestHit = hit;
+            }
+        }
+
+        const targetX = closestHit ? closestHit.x : x + ray.dx;
+        const targetY = closestHit ? closestHit.y : y + ray.dy;
+        ctx.lineTo(targetX, targetY);
+    }
+
+    ctx.closePath();
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+    if (strokeColor) {
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 1.6; // 增宽描边厚度以加强可见度与科技质感
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function getVisionConePolygon(originX, originY, angle, fovAngle, maxDist, segments, rayCount) {
+    if (!segments) segments = getVisionBlockingSegments();
+    
+    // Filter segments to only those within range of this field of view to vastly improve performance
+    const filteredSegments = segments.filter(seg => {
+        if (seg.maxX < originX - maxDist - 10 || seg.minX > originX + maxDist + 10) return false;
+        if (seg.maxY < originY - maxDist - 10 || seg.minY > originY + maxDist + 10) return false;
+        return true;
+    });
+
+    if (!rayCount) rayCount = 64;
+    const startAngle = angle - fovAngle / 2;
+    const step = fovAngle / rayCount;
+    const poly = [{ x: originX, y: originY }];
+
+    for (let i = 0; i <= rayCount; i++) {
+        const a = startAngle + step * i;
+        const ray = { x: originX, y: originY, dx: Math.cos(a) * maxDist, dy: Math.sin(a) * maxDist };
+
+        let closestHit = null;
+        let minParam = 1;
+
+        for (let j = 0; j < filteredSegments.length; j++) {
+            const hit = getRayIntersection(ray, filteredSegments[j]);
+            if (hit && hit.param < minParam) {
+                minParam = hit.param;
+                closestHit = hit;
+            }
+        }
+
+        const targetX = closestHit ? closestHit.x : originX + ray.dx;
+        const targetY = closestHit ? closestHit.y : originY + ray.dy;
+        poly.push({ x: targetX, y: targetY });
+    }
+    return poly;
+}
+
+function drawYellowHighlightedOutlines(polyPoints) {
+    if (!polyPoints || polyPoints.length < 3) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(polyPoints[0].x, polyPoints[0].y);
+    for (let i = 1; i < polyPoints.length; i++) {
+        ctx.lineTo(polyPoints[i].x, polyPoints[i].y);
+    }
+    ctx.closePath();
+    ctx.clip(); // 限制描边仅绘制在视锥覆盖的视线多边形内部
+
+    ctx.strokeStyle = '#FFE600'; // 战术高亮亮黄
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#FFE600';
+    ctx.shadowBlur = 4;
+
+    // 1. 掩体与墙体障碍物
+    if (typeof obstacles !== 'undefined' && Array.isArray(obstacles)) {
+        obstacles.forEach(obs => {
+            if (obs && obs.w && obs.h) {
+                ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+            }
+        });
+    }
+
+    // 2. 道具与设施
+    if (typeof props !== 'undefined' && Array.isArray(props)) {
+        props.forEach(p => {
+            if (p && p.w && p.h) {
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+            }
+        });
+    }
+
+    // 3. 闸机与安检门
+    if (typeof securityGates !== 'undefined' && Array.isArray(securityGates)) {
+        securityGates.forEach(g => {
+            if (g && g.w && g.h) {
+                ctx.strokeRect(g.x, g.y, g.w, g.h);
+            }
+        });
+    }
+
+    ctx.restore();
+}
+
+function drawNightShadowMask() {
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+    if (levelId !== 'level3_bank' || player.hp <= 0 || level3TargetSecured) return;
+
+    const segments = getVisionBlockingSegments();
+    const rayCount = 100;
+
+    // 1. 计算玩家当前半弧形视锥多边形
+    const effFov = (typeof getPlayerEffectiveFOV === 'function') ? getPlayerEffectiveFOV() : { fov: player.fov, viewDistance: player.viewDistance };
+    const playerPoly = getVisionConePolygon(player.x, player.y, player.angle, effFov.fov, effFov.viewDistance, segments, rayCount);
+
+    ctx.save();
+    ctx.beginPath();
+    // 全屏外框路径
+    ctx.rect(0, 0, width, height);
+
+    // 抠出玩家视锥区域
+    ctx.moveTo(playerPoly[0].x, playerPoly[0].y);
+    for (let i = 1; i < playerPoly.length; i++) {
+        ctx.lineTo(playerPoly[i].x, playerPoly[i].y);
+    }
+    ctx.closePath();
+
+    // 奇偶填充规则 (evenodd)：覆盖地图全屏，仅将玩家视锥区域掏空镂空
+    ctx.fillStyle = 'rgba(2, 6, 14, 0.88)';
+    ctx.fill('evenodd');
+    ctx.restore();
+
+    // 2. 绘制玩家视锥扫过区域的黄色高亮轮廓
+    drawYellowHighlightedOutlines(playerPoly);
+}
+
+// ⚠️ 核心规则 (CORE RULE)：本关卡（Level 0 / level0_test）中的所有内容、配置和修改皆与已有的 Level 1, 2, 3 完美隔离！
+function getLevelBounds() {
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+    if (levelId === 'level3_bank') {
+        return {
+            minX: 24 + 14,
+            maxX: width - 24 - 14,
+            minY: 80 + 14,
+            maxY: height - 110 - 14
+        };
+    } else if (levelId === 'level0_test') {
+        const mapWidth = window.level0MapWidth || 3200;
+        const mapHeight = window.level0MapHeight || 1000;
+        return {
+            minX: 20,
+            maxX: mapWidth - 20,
+            minY: 10,
+            maxY: mapHeight - 10
+        };
+    } else if (levelId === 'level6_train') {
+        const mapWidth = window.level6MapWidth || 7200;
+        const mapHeight = window.level6MapHeight || 240;
+        return {
+            minX: 20,
+            maxX: mapWidth - 20,
+            minY: 10,
+            maxY: mapHeight - 10
+        };
+    } else if (levelId === 'level7_lab') {
+        const mapWidth = window.level7MapWidth || 3200;
+        const mapHeight = window.level7MapHeight || 720;
+        return {
+            minX: 40 + 12,
+            maxX: mapWidth - 40 - 12,
+            minY: 40 + 12,
+            maxY: mapHeight - 40 - 12
+        };
+    } else if (levelId === 'level5_hotel') {
+        return {
+            minX: 40 + 12,
+            maxX: width - 40 - 12,
+            minY: 40 + 12,
+            maxY: height - 40 - 12
+        };
+    } else if (levelId === 'level4_yacht') {
+        const mapWidth = window.level4MapWidth || 2400;
+        return {
+            minX: 40 + 12,
+            maxX: mapWidth - 40 - 12,
+            minY: 40 + 12,
+            maxY: 720 - 40 - 12
+        };
+    } else { // level1_airport or level2_subway
+        return {
+            minX: 40 + 12,
+            maxX: width - 40 - 12,
+            minY: 40 + 12,
+            maxY: height - 40 - 12
+        };
+    }
+}
+
+// =========================================================================
+// Advanced Geometry Engine Helpers (Polygons, Arcs & Irregular Shapes)
+// =========================================================================
+function distToSegmentSquared(px, py, vx, vy, wx, wy) {
+    const l2 = (wx - vx) ** 2 + (wy - vy) ** 2;
+    if (l2 === 0) return (px - vx) ** 2 + (py - vy) ** 2;
+    let t = ((px - vx) * (wx - vx) + (py - vy) * (wy - vy)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return (px - (vx + t * (wx - vx))) ** 2 + (py - (vy + t * (wy - vy))) ** 2;
+}
+
+function isPointInPolygon(px, py, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i].x, yi = polygon[i].y;
+        const xj = polygon[j].x, yj = polygon[j].y;
+        const intersect = ((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
+
+function pointCircleRectCollision(cx, cy, r, rect) {
+    const rx = rect.x || 0;
+    const ry = rect.y || 0;
+    const rw = rect.w || 0;
+    const rh = rect.h || 0;
+    
+    const closestX = Math.max(rx, Math.min(cx, rx + rw));
+    const closestY = Math.max(ry, Math.min(cy, ry + rh));
+    
+    const dx = cx - closestX;
+    const dy = cy - closestY;
+    
+    return (dx * dx + dy * dy) <= (r * r);
+}
+
+function pointCirclePolygonCollision(cx, cy, r, polygon) {
+    if (!polygon || polygon.length < 3) return false;
+    if (isPointInPolygon(cx, cy, polygon)) return true;
+    const r2 = r * r;
+    for (let i = 0; i < polygon.length; i++) {
+        const p1 = polygon[i];
+        const p2 = polygon[(i + 1) % polygon.length];
+        if (distToSegmentSquared(cx, cy, p1.x, p1.y, p2.x, p2.y) <= r2) return true;
+    }
+    return false;
+}
+
+function arcToPolygon(arc) {
+    const { cx, cy, radius, startAngle, endAngle, thickness = 14 } = arc;
+    const steps = Math.max(8, Math.ceil(Math.abs(endAngle - startAngle) / (Math.PI / 12)));
+    const outerR = radius + thickness / 2;
+    const innerR = Math.max(0, radius - thickness / 2);
+    
+    const outerPts = [];
+    const innerPts = [];
+    for (let i = 0; i <= steps; i++) {
+        const a = startAngle + (endAngle - startAngle) * (i / steps);
+        outerPts.push({ x: cx + Math.cos(a) * outerR, y: cy + Math.sin(a) * outerR });
+        innerPts.unshift({ x: cx + Math.cos(a) * innerR, y: cy + Math.sin(a) * innerR });
+    }
+    return outerPts.concat(innerPts);
+}
+
+function lineIntersectsPolygon(x1, y1, x2, y2, polygon) {
+    if (!polygon || polygon.length < 3) return false;
+    if (isPointInPolygon(x1, y1, polygon) || isPointInPolygon(x2, y2, polygon)) {
+        return true;
+    }
+    for (let i = 0; i < polygon.length; i++) {
+        const p1 = polygon[i];
+        const p2 = polygon[(i + 1) % polygon.length];
+        if (lineIntersectsLine(x1, y1, x2, y2, p1.x, p1.y, p2.x, p2.y)) return true;
+    }
+    return false;
+}
+
+function ensureObstacleBBox(obs) {
+    if (obs._bbox) return obs._bbox;
+    if (obs.points && Array.isArray(obs.points) && obs.points.length > 0) {
+        let minX = obs.points[0].x, maxX = obs.points[0].x;
+        let minY = obs.points[0].y, maxY = obs.points[0].y;
+        for (let i = 1; i < obs.points.length; i++) {
+            const p = obs.points[i];
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+        }
+        obs._bbox = { minX, maxX, minY, maxY, w: maxX - minX, h: maxY - minY };
+    } else if (obs.arc) {
+        const { cx, cy, radius, thickness = 14 } = obs.arc;
+        const r = radius + thickness;
+        obs._bbox = { minX: cx - r, maxX: cx + r, minY: cy - r, maxY: cy + r, w: r * 2, h: r * 2 };
+    } else {
+        const x = obs.x || 0;
+        const y = obs.y || 0;
+        const w = obs.w || 0;
+        const h = obs.h || 0;
+        obs._bbox = { minX: x, maxX: x + w, minY: y, maxY: y + h, w, h };
+    }
+    return obs._bbox;
+}
+
+function checkObstacleCollision(x, y, radius = 16) {
+    const bounds = getLevelBounds();
+    if (x - radius < bounds.minX || x + radius > bounds.maxX || y - radius < bounds.minY || y + radius > bounds.maxY) {
+        return true;
+    }
+    const minX = x - radius;
+    const maxX = x + radius;
+    const minY = y - radius;
+    const maxY = y + radius;
+
+    for (let obs of obstacles) {
+        if (obs.type === 'pool' || obs.type === 'lava' || obs.type === 'ice_lake' || obs.type === 'ice') continue;
+        const bb = ensureObstacleBBox(obs);
+        if (bb.maxX < minX || bb.minX > maxX || bb.maxY < minY || bb.minY > maxY) {
+            continue;
+        }
+        if (obs.points && Array.isArray(obs.points)) {
+            if (pointCirclePolygonCollision(x, y, radius, obs.points)) return true;
+        } else if (obs.arc) {
+            if (!obs._polyCache) obs._polyCache = arcToPolygon(obs.arc);
+            if (pointCirclePolygonCollision(x, y, radius, obs._polyCache)) return true;
+        } else if (obs.x !== undefined && obs.w !== undefined && obs.h !== undefined) {
+            if (pointCircleRectCollision(x, y, radius, obs)) return true;
+        }
+    }
+    for (let p of props) {
+        if (p.noCollision) continue;
+        if (p.points && Array.isArray(p.points)) {
+            if (pointCirclePolygonCollision(x, y, radius, p.points)) return true;
+        } else if (p.w && p.h) {
+            if (x > p.x - radius && x < p.x + p.w + radius && y > p.y - radius && y < p.y + p.h + radius) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function ensureEntityInBounds(e, radius = 16) {
+    if (!e || (typeof e.hp === 'number' && e.hp <= 0)) return;
+    const bounds = getLevelBounds();
+    let clampedX = Math.max(bounds.minX + radius, Math.min(bounds.maxX - radius, e.x));
+    let clampedY = Math.max(bounds.minY + radius, Math.min(bounds.maxY - radius, e.y));
+
+    if (clampedX !== e.x || clampedY !== e.y || checkObstacleCollision(clampedX, clampedY, radius)) {
+        let found = false;
+        const searchAngles = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, -3 * Math.PI / 4, -Math.PI / 2, -Math.PI / 4];
+        for (let dist = 4; dist <= 64 && !found; dist += 10) {
+            for (let angle of searchAngles) {
+                const tx = clampedX + Math.cos(angle) * dist;
+                const ty = clampedY + Math.sin(angle) * dist;
+                if (!checkObstacleCollision(tx, ty, radius)) {
+                    clampedX = tx;
+                    clampedY = ty;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        e.x = clampedX;
+        e.y = clampedY;
+    }
+}
+
+function clampEntitiesOnResize() {
+    if (typeof player !== 'undefined' && player) {
+        ensureEntityInBounds(player, 20);
+    }
+    if (typeof enemies !== 'undefined' && Array.isArray(enemies)) {
+        enemies.forEach(e => {
+            ensureEntityInBounds(e, 16);
+            if (typeof waypoints !== 'undefined' && waypoints && waypoints.length > 0) {
+                if (e.targetWaypoint >= waypoints.length) {
+                    e.targetWaypoint = Math.floor(Math.random() * waypoints.length);
+                }
+            }
+        });
+    }
+}
+
+function turnAngleTowards(current, target, maxStep = 0.09) {
+    let diff = target - current;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    if (Math.abs(diff) <= maxStep) return target;
+    return current + Math.sign(diff) * maxStep;
+}
+
+var navWaypointAdjacency = null;
+
+function buildNavGraph() {
+    if (typeof waypoints === 'undefined' || !waypoints || waypoints.length === 0) {
+        navWaypointAdjacency = [];
+        return;
+    }
+    const n = waypoints.length;
+    navWaypointAdjacency = Array.from({ length: n }, () => []);
+    for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+            if (canSee(waypoints[i].x, waypoints[i].y, waypoints[j].x, waypoints[j].y)) {
+                navWaypointAdjacency[i].push(j);
+                navWaypointAdjacency[j].push(i);
+            }
+        }
+    }
+}
+
+// 局部几何切线拐角绕行 (Tangent Bug)：
+// 当敌人与目标之间被桌椅、立柱、安检门或墙体阻挡时，直接计算障碍物的外围拐点并绕行
+function getObstacleBypassWaypoint(fromX, fromY, toX, toY, radius = 18) {
+    if (canSee(fromX, fromY, toX, toY)) return null;
+    if (typeof checkLineObstacleIntersection !== 'function') return null;
+    const hitObs = checkLineObstacleIntersection(fromX, fromY, toX, toY);
+    if (!hitObs) return null;
+
+    const corners = [];
+    const buffer = radius + 14; // 外扩安全身位，保证不被障碍物边缘刮擦卡住
+
+    if (hitObs.points && Array.isArray(hitObs.points)) {
+        for (let pt of hitObs.points) {
+            corners.push({ x: pt.x - buffer, y: pt.y - buffer });
+            corners.push({ x: pt.x + buffer, y: pt.y - buffer });
+            corners.push({ x: pt.x + buffer, y: pt.y + buffer });
+            corners.push({ x: pt.x - buffer, y: pt.y + buffer });
+        }
+    } else if (hitObs.x !== undefined && hitObs.w !== undefined && hitObs.h !== undefined) {
+        const rx = hitObs.x, ry = hitObs.y, rw = hitObs.w, rh = hitObs.h;
+        corners.push({ x: rx - buffer, y: ry - buffer });
+        corners.push({ x: rx + rw + buffer, y: ry - buffer });
+        corners.push({ x: rx + rw + buffer, y: ry + rh + buffer });
+        corners.push({ x: rx - buffer, y: ry + rh + buffer });
+    }
+
+    if (corners.length === 0) return null;
+
+    let bestCorner = null;
+    let minCost = Infinity;
+
+    for (let c of corners) {
+        if (checkObstacleCollision(c.x, c.y, radius)) continue;
+        if (!canSee(fromX, fromY, c.x, c.y)) continue;
+
+        const dStart = Math.hypot(c.x - fromX, c.y - fromY);
+        const dTarget = Math.hypot(toX - c.x, toY - c.y);
+        const cost = dStart + dTarget;
+        if (cost < minCost) {
+            minCost = cost;
+            bestCorner = c;
+        }
+    }
+
+    return bestCorner;
+}
+
+// 敌人导航目标锁定与路径承诺系统 (Path Commitment System):
+// 解决“在面临多障碍、出口很远时走一半回头、来回徘徊”的致命 Bug
+function updateEnemyNavTarget(e, targetX, targetY) {
+    // 1. 如果对实际目标 (玩家) 拥有清晰直视通道，直接锁定目标，无需中转航点
+    if (canSee(e.x, e.y, targetX, targetY)) {
+        e.navLockTarget = null;
+        e.navLockTimer = 0;
+        return { x: targetX, y: targetY };
+    }
+
+    // 2. 航点锁定承诺：敌人一旦选中出口/中转航点，锁定 85 帧 (约 1.4 秒)，绝对禁止走一半中途变轨回头！
+    if (e.navLockTarget && e.navLockTimer > 0) {
+        e.navLockTimer--;
+        const distToLock = Math.hypot(e.navLockTarget.x - e.x, e.navLockTarget.y - e.y);
+        const isLockVisible = canSee(e.x, e.y, e.navLockTarget.x, e.navLockTarget.y);
+        
+        if (distToLock > 24 && isLockVisible && (e.stuckFrames || 0) < 25) {
+            return { x: e.navLockTarget.x, y: e.navLockTarget.y };
+        }
+    }
+
+    // 3. 重新检索并锁定新航点
+    const newWp = getNextNavWaypoint(e.x, e.y, targetX, targetY);
+    if (newWp) {
+        e.navLockTarget = { x: newWp.x, y: newWp.y };
+        e.navLockTimer = 85;
+        e.stuckFrames = 0;
+        return { x: newWp.x, y: newWp.y };
+    }
+
+    return { x: targetX, y: targetY };
+}
+
+function getNextNavWaypoint(fromX, fromY, toX, toY) {
+    // 1. 优先全局拓扑路径：跨房间/远距离导航时，优先获得过道/门洞航点
+    let nextGlobalWp = null;
+    if (typeof waypoints !== 'undefined' && waypoints && waypoints.length > 0) {
+        if (!navWaypointAdjacency || navWaypointAdjacency.length !== waypoints.length) {
+            buildNavGraph();
+        }
+        const n = waypoints.length;
+        if (n > 0) {
+            let startWpIdx = -1, minStartDist = Infinity;
+            for (let i = 0; i < n; i++) {
+                const d = Math.hypot(waypoints[i].x - fromX, waypoints[i].y - fromY);
+                if (canSee(fromX, fromY, waypoints[i].x, waypoints[i].y)) {
+                    if (d < minStartDist) { minStartDist = d; startWpIdx = i; }
+                }
+            }
+            if (startWpIdx === -1) {
+                minStartDist = Infinity;
+                for (let i = 0; i < n; i++) {
+                    const d = Math.hypot(waypoints[i].x - fromX, waypoints[i].y - fromY);
+                    if (d < minStartDist) { minStartDist = d; startWpIdx = i; }
+                }
+            }
+
+            let goalWpIdx = -1, minGoalDist = Infinity;
+            for (let i = 0; i < n; i++) {
+                const d = Math.hypot(waypoints[i].x - toX, waypoints[i].y - toY);
+                if (canSee(toX, toY, waypoints[i].x, waypoints[i].y)) {
+                    if (d < minGoalDist) { minGoalDist = d; goalWpIdx = i; }
+                }
+            }
+            if (goalWpIdx === -1) {
+                minGoalDist = Infinity;
+                for (let i = 0; i < n; i++) {
+                    const d = Math.hypot(waypoints[i].x - toX, waypoints[i].y - toY);
+                    if (d < minGoalDist) { minGoalDist = d; goalWpIdx = i; }
+                }
+            }
+
+            if (startWpIdx !== -1 && goalWpIdx !== -1) {
+                if (startWpIdx === goalWpIdx) {
+                    nextGlobalWp = waypoints[startWpIdx];
+                } else {
+                    const dist = new Array(n).fill(Infinity);
+                    const prev = new Array(n).fill(-1);
+                    const visited = new Array(n).fill(false);
+                    dist[startWpIdx] = 0;
+
+                    for (let count = 0; count < n; count++) {
+                        let u = -1, uDist = Infinity;
+                        for (let i = 0; i < n; i++) {
+                            if (!visited[i] && dist[i] < uDist) { uDist = dist[i]; u = i; }
+                        }
+                        if (u === -1 || u === goalWpIdx) break;
+                        visited[u] = true;
+
+                        const neighbors = (navWaypointAdjacency && navWaypointAdjacency[u]) ? navWaypointAdjacency[u] : [];
+                        for (let v of neighbors) {
+                            if (!visited[v]) {
+                                const edgeDist = Math.hypot(waypoints[u].x - waypoints[v].x, waypoints[u].y - waypoints[v].y);
+                                if (dist[u] + edgeDist < dist[v]) {
+                                    dist[v] = dist[u] + edgeDist;
+                                    prev[v] = u;
+                                }
+                            }
+                        }
+                    }
+
+                    let curr = goalWpIdx;
+                    const path = [];
+                    let safety = 0;
+                    while (curr !== -1 && safety++ < n + 2) {
+                        path.push(curr);
+                        if (curr === startWpIdx) break;
+                        curr = prev[curr];
+                    }
+
+                    if (path.length > 0 && path[path.length - 1] === startWpIdx) {
+                        path.reverse();
+                        const startWp = waypoints[path[0]];
+                        const dToStart = Math.hypot(startWp.x - fromX, startWp.y - fromY);
+                        
+                        if (path.length > 1) {
+                            const nextWp = waypoints[path[1]];
+                            if (canSee(fromX, fromY, nextWp.x, nextWp.y) && (dToStart < 35 || Math.hypot(nextWp.x - fromX, nextWp.y - fromY) < dToStart)) {
+                                nextGlobalWp = nextWp;
+                            }
+                        }
+                        if (!nextGlobalWp) {
+                            if (dToStart < 26 && path.length > 1) {
+                                nextGlobalWp = waypoints[path[1]];
+                            } else {
+                                nextGlobalWp = startWp;
+                            }
+                        }
+                    } else if (startWpIdx !== -1) {
+                        nextGlobalWp = waypoints[startWpIdx];
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. 前往全局出口航点时，如果直线路径上有桌椅/掩体等局部障碍，计算切线拐点绕过该局部桌椅
+    const destination = nextGlobalWp || { x: toX, y: toY };
+    const localBypass = getObstacleBypassWaypoint(fromX, fromY, destination.x, destination.y, 18);
+    if (localBypass) {
+        return localBypass;
+    }
+
+    if (nextGlobalWp) {
+        return nextGlobalWp;
+    }
+
+    // 3. 后备局部切线
+    return getObstacleBypassWaypoint(fromX, fromY, toX, toY, 18);
+}
+
+// 核心局部避障切线转向：防止敌人卡墙、沿墙死磕或抽搐
+function getObstacleSteeredHeading(e, targetX, targetY, speed, radius = 16) {
+    const distToTarget = Math.hypot(targetX - e.x, targetY - e.y);
+    if (distToTarget < 0.5) return e.angle;
+    const desiredAngle = Math.atan2(targetY - e.y, targetX - e.x);
+    
+    // 前方探针感知距离：严格限制不能超过到真实目标的距离，避免越过目标检测到其身后的墙体造成开阔地误判抽搐
+    const forwardStepDist = Math.min(Math.max(speed * 3.5, 20), distToTarget);
+    const fx = e.x + Math.cos(desiredAngle) * forwardStepDist;
+    const fy = e.y + Math.sin(desiredAngle) * forwardStepDist;
+    
+    // 直行完全畅通 (开阔地直行)
+    if (!checkObstacleCollision(fx, fy, radius)) {
+        if (e.navBiasTimer > 0) e.navBiasTimer--;
+        return desiredAngle;
+    }
+    
+    // 遇到障碍！稳定切向偏转（避免左右高频震荡抽搐）
+    if (!e.navBias || e.navBiasTimer <= 0) {
+        let leftClear = false, rightClear = false;
+        let leftAngle = 0, rightAngle = 0;
+        for (let a = 0.25; a <= 1.8; a += 0.25) {
+            const lx = e.x + Math.cos(desiredAngle + a) * forwardStepDist;
+            const ly = e.y + Math.sin(desiredAngle + a) * forwardStepDist;
+            if (!checkObstacleCollision(lx, ly, radius)) {
+                leftClear = true;
+                leftAngle = a;
+                break;
+            }
+        }
+        for (let a = 0.25; a <= 1.8; a += 0.25) {
+            const rx = e.x + Math.cos(desiredAngle - a) * forwardStepDist;
+            const ry = e.y + Math.sin(desiredAngle - a) * forwardStepDist;
+            if (!checkObstacleCollision(rx, ry, radius)) {
+                rightClear = true;
+                rightAngle = a;
+                break;
+            }
+        }
+        if (leftClear && rightClear) {
+            e.navBias = (leftAngle <= rightAngle) ? 1 : -1;
+        } else if (leftClear) {
+            e.navBias = 1;
+        } else if (rightClear) {
+            e.navBias = -1;
+        } else {
+            e.navBias = (Math.random() < 0.5 ? 1 : -1);
+        }
+        e.navBiasTimer = 45; // 持续保持该侧绕障偏置 45 帧，杜绝反复抽搐
+    } else {
+        e.navBiasTimer--;
+    }
+    
+    const bias = e.navBias;
+    const candidateOffsets = [
+        bias * 0.35, bias * 0.70, bias * 1.05, bias * 1.40, bias * 1.75, bias * 2.1,
+        -bias * 0.35, -bias * 0.70, -bias * 1.05, -bias * 1.40, -bias * 1.75
+    ];
+    
+    for (let offset of candidateOffsets) {
+        const testAngle = desiredAngle + offset;
+        const tx = e.x + Math.cos(testAngle) * forwardStepDist;
+        const ty = e.y + Math.sin(testAngle) * forwardStepDist;
+        if (!checkObstacleCollision(tx, ty, radius)) {
+            const stepX = e.x + Math.cos(testAngle) * speed;
+            const stepY = e.y + Math.sin(testAngle) * speed;
+            if (!checkObstacleCollision(stepX, stepY, radius)) {
+                return testAngle;
+            }
+        }
+    }
+    
+    // 全向脱困扫描
+    for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
+        const testA = desiredAngle + bias * a;
+        const stepX = e.x + Math.cos(testA) * speed;
+        const stepY = e.y + Math.sin(testA) * speed;
+        if (!checkObstacleCollision(stepX, stepY, radius)) {
+            return testA;
+        }
+    }
+    
+    return desiredAngle;
+}
+
+// 平滑物理移动与连续滑步
+function tryMoveEnemy(e, moveX, moveY, radius = 16) {
+    if (moveX === 0 && moveY === 0) return false;
+    const nextX = e.x + moveX;
+    const nextY = e.y + moveY;
+    
+    // 1. 直行一步
+    if (!checkObstacleCollision(nextX, nextY, radius)) {
+        e.x = nextX;
+        e.y = nextY;
+        e.stuckFrames = 0;
+        return true;
+    }
+    
+    // 2. 连续平滑沿墙滑动
+    const canMoveX = moveX !== 0 && !checkObstacleCollision(nextX, e.y, radius);
+    const canMoveY = moveY !== 0 && !checkObstacleCollision(e.x, nextY, radius);
+    
+    if (canMoveX && canMoveY) {
+        if (Math.abs(moveX) >= Math.abs(moveY)) {
+            e.x = nextX;
+        } else {
+            e.y = nextY;
+        }
+        e.stuckFrames = 0;
+        return true;
+    } else if (canMoveX) {
+        e.x = nextX;
+        e.stuckFrames = 0;
+        return true;
+    } else if (canMoveY) {
+        e.y = nextY;
+        e.stuckFrames = 0;
+        return true;
+    }
+
+    // 2.5 多边形与斜向切线平滑物理滑动 (Polygon Diagonal Edge Sliding)
+    // 解决 Level 0 多边形山石、石笋、熔岩边缘斜向卡墙抽搐问题
+    const bodyTightRadius = 12.5;
+    const diagX1 = moveX + moveY * 0.6, diagY1 = moveY + moveX * 0.6;
+    const diagX2 = moveX - moveY * 0.6, diagY2 = moveY - moveX * 0.6;
+    if (!checkObstacleCollision(e.x + diagX1, e.y + diagY1, bodyTightRadius)) {
+        e.x += diagX1;
+        e.y += diagY1;
+        e.stuckFrames = 0;
+        return true;
+    }
+    if (!checkObstacleCollision(e.x + diagX2, e.y + diagY2, bodyTightRadius)) {
+        e.x += diagX2;
+        e.y += diagY2;
+        e.stuckFrames = 0;
+        return true;
+    }
+
+    // 3. 缝隙与狭窄门洞挤压滑过 (Narrow Pass / Doorway Squeezing):
+    // 解决“缝隙较小/角度不对时卡住抽搐”问题：只要 12.5px 核心碰撞体可以通过，即可自动顺滑穿越门缝/桌缝！
+    if (radius > bodyTightRadius) {
+        if (!checkObstacleCollision(nextX, nextY, bodyTightRadius)) {
+            e.x = nextX;
+            e.y = nextY;
+            e.stuckFrames = 0;
+            return true;
+        }
+        const squeezeX = moveX !== 0 && !checkObstacleCollision(nextX, e.y, bodyTightRadius);
+        const squeezeY = moveY !== 0 && !checkObstacleCollision(e.x, nextY, bodyTightRadius);
+        if (squeezeX && squeezeY) {
+            e.x = nextX;
+            e.y = nextY;
+            e.stuckFrames = 0;
+            return true;
+        } else if (squeezeX) {
+            e.x = nextX;
+            e.stuckFrames = 0;
+            return true;
+        } else if (squeezeY) {
+            e.y = nextY;
+            e.stuckFrames = 0;
+            return true;
+        }
+    }
+
+    // 4. 稳定切向偏转（保持稳定 slideDir 30 帧偏置，禁止高频反转导致的抽搐）
+    const speed = Math.hypot(moveX, moveY);
+    const baseAngle = Math.atan2(moveY, moveX);
+    if (!e.slideDir || (e.slideDirTimer || 0) <= 0) {
+        e.slideDir = (e.navBias || (Math.random() < 0.5 ? 1 : -1));
+        e.slideDirTimer = 30;
+    } else {
+        e.slideDirTimer--;
+    }
+    
+    const offsets = [
+        e.slideDir * 0.35, e.slideDir * 0.7, e.slideDir * 1.05, e.slideDir * 1.4,
+        -e.slideDir * 0.35, -e.slideDir * 0.7, -e.slideDir * 1.05, -e.slideDir * 1.4
+    ];
+    for (let offset of offsets) {
+        const testA = baseAngle + offset;
+        const tx = e.x + Math.cos(testA) * speed;
+        const ty = e.y + Math.sin(testA) * speed;
+        if (!checkObstacleCollision(tx, ty, bodyTightRadius)) {
+            e.x = tx;
+            e.y = ty;
+            e.stuckFrames = 0;
+            return true;
+        }
+    }
+
+    // 5. 仅在深度卡死 (> 18 帧 / 约 0.3 秒) 时尝试反向或多向解困
+    e.stuckFrames = (e.stuckFrames || 0) + 1;
+    if (e.stuckFrames > 18) {
+        e.slideDir = -e.slideDir;
+        e.slideDirTimer = 30;
+        for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
+            const ex = e.x + Math.cos(baseAngle + a) * speed;
+            const ey = e.y + Math.sin(baseAngle + a) * speed;
+            if (!checkObstacleCollision(ex, ey, bodyTightRadius)) {
+                e.x = ex;
+                e.y = ey;
+                e.stuckFrames = 0;
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+// 避障朝向适配：由实际速度矢量驱动，不再发生正反角打架与扇形高频抽搐
+function adjustEnemyFacingToAvoidWalls(e) {
+    // Replaced by smooth velocity-aligned facing
+}
+
+// 智能巡逻航点选择 (带距离防抖与冰湖防误入逻辑)
+function selectNextWaypoint(e) {
+    if (typeof waypoints === 'undefined' || !waypoints || waypoints.length === 0) return;
+    if (waypoints.length === 1) {
+        e.targetWaypoint = 0;
+        return;
+    }
+    
+    const currInIce = typeof isEntityInIceLake === 'function' ? isEntityInIceLake(e.x, e.y) : false;
+    
+    // 优先从视线畅通且距离不过近 (> 40px) 的候选航点中选择，避免在两相邻航点间高频反向抽搐
+    const visibleCandidates = [];
+    const nonIceCandidates = [];
+    
+    for (let i = 0; i < waypoints.length; i++) {
+        if (i === e.targetWaypoint) continue;
+        const d = Math.hypot(waypoints[i].x - e.x, waypoints[i].y - e.y);
+        if (d > 40 && canSee(e.x, e.y, waypoints[i].x, waypoints[i].y)) {
+            visibleCandidates.push(i);
+            if (typeof isEntityInIceLake === 'function' && !isEntityInIceLake(waypoints[i].x, waypoints[i].y)) {
+                nonIceCandidates.push(i);
+            }
+        }
+    }
+    
+    // 若恶魔当前在冰湖中，优先寻找【冰湖外】的干燥陆地航点撤离冰湖；
+    // 若恶魔当前在陆地上，大幅降低前往冰湖内航点的概率 (优先选陆地航点)
+    if (nonIceCandidates.length > 0) {
+        if (currInIce || Math.random() < 0.88) {
+            e.targetWaypoint = nonIceCandidates[Math.floor(Math.random() * nonIceCandidates.length)];
+        } else if (visibleCandidates.length > 0) {
+            e.targetWaypoint = visibleCandidates[Math.floor(Math.random() * visibleCandidates.length)];
+        }
+    } else if (visibleCandidates.length > 0) {
+        e.targetWaypoint = visibleCandidates[Math.floor(Math.random() * visibleCandidates.length)];
+    } else {
+        // 无直视航点时，就近恢复到距离最近且有一定间隔的有效航点
+        let bestIdx = 0;
+        let bestDist = Infinity;
+        for (let i = 0; i < waypoints.length; i++) {
+            if (i === e.targetWaypoint && waypoints.length > 1) continue;
+            if (!currInIce && typeof isEntityInIceLake === 'function' && isEntityInIceLake(waypoints[i].x, waypoints[i].y) && Math.random() < 0.8) continue;
+            const d = Math.hypot(waypoints[i].x - e.x, waypoints[i].y - e.y);
+            if (d < bestDist && d > 20) {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+        e.targetWaypoint = bestIdx;
+    }
+    e.waypointPauseTimer = 16; // 到达航点后自然稍作停留 16 帧观察，禁止即刻掉头抽搐
+    e.stuckFrames = 0;
+    e.navBiasTimer = 0;
+}
+
+// 暗幕干扰者 (Jammer) 局部盲区触发函数
+function triggerJammerBlind(jammer, reason = 'triggered') {
+    if (!jammer || !jammer.isJammer || jammer.hp <= 0) return;
+    if (jammer.jammerBlindActive || (jammer.jammerBlindCooldown && jammer.jammerBlindCooldown > 0)) return;
+    
+    jammer.jammerBlindActive = true;
+    jammer.jammerZoneX = jammer.x;
+    jammer.jammerZoneY = jammer.y;
+    jammer.jammerBlindDuration = 540; // 持续 9 秒
+    jammer.jammerBlindCooldown = 360; // 冷却 6 秒
+    
+    // 发动盲区时立刻设定烟雾内战术闪避航向，绝不傻站中心
+    jammer.jammerEvadeAngle = Math.random() * Math.PI * 2;
+    jammer.jammerEvadeBurst = 30; // 30 帧战术闪避爆发加速
+    jammer.jammerEvadeTimer = 60;
+    
+    if (typeof createExplosion === 'function') {
+        createExplosion(jammer.x, jammer.y, 16, '#C084FC');
+    }
+    if (reason === 'damage') {
+        if (typeof addLog === 'function') addLog("⚠️ 暗幕干扰者遭受攻击，紧急发动局部盲区并战术变轨闪避！");
+    } else if (reason === 'proximity') {
+        if (typeof addLog === 'function') addLog("⚠️ 诱敌深入！暗幕干扰者近身瞬间引爆局部盲区！");
+    }
+}
+
+function checkLineObstacleIntersection(x1, y1, x2, y2) {
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+
+    let nearestObs = null;
+    let minIntersectDistSq = Infinity;
+
+    const checkDist = (obs, cx, cy) => {
+        const dSq = (cx - x1) * (cx - x1) + (cy - y1) * (cy - y1);
+        if (dSq < minIntersectDistSq) {
+            minIntersectDistSq = dSq;
+            nearestObs = obs;
+        }
+    };
+
+    for (let obs of obstacles) {
+        if (obs.type === 'pool' || obs.type === 'lava' || obs.type === 'ice_lake' || obs.type === 'ice') continue;
+        const bb = ensureObstacleBBox(obs);
+        if (bb.maxX < minX || bb.minX > maxX || bb.maxY < minY || bb.minY > maxY) {
+            continue;
+        }
+        let hit = false;
+        if (obs.points && Array.isArray(obs.points)) {
+            hit = lineIntersectsPolygon(x1, y1, x2, y2, obs.points);
+        } else if (obs.arc) {
+            if (!obs._polyCache) obs._polyCache = arcToPolygon(obs.arc);
+            hit = lineIntersectsPolygon(x1, y1, x2, y2, obs._polyCache);
+        } else if (obs.x !== undefined && obs.w !== undefined && obs.h !== undefined) {
+            hit = lineIntersectsRect(x1, y1, x2, y2, obs);
+        }
+
+        if (hit) {
+            const cx = bb.minX + (bb.maxX - bb.minX) * 0.5;
+            const cy = bb.minY + (bb.maxY - bb.minY) * 0.5;
+            checkDist(obs, cx, cy);
+        }
+    }
+
+    if (typeof props !== 'undefined' && Array.isArray(props)) {
+        for (let p of props) {
+            if (p.noCollision || (p.openProgress !== undefined && p.openProgress > 0.4)) continue;
+            if (p.points && Array.isArray(p.points)) {
+                if (lineIntersectsPolygon(x1, y1, x2, y2, p.points)) {
+                    const cx = p.x || (p.points[0] ? p.points[0].x : x1);
+                    const cy = p.y || (p.points[0] ? p.points[0].y : y1);
+                    checkDist(p, cx, cy);
+                }
+            } else {
+                const isGlassDoor = (p.type === 'auto_glass_door' || p.type === 'glass_sliding_door' || (p.label && (p.label.includes('AUTO GLASS DOOR') || p.label.includes('AUTO GATE'))));
+                const isHeavyDoor = (p.type === 'heavy_auto_door' || (p.label && (p.label.includes('HEAVY AUTO DOOR') || p.label.includes('FIREPROOF') || p.label.includes('HEAVY DOOR'))));
+                if (isGlassDoor || isHeavyDoor) {
+                    if (p.x + p.w < minX || p.x > maxX || p.y + p.h < minY || p.y > maxY) continue;
+                    if (lineIntersectsRect(x1, y1, x2, y2, p)) {
+                        checkDist({ ...p, type: isGlassDoor ? 'glass' : 'solid' }, p.x + p.w * 0.5, p.y + p.h * 0.5);
+                    }
+                }
+            }
+        }
+    }
+    return nearestObs;
+}
+
+function lineIntersectsRect(x1, y1, x2, y2, rect) {
+    const rx = rect.x, ry = rect.y, rw = rect.w, rh = rect.h;
+    // Check if either endpoint is inside the rect
+    if (x1 >= rx && x1 <= rx + rw && y1 >= ry && y1 <= ry + rh) return true;
+    if (x2 >= rx && x2 <= rx + rw && y2 >= ry && y2 <= ry + rh) return true;
+
+    // Check intersection with all 4 rectangle edges
+    if (lineIntersectsLine(x1, y1, x2, y2, rx, ry, rx + rw, ry)) return true;
+    if (lineIntersectsLine(x1, y1, x2, y2, rx + rw, ry, rx + rw, ry + rh)) return true;
+    if (lineIntersectsLine(x1, y1, x2, y2, rx + rw, ry + rh, rx, ry + rh)) return true;
+    if (lineIntersectsLine(x1, y1, x2, y2, rx, ry, rx, ry + rh)) return true;
+
+    return false;
+}
+
+function lineIntersectsLine(x1, y1, x2, y2, x3, y3, x4, y4) {
+    const denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
+    if (denom === 0) return false;
+    const ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom;
+    const ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom;
+    return (ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1);
+}
+
+function canSee(fromX, fromY, toX, toY) {
+    const minX = Math.min(fromX, toX);
+    const maxX = Math.max(fromX, toX);
+    const minY = Math.min(fromY, toY);
+    const maxY = Math.max(fromY, toY);
+    
+    for (let obs of obstacles) {
+        if (obs.type === 'pool' || obs.type === 'lava' || obs.type === 'ice_lake' || obs.type === 'ice') continue;
+        const bb = ensureObstacleBBox(obs);
+        if (bb.maxX < minX || bb.minX > maxX || bb.maxY < minY || bb.minY > maxY) {
+            continue;
+        }
+        if (obs.points && Array.isArray(obs.points)) {
+            if (lineIntersectsPolygon(fromX, fromY, toX, toY, obs.points)) return false;
+        } else if (obs.arc) {
+            if (!obs._polyCache) obs._polyCache = arcToPolygon(obs.arc);
+            if (lineIntersectsPolygon(fromX, fromY, toX, toY, obs._polyCache)) return false;
+        } else {
+            if (lineIntersectsRect(fromX, fromY, toX, toY, obs)) return false;
+        }
+    }
+
+    if (typeof props !== 'undefined' && Array.isArray(props)) {
+        for (let p of props) {
+            const isHeavyDoor = (p.type === 'heavy_auto_door' || (p.label && (p.label.includes('HEAVY AUTO DOOR') || p.label.includes('FIREPROOF') || p.label.includes('HEAVY DOOR'))));
+            if (isHeavyDoor && (p.openProgress === undefined || p.openProgress <= 0.4)) {
+                if (p.x + p.w < minX || p.x > maxX || p.y + p.h < minY || p.y > maxY) continue;
+                if (lineIntersectsRect(fromX, fromY, toX, toY, p)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+function isInFOV(target) {
+    if (!target) return false;
+    const playerInJammer = (typeof inJammerBlindZone === 'function') ? inJammerBlindZone(player.x, player.y).inZone : false;
+    const targetInJammer = (typeof inJammerBlindZone === 'function') ? inJammerBlindZone(target.x, target.y).inZone : false;
+
+    // 玩家如果处于盲区外，无法看穿盲区内的目标，必须深入！
+    if (!playerInJammer && targetInJammer) return false;
+    if (!playerInJammer && typeof isLineBlockedByJammerZone === 'function' && isLineBlockedByJammerZone(player.x, player.y, target.x, target.y)) return false;
+
+    const effFov = (typeof getPlayerEffectiveFOV === 'function') ? getPlayerEffectiveFOV() : { fov: player.fov, viewDistance: player.viewDistance };
+    const dx = target.x - player.x;
+    const dy = target.y - player.y;
+    const dist = Math.hypot(dx, dy);
+
+    // 1. 超出最大视角距离不可见
+    if (dist > effFov.viewDistance) return false;
+
+    // 2. 判断是否在玩家视野弧度扇形内
+    const targetAngle = Math.atan2(dy, dx);
+    let angleDiff = targetAngle - player.angle;
+
+    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+
+    if (Math.abs(angleDiff) > effFov.fov / 2) return false;
+
+    // 3. 检查是否有障碍物遮挡 (利用你原本的 canSee 函数)
+    return canSee(player.x, player.y, target.x, target.y);
+}
+
+function triggerGlobalAlarm() {
+    if (typeof soundManager !== 'undefined') {
+        soundManager.playAlarm();
+    }
+    const banner = document.getElementById('alarm-banner');
+    if (banner) {
+        const isEn = (window.__gameLang === 'en');
+        const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+        if (levelId === 'level6_train') {
+            banner.innerText = isEn ? "🚨 ARMORED TRAIN ALARM - FULL LOCKDOWN 🚨" : "🚨 装甲列车防务警报 - 全列全面封锁 🚨";
+        } else if (levelId === 'level7_lab') {
+            banner.innerText = isEn ? "🚨 APEX RESEARCH FACILITY ALARM - BIOHAZARD LOCKDOWN 🚨" : "🚨 顶石科研中心警报 - 生化危急封锁 🚨";
+        } else if (levelId === 'level0_test') {
+            banner.innerText = isEn ? "🚨 INFERNAL ABYSS ALARM - HIGH ALERT 🚨" : "🚨 地狱深渊警报 - 全域戒备 🚨";
+        } else if (levelId === 'level5_hotel') {
+            banner.innerText = isEn ? "🚨 HOTEL SECURITY ALARM - LOBBY ON HIGH ALERT 🚨" : "🚨 酒店安保警报 - 酒店大堂已进入全面戒备 🚨";
+        } else if (levelId === 'level3_bank') {
+            banner.innerText = isEn ? "🚨 VAULT SECURITY ALARM - BANK IN FULL LOCKDOWN 🚨" : "🚨 金库安全警报 - 中央银行已进入全面封锁 🚨";
+        } else if (levelId === 'level2_subway') {
+            banner.innerText = isEn ? "🚨 STATION SECURITY ALARM - SUBWAY IN FULL LOCKDOWN 🚨" : "🚨 地铁安全警报 - 地铁站已进入全面封锁 🚨";
+        } else if (levelId === 'level4_yacht') {
+            banner.innerText = isEn ? "🚨 VESSEL SECURITY ALARM - YACHT IN FULL LOCKDOWN 🚨" : "🚨 游艇安全警报 - 游艇全舰进入全面封锁 🚨";
+        } else {
+            banner.innerText = isEn ? "🚨 AIRPORT SECURITY ALARM - TERMINAL ON HIGH ALERT 🚨" : "🚨 机场安全警报 - 航站楼全区域戒备 🚨";
+        }
+        banner.style.display = 'block';
+    }
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    enemies.forEach(e => {
+        if (e.hp > 0 && e.spawnGraceTimer <= 0) {
+            e.alert = true;
+            e.alertCooldown = 300; 
+
+            // 远离敌人时触发警报：远端车厢外的敌人立即向玩家所在区域包抄围拢，避免跨节长途跋涉
+            if (levelId === 'level6_train') {
+                const pdx = e.x - player.x;
+                if (Math.abs(pdx) > 550) {
+                    const flankDir = pdx > 0 ? 1 : -1;
+                    const targetX = Math.max(60, Math.min(7140, player.x + flankDir * (340 + Math.random() * 160)));
+                    const targetY = (targetX >= 2400 && targetX <= 3600) ? 180 : 120;
+                    if (!checkObstacleCollision(targetX, targetY, 16)) {
+                        e.x = targetX;
+                        e.y = targetY;
+                        e.angle = Math.atan2(player.y - e.y, player.x - e.x);
+                        e.stuckFrames = 0;
+                    }
+                }
+            }
+        }
+    });
+}
+
+function spawnWave() {
+    enemies = [];
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+
+    if (levelId === 'level0_test') {
+        enemies = [];
+        let nextEnemyId = 1;
+
+        // 循序渐进的波次设计 (Progressive Hell Spawning)
+        if (wave <= 1) {
+            // 第 1 波：6 只先锋恶魔，分布在冰湖与熔岩前哨，难度适中平缓
+            const wave1Demons = [
+                { x: 500, y: 320, angle: Math.PI },      // 北侧冰湖崖边
+                { x: 620, y: 700, angle: 0 },            // 南侧冰湖深处
+                { x: 860, y: 480, angle: -Math.PI*0.5 }, // 熔岩桥头连接处
+                { x: 1080, y: 300, angle: Math.PI },     // 北熔岩池过道
+                { x: 1280, y: 680, angle: 0 },           // 南熔岩池通道
+                { x: 1520, y: 500, angle: 0 }            // 火山西侧高台
+            ];
+
+            wave1Demons.forEach((pos) => {
+                enemies.push({
+                    id: nextEnemyId++,
+                    x: pos.x,
+                    y: pos.y,
+                    angle: pos.angle,
+                    hp: 180,
+                    maxHp: 180,
+                    isDemon: true,
+                    isObserver: false,
+                    isCerberus: false,
+                    shield: 100,
+                    maxShield: 100,
+                    alert: false,
+                    alertCooldown: 0,
+                    pendingDamage: 0,
+                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    stuckFrames: 0,
+                    spawnGraceTimer: 60,
+                    confusedTimer: 0,
+                    confusedAngle: 0,
+                    patrolSpeed: 1.3,
+                    walkCycle: 0,
+                    hitTimer: 0,
+                    scanAngle: Math.random() * 6,
+                    shootCooldown: 0,
+                    deathAlpha: 1.0
+                });
+            });
+            addLog("🔥 地狱关卡 [第 1 波] - 6 名地狱先锋恶魔 (DEMON) 已进驻深渊要塞，保持戒备！");
+            return;
+        } else if (wave === 2) {
+            // 第 2 波：7 只恶魔 + 3 只地狱三头犬 (Cerberus)
+            const wave2Demons = [
+                { x: 520, y: 720, angle: 0 },
+                { x: 740, y: 460, angle: -Math.PI*0.5 },
+                { x: 960, y: 260, angle: Math.PI },
+                { x: 1120, y: 700, angle: 0 },
+                { x: 1420, y: 340, angle: Math.PI*0.5 },
+                { x: 1650, y: 660, angle: -Math.PI*0.5 },
+                { x: 1900, y: 480, angle: Math.PI }
+            ];
+
+            wave2Demons.forEach((pos) => {
+                enemies.push({
+                    id: nextEnemyId++,
+                    x: pos.x,
+                    y: pos.y,
+                    angle: pos.angle,
+                    hp: 180,
+                    maxHp: 180,
+                    isDemon: true,
+                    isObserver: false,
+                    isCerberus: false,
+                    shield: 100,
+                    maxShield: 100,
+                    alert: false,
+                    alertCooldown: 0,
+                    pendingDamage: 0,
+                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    stuckFrames: 0,
+                    spawnGraceTimer: 60,
+                    confusedTimer: 0,
+                    confusedAngle: 0,
+                    patrolSpeed: 1.3,
+                    walkCycle: 0,
+                    hitTimer: 0,
+                    scanAngle: Math.random() * 6,
+                    shootCooldown: 0,
+                    deathAlpha: 1.0
+                });
+            });
+
+            // 刷新 3 只地狱三头犬 (Cerberus)
+            const cerberusSpawns = [
+                { x: 920, y: 500, angle: 0 },           // 中央熔岩连桥
+                { x: 1350, y: 640, angle: -Math.PI*0.5 },// 火山南侧幽径
+                { x: 1720, y: 380, angle: Math.PI }     // 祭坛西门
+            ];
+
+            cerberusSpawns.forEach((pos) => {
+                enemies.push({
+                    id: nextEnemyId++,
+                    x: pos.x,
+                    y: pos.y,
+                    angle: pos.angle,
+                    hp: 260,
+                    maxHp: 260,
+                    isDemon: true,
+                    isCerberus: true,
+                    isObserver: false,
+                    shield: 160,
+                    maxShield: 160,
+                    alert: false,
+                    alertCooldown: 0,
+                    pendingDamage: 0,
+                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    stuckFrames: 0,
+                    spawnGraceTimer: 70,
+                    confusedTimer: 0,
+                    confusedAngle: 0,
+                    patrolSpeed: 1.4,
+                    walkCycle: 0,
+                    hitTimer: 0,
+                    scanAngle: Math.random() * 6,
+                    shootCooldown: 999999, // 无远程手段
+                    deathAlpha: 1.0,
+                    isPouncing: false,
+                    pounceTimer: 0,
+                    pounceCooldown: 0,
+                    tailCooldown: 0,
+                    tailLashAnim: 0,
+                    meleeCooldown: 0
+                });
+            });
+
+            addLog("🔥 地狱关卡 [第 2 波] - 恶魔结界破损，3 只【地狱三头犬】(CERBERUS) 踏炎现身！小心其龙尾定身与扑咬！");
+            return;
+        } else {
+            // 第 3 波及后续：8 只恶魔 + 4 只地狱三头犬 (Cerberus)
+            const wave3Demons = [
+                { x: 600, y: 320, angle: Math.PI },
+                { x: 820, y: 680, angle: 0 },
+                { x: 1100, y: 300, angle: Math.PI },
+                { x: 1320, y: 500, angle: 0 },
+                { x: 1550, y: 700, angle: -Math.PI*0.5 },
+                { x: 1800, y: 350, angle: Math.PI*0.5 },
+                { x: 2020, y: 500, angle: Math.PI },
+                { x: 2260, y: 500, angle: Math.PI }
+            ];
+
+            wave3Demons.forEach((pos) => {
+                enemies.push({
+                    id: nextEnemyId++,
+                    x: pos.x,
+                    y: pos.y,
+                    angle: pos.angle,
+                    hp: 190,
+                    maxHp: 190,
+                    isDemon: true,
+                    isObserver: false,
+                    isCerberus: false,
+                    shield: 110,
+                    maxShield: 110,
+                    alert: false,
+                    alertCooldown: 0,
+                    pendingDamage: 0,
+                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    stuckFrames: 0,
+                    spawnGraceTimer: 60,
+                    confusedTimer: 0,
+                    confusedAngle: 0,
+                    patrolSpeed: 1.3,
+                    walkCycle: 0,
+                    hitTimer: 0,
+                    scanAngle: Math.random() * 6,
+                    shootCooldown: 0,
+                    deathAlpha: 1.0
+                });
+            });
+
+            // 刷新 4 只地狱三头犬 (Cerberus)
+            const wave3Cerberus = [
+                { x: 950, y: 480, angle: 0 },
+                { x: 1420, y: 340, angle: Math.PI*0.5 },
+                { x: 1780, y: 620, angle: -Math.PI*0.5 },
+                { x: 2150, y: 500, angle: Math.PI }
+            ];
+
+            wave3Cerberus.forEach((pos) => {
+                enemies.push({
+                    id: nextEnemyId++,
+                    x: pos.x,
+                    y: pos.y,
+                    angle: pos.angle,
+                    hp: 260,
+                    maxHp: 260,
+                    isDemon: true,
+                    isCerberus: true,
+                    isObserver: false,
+                    shield: 160,
+                    maxShield: 160,
+                    alert: false,
+                    alertCooldown: 0,
+                    pendingDamage: 0,
+                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    stuckFrames: 0,
+                    spawnGraceTimer: 70,
+                    confusedTimer: 0,
+                    confusedAngle: 0,
+                    patrolSpeed: 1.4,
+                    walkCycle: 0,
+                    hitTimer: 0,
+                    scanAngle: Math.random() * 6,
+                    shootCooldown: 999999, // 无远程手段
+                    deathAlpha: 1.0,
+                    isPouncing: false,
+                    pounceTimer: 0,
+                    pounceCooldown: 0,
+                    tailCooldown: 0,
+                    tailLashAnim: 0,
+                    meleeCooldown: 0
+                });
+            });
+
+            addLog(`🔥 地狱关卡 [第 ${wave} 波·深渊决战] - 4 只狂暴【地狱三头犬】伴随恶魔禁卫发起狂暴总攻！`);
+            return;
+        }
+    }
+
+    const count = 2 + wave;
+    const bounds = getLevelBounds();
+    const minSpawnX = bounds.minX + 24;
+    const maxSpawnX = bounds.maxX - 24;
+    const minSpawnY = bounds.minY + 24;
+    const maxSpawnY = bounds.maxY - 24;
+
+    for (let i = 0; i < count; i++) {
+        let spawnX, spawnY, valid = false, attempts = 0;
+        while (!valid && attempts < 150) {
+            attempts++;
+            if (levelId === 'level6_train') {
+                // 装甲列车关卡专属刷新机制：敌人尽可能在玩家所在位置的前一节或后一节车厢刷新，避免在超长列车中找不到敌人
+                const playerCarIdx = Math.max(0, Math.min(5, Math.floor(player.x / 1200)));
+                const candidateCars = [];
+                if (playerCarIdx > 0) candidateCars.push(playerCarIdx - 1);
+                if (playerCarIdx < 5) candidateCars.push(playerCarIdx + 1);
+                candidateCars.push(playerCarIdx);
+
+                let chosenCar;
+                // 85%概率优先刷新在前后相邻车厢
+                if (candidateCars.length > 1 && Math.random() < 0.85) {
+                    const adjCars = candidateCars.filter(c => c !== playerCarIdx);
+                    chosenCar = adjCars[Math.floor(Math.random() * adjCars.length)];
+                } else {
+                    chosenCar = candidateCars[Math.floor(Math.random() * candidateCars.length)];
+                }
+
+                const carMinX = chosenCar * 1200 + 80;
+                const carMaxX = (chosenCar + 1) * 1200 - 80;
+                spawnX = carMinX + Math.random() * (carMaxX - carMinX);
+                spawnY = 55 + Math.random() * 130;
+            } else if (levelId === 'level7_lab') {
+                // 科研中心关卡：按分区刷新安保人员与生化武装守卫
+                const sectorZones = [
+                    { minX: 280, maxX: 680, minY: 150, maxY: 580 },
+                    { minX: 850, maxX: 1350, minY: 150, maxY: 580 },
+                    { minX: 1520, maxX: 1950, minY: 150, maxY: 580 },
+                    { minX: 2450, maxX: 3050, minY: 150, maxY: 580 }
+                ];
+                const sec = sectorZones[Math.floor(Math.random() * sectorZones.length)];
+                spawnX = sec.minX + Math.random() * (sec.maxX - sec.minX);
+                spawnY = sec.minY + Math.random() * (sec.maxY - sec.minY);
+            } else if (levelId === 'level3_bank') {
+                // 金库关卡：85%概率刷新在Zone A/B（0.20~0.68），15%概率刷新在Zone C走廊（0.68~0.74），严禁刷新在金库内部（>=0.75）
+                const vaultLeftBoundary = bounds.minX + (bounds.maxX - bounds.minX) * 0.74;
+                let randXFrac;
+                if (Math.random() < 0.85) {
+                    randXFrac = 0.20 + Math.random() * 0.48; // Zone A & B
+                } else {
+                    randXFrac = 0.68 + Math.random() * 0.06; // Zone C 走廊过道
+                }
+                spawnX = minSpawnX + (maxSpawnX - minSpawnX) * randXFrac;
+                spawnY = minSpawnY + Math.random() * (maxSpawnY - minSpawnY);
+
+                if (spawnX >= vaultLeftBoundary - 15) {
+                    continue; // 拒绝金库内部及门前紧贴区域的刷新
+                }
+            } else {
+                spawnX = minSpawnX + (maxSpawnX - minSpawnX) * (0.35 + Math.random() * 0.55);
+                spawnY = minSpawnY + Math.random() * (maxSpawnY - minSpawnY);
+            }
+
+            if (Math.hypot(spawnX - player.x, spawnY - player.y) > 280 && !checkObstacleCollision(spawnX, spawnY, 20)) {
+                valid = true;
+            }
+        }
+
+        if (!valid) {
+            if (levelId === 'level6_train') {
+                const pCar = Math.max(0, Math.min(5, Math.floor(player.x / 1200)));
+                const fallbackCar = (pCar < 5) ? (pCar + 1) : (pCar - 1);
+                spawnX = fallbackCar * 1200 + 600;
+                spawnY = 120;
+            } else if (levelId === 'level3_bank') {
+                spawnX = minSpawnX + (maxSpawnX - minSpawnX) * 0.45;
+                spawnY = minSpawnY + (maxSpawnY - minSpawnY) * 0.5;
+            } else {
+                spawnX = minSpawnX + (maxSpawnX - minSpawnX) * 0.7;
+                spawnY = minSpawnY + (maxSpawnY - minSpawnY) * 0.5;
+            }
+        }
+
+        // 敌人类型与波次刷新逻辑：
+        // 1. level0_test 为专有恶魔关卡，不生成观察者与暗幕者
+        // 2. 正式关卡第 3 波起刷新观察者 (Observer - 圆形护盾)
+        // 3. 正式关卡第 5 波及以后起，刷新新型暗幕者 (Jammer - 拥有半弧形一次性护盾与局部盲区技能)
+        let isJammerEnemy = false;
+        let isShieldObserver = false;
+
+        if (levelId !== 'level0_test') {
+            if (wave >= 5) {
+                // 第 5 波及以后：首名敌人必为暗幕者，其余敌人有 35% 几率刷新暗幕者，30% 几率刷新观察者
+                if (i === 0 || Math.random() < 0.35) {
+                    isJammerEnemy = true;
+                } else if (Math.random() < 0.45) {
+                    isShieldObserver = true;
+                }
+            } else if (wave >= 3) {
+                if (i === 0 || Math.random() < 0.4) {
+                    isShieldObserver = true;
+                }
+            }
+        }
+
+        // 暗幕者登场盲区：开场直接发动概率调低至 8%，成为极少见的特例战局惊喜
+        const startWithBlind = isJammerEnemy && (Math.random() < 0.08);
+        const newEnemy = {
+            id: i, x: spawnX, y: spawnY, angle: Math.PI, hp: 100, maxHp: 100,
+            isObserver: isShieldObserver,
+            isJammer: isJammerEnemy,
+            shield: (isJammerEnemy || isShieldObserver) ? 80 : 0, 
+            maxShield: (isJammerEnemy || isShieldObserver) ? 80 : 0,
+            jammerBlindActive: startWithBlind,
+            jammerZoneX: spawnX,
+            jammerZoneY: spawnY,
+            jammerBlindRadius: 130,
+            jammerBlindDuration: startWithBlind ? 540 : 0,
+            jammerBlindCooldown: 0,
+            jammerEvadeAngle: Math.random() * Math.PI * 2,
+            jammerEvadeTimer: 0,
+            jammerEvadeBurst: 0,
+            alert: false, alertCooldown: 0,
+            pendingDamage: 0,
+            targetWaypoint: waypoints.length > 0 ? Math.floor(Math.random() * waypoints.length) : 0,
+            stuckFrames: 0, 
+            spawnGraceTimer: 100,
+            confusedTimer: 0, confusedAngle: 0,
+            patrolSpeed: 1.0 + Math.random() * 0.3, walkCycle: 0, hitTimer: 0, scanAngle: Math.random() * 6, shootCooldown: 0,
+            deathAlpha: 1.0
+        };
+        ensureEntityInBounds(newEnemy, 16);
+        enemies.push(newEnemy);
+    }
+    let logWaveText = `第 ${wave} 波开始，检测到 ${count} 名敌军。`;
+    if (wave >= 5 && levelId !== 'level0_test') {
+        logWaveText += " ⚠️ 侦测到高危暗幕干扰者 (Jammer)！";
+    }
+    addLog(logWaveText);
+}
+
+window.addEventListener('keydown', e => { 
+    if (window.__viewState && window.__viewState !== 'playing') return;
+
+    if (e.code === 'Escape' || e.code === 'KeyP' || e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        togglePause();
+        return;
+    }
+    if (isPaused) return;
+
+    if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); toggleBlindZone(); }
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        e.preventDefault();
+        addLog("防弹衣默认持续生效中");
+    }
+    if (e.code === 'Digit1') {
+        const curLvl = getCurrentLevelId();
+        if (curLvl === 'level0_test') {
+            if (unlockedWeapons.includes(WEAPONS.TRIPLE_SHOTGUN.id)) switchWeapon(WEAPONS.TRIPLE_SHOTGUN);
+        } else {
+            if (unlockedWeapons.includes(WEAPONS.RIFLE.id)) switchWeapon(WEAPONS.RIFLE);
+        }
+    }
+    if (e.code === 'Digit2') {
+        const curLvl = getCurrentLevelId();
+        if (curLvl === 'level0_test') {
+            if (unlockedWeapons.includes(WEAPONS.RUNE_SCYTHE.id)) switchWeapon(WEAPONS.RUNE_SCYTHE);
+        } else if (unlockedWeapons.includes(WEAPONS.PISTOL.id)) {
+            switchWeapon(WEAPONS.PISTOL);
+        }
+    }
+    if (e.code === 'Digit3') {
+        const curLvl = getCurrentLevelId();
+        if (curLvl === 'level0_test') {
+            if (unlockedWeapons.includes(WEAPONS.LAVA_CIRCLE.id)) switchWeapon(WEAPONS.LAVA_CIRCLE);
+        } else if (unlockedWeapons.includes(WEAPONS.SMG.id)) {
+            switchWeapon(WEAPONS.SMG);
+        }
+    }
+    if (e.code === 'Digit4') {
+        const curLvl = getCurrentLevelId();
+        if (curLvl === 'level0_test') {
+            if (unlockedWeapons.includes(WEAPONS.SOUL_SIPHON.id)) switchWeapon(WEAPONS.SOUL_SIPHON);
+        } else if (unlockedWeapons.includes(WEAPONS.SNIPER.id)) {
+            switchWeapon(WEAPONS.SNIPER);
+        }
+    }
+    if (e.code === 'Digit5' && unlockedWeapons.includes(WEAPONS.GRENADE.id)) switchWeapon(WEAPONS.GRENADE);
+    if (e.code === 'Digit6') {
+        const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+        if (isKillstreakSupportedLevel(currentLevelId)) {
+            activateLevel0KillstreakReward(1);
+        } else if (WEAPONS.MACHINE_GUN && unlockedWeapons.includes(WEAPONS.MACHINE_GUN.id)) {
+            switchWeapon(WEAPONS.MACHINE_GUN);
+        }
+    }
+    if (e.code === 'Digit7') {
+        const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+        if (isKillstreakSupportedLevel(currentLevelId)) {
+            activateLevel0KillstreakReward(2);
+        } else if (WEAPONS.UAV && unlockedWeapons.includes(WEAPONS.UAV.id)) {
+            switchWeapon(WEAPONS.UAV);
+        }
+    }
+    if (e.code === 'Digit8') {
+        const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+        if (isKillstreakSupportedLevel(currentLevelId)) {
+            activateLevel0KillstreakReward(3);
+        }
+    }
+
+    if (e.code === 'KeyR' || e.key === 'r') { if(isGameOver) resetGame(); }
+    if (e.code === 'KeyE' || e.key === 'e' || e.key === 'E') {
+        if (window.__storyBriefingEnabled && window.__levelObjectiveAchieved && !isGameOver && !isPaused) {
+            if (typeof window.requestLevelExtract === 'function') {
+                window.requestLevelExtract();
+            }
+        }
+    }
+    keys[e.code] = true; keys[e.key.toLowerCase()] = true;
+});
+
+function togglePause(forcedState) {
+    if (window.__viewState && window.__viewState !== 'playing') {
+        isPaused = true;
+        if (typeof window.onGamePauseChange === 'function') {
+            window.onGamePauseChange(isPaused);
+        }
+        return true;
+    }
+    if (forcedState !== undefined) {
+        isPaused = forcedState;
+    } else {
+        isPaused = !isPaused;
+    }
+    if (isPaused) {
+        addLog("游戏已暂停");
+    } else {
+        addLog("游戏已继续");
+    }
+    if (typeof window.onGamePauseChange === 'function') {
+        window.onGamePauseChange(isPaused);
+    }
+    return isPaused;
+}
+
+let isMouseDown = false;
+window.addEventListener('keyup', e => { keys[e.code] = false; keys[e.key.toLowerCase()] = false; });
+window.addEventListener('mouseup', e => { if (e.button === 0) isMouseDown = false; });
+window.addEventListener('blur', () => { isMouseDown = false; });
+
+function setupCanvasListeners() {
+    if (!canvas) return;
+    canvas.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+    canvas.addEventListener('mousedown', e => { 
+        if (e.button === 0) {
+            isMouseDown = true;
+            const currentLevelId = getCurrentLevelId();
+            const mx = e.clientX;
+            const my = e.clientY;
+            const startY = height - 62;
+            const isLvl0 = (currentLevelId === 'level0_test');
+            const normalWps = isLvl0
+                ? [WEAPONS.TRIPLE_SHOTGUN, WEAPONS.RUNE_SCYTHE, WEAPONS.LAVA_CIRCLE, WEAPONS.SOUL_SIPHON]
+                : [WEAPONS.RIFLE, WEAPONS.PISTOL, WEAPONS.SMG, WEAPONS.SNIPER, WEAPONS.GRENADE];
+
+            // Bottom-Left Weapon Box Click Detection
+            if (my >= startY && my <= startY + 46) {
+                const boxSize = 46;
+                const gap = 10;
+                const startX = 25;
+                for (let i = 0; i < normalWps.length; i++) {
+                    const bx = startX + i * (boxSize + gap);
+                    if (mx >= bx && mx <= bx + boxSize) {
+                        const wp = normalWps[i];
+                        if (unlockedWeapons.includes(wp.id)) {
+                            switchWeapon(wp);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if (isKillstreakSupportedLevel(currentLevelId)) {
+                const mx = e.clientX;
+                const my = e.clientY;
+                const startY = height - 62;
+                const ksStartX = width - 180;
+
+                // Bottom-Right Killstreak HUD Icons Click Detection
+                if (my >= startY && my <= startY + 46) {
+                    if (mx >= ksStartX && mx <= ksStartX + 46) {
+                        activateLevel0KillstreakReward(1);
+                        return;
+                    }
+                    if (mx >= ksStartX + 56 && mx <= ksStartX + 102) {
+                        activateLevel0KillstreakReward(2);
+                        return;
+                    }
+                    if (mx >= ksStartX + 112 && mx <= ksStartX + 158) {
+                        activateLevel0KillstreakReward(3);
+                        return;
+                    }
+                }
+            }
+            shoot(); 
+        }
+    });
+
+    canvas.addEventListener('dblclick', e => {
+        if (blindActive && blindZone) {
+            const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+            const tx = e.clientX + ((levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') ? (window.cameraX || 0) : 0);
+            const ty = e.clientY - ((levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') ? (window.cameraY || 0) : 0);
+
+            if (inBlindZone(tx, ty)) {
+                // Prevent accidental teleport when clicking/shooting at enemies, cameras, gates, etc.
+                let nearThreat = false;
+                for (let enemy of enemies) {
+                    if (enemy.hp > 0 && Math.hypot(tx - enemy.x, ty - enemy.y) < 45) {
+                        nearThreat = true;
+                        break;
+                    }
+                }
+                if (nearThreat) {
+                    addLog("无法在目标附近瞬移");
+                    return;
+                }
+
+                const oldX = player.x;
+                const oldY = player.y;
+
+                let targetX = tx;
+                let targetY = ty;
+
+                // Check if destination is in an obstacle and needs adjustment
+                if (checkObstacleCollision(targetX, targetY, 22)) {
+                    let found = false;
+                    let maxXBound = width - 25;
+                    let maxYBound = height - 25;
+                    if (levelId === 'level4_yacht') {
+                        maxXBound = (window.level4MapWidth || 2400) - 25;
+                        maxYBound = 700 - 25;
+                    } else if (levelId === 'level0_test') {
+                        maxXBound = (window.level0MapWidth || 3200) - 25;
+                        maxYBound = (window.level0MapHeight || 1000) - 25;
+                    } else if (levelId === 'level6_train') {
+                        maxXBound = (window.level6MapWidth || 7200) - 25;
+                        maxYBound = (window.level6MapHeight || 240) - 25;
+                    } else if (levelId === 'level7_lab') {
+                        maxXBound = (window.level7MapWidth || 3200) - 25;
+                        maxYBound = (window.level7MapHeight || 720) - 25;
+                    }
+                    for (let d = 8; d <= 120 && !found; d += 8) {
+                        for (let angleIdx = 0; angleIdx < 24; angleIdx++) {
+                            const angle = (angleIdx / 24) * Math.PI * 2;
+                            const cx = targetX + Math.cos(angle) * d;
+                            const cy = targetY + Math.sin(angle) * d;
+
+                            if (cx >= 25 && cx <= maxXBound && cy >= 25 && cy <= maxYBound) {
+                                if (!checkObstacleCollision(cx, cy, 22)) {
+                                    targetX = cx;
+                                    targetY = cy;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Move player to target position
+                player.x = targetX;
+                player.y = targetY;
+
+                // Visual explosion feedback at start and end
+                createExplosion(oldX, oldY, 15, '#FFCC00');
+                createExplosion(targetX, targetY, 15, '#00FF66');
+                addLog("盲区瞬移成功");
+            }
+        }
+    });
+
+    canvas.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        if (blindActive && blindZone && currentWeapon.id === WEAPONS.GRENADE.id) {
+            const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+            const tx = e.clientX + ((levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') ? (window.cameraX || 0) : 0);
+            const ty = e.clientY - ((levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') ? (window.cameraY || 0) : 0);
+            if (inBlindZone(tx, ty)) {
+                if (!checkObstacleCollision(tx, ty, 12)) {
+                    traps.push({ x: tx, y: ty, pulseTimer: 0 });
+                    if (typeof soundManager !== 'undefined') soundManager.playTrap();
+                    createExplosion(tx, ty, 8, '#FF6600');
+                    addLog("诱饵陷阱部署成功");
+                } else {
+                    addLog("无法在掩体上部署陷阱");
+                }
+            } else {
+                addLog("只能在盲区内部署陷阱");
+            }
+        }
+    });
+}
+
+function switchWeapon(wp) {
+    currentWeapon = wp;
+    window.currentWeapon = currentWeapon;
+    if (!wp || wp.id !== WEAPONS.SOUL_SIPHON.id) {
+        player.demonPactStacks = 0;
+        player.demonPactTimer = 0;
+    }
+    addLog(`已装备: ${wp.name}`);
+    if (typeof soundManager !== 'undefined') {
+        soundManager.playReload();
+    }
+    if (typeof window.onWeaponChange === 'function' && wp) {
+        window.onWeaponChange(wp.id);
+    }
+}
+
+const WEAPON_NAME_MAP = {
+    "步枪": "Rifle",
+    "手枪": "Pistol",
+    "散弹枪": "Shotgun",
+    "霰弹枪": "Shotgun",
+    "冲锋枪": "SMG",
+    "狙击枪": "Sniper Rifle",
+    "手榴弹": "Grenade",
+    "机枪": "Machine Gun",
+    "重型三管猎枪": "Triple Shotgun",
+    "符文光镰": "Rune Scythe",
+    "地狱熔岩阵": "Lava Circle",
+    "灵魂汲取": "Soul Siphon",
+    "M240": "M240",
+    "UAV": "UAV Strike",
+    "UAV空袭": "UAV Strike",
+    "UAV打击": "UAV Strike",
+    "全图盲区": "Full Blind Zone"
+};
+
+const LEVEL_NAME_MAP = {
+    "第 6 关 · 装甲特快列车": "Level 06 · Armored Express Train",
+    "装甲特快列车": "Armored Express Train",
+    "远东极寒装甲列车": "Polar Armored Express Train",
+    "远东装甲列车": "Far East Armored Train",
+    "测试关卡（远东装甲列车）": "Test Sector · Armored Express Train",
+    "第 5 关 · 酒店大堂": "Level 05 · Hotel Lobby",
+    "酒店大堂": "Hotel Lobby",
+    "第 4 关 · 豪华超级游艇": "Level 04 · Luxury Super Yacht",
+    "豪华超级游艇": "Luxury Super Yacht",
+    "豪华游艇": "Luxury Yacht",
+    "超级游艇": "Luxury Yacht",
+    "第 3 关 · 中央银行金库": "Level 03 · Bank Vault",
+    "中央银行金库": "Bank Vault",
+    "银行金库": "Bank Vault",
+    "第 2 关 · 地铁站台": "Level 02 · Subway Station",
+    "地铁站台": "Subway Station",
+    "地下铁站台": "Subway Station",
+    "第 1 关 · 机场航站楼": "Level 01 · Airport Terminal",
+    "机场航站楼": "Airport Terminal",
+    "测试靶场": "Test Arena",
+    "测试战区": "Test Arena",
+    "平滑视口与音效基准": "Test Arena"
+};
+
+const LOG_TRANSLATION_MAP = {
+    "游戏已暂停": "Game paused",
+    "游戏已继续": "Game resumed",
+    "战术行动已就绪": "Tactical operation ready",
+    "防弹衣默认持续生效中": "Armor active",
+    "泳池内无法使用枪械": "Firearms disabled inside water",
+    "盲区已开启": "Blind Zone activated",
+    "能量不足，无法开启盲区！": "Insufficient energy for Blind Zone!",
+    "全图警报！": "SECTOR ALARM TRIGGERED!",
+    "安检门警报触发！所有区域戒备！": "Security gate alarm triggered! High alert!",
+    "战术平面图 100% 同步，完整地图已载入": "Tactical schematic synced, full map loaded",
+    "测试关卡 - 远东极寒装甲列车地图已载入，所有敌人已移除，可自由探索测试。": "Test Sector - Polar Armored Train loaded. Hostiles cleared for free exploration.",
+    "机枪弹药用尽！": "Machine Gun ammo depleted!",
+    "手榴弹无法扔出泳池外": "Grenades cannot exit pool area",
+    "盲区瞬移成功": "Teleport successful",
+    "无法在目标附近瞬移": "Cannot teleport near threat",
+    "诱饵陷阱部署成功": "Decoy trap deployed",
+    "无法在掩体上部署陷阱": "Cannot deploy trap on cover",
+    "只能在盲区内部署陷阱": "Decoy trap must be placed inside Blind Zone",
+    "观察者已被陷阱消灭": "Observer eliminated by decoy trap",
+    "拾取医疗包 (+35 生命值)": "Medkit acquired (+35 HP)",
+    "拾取补给 (+50 防弹衣 / +40 能量)": "Supplies acquired (+50 Armor / +40 Energy)",
+    "💾 已获取绝密数据芯片！区域主电源已重启，照明系统恢复。": "💾 Classified data secured! Main power restored, full lighting enabled.",
+    "全图盲区效果已到期": "Full Blind Zone duration expired",
+    "UAV 轰炸次数已用尽": "UAV Strike charges depleted",
+    "⚡ [连杀数重置] 全图盲区开启，连杀数归零": "⚡ [Streak Reset] Full Blind Zone active, streak reset to 0",
+    "⚡ 已装备 [机枪] (30发子弹)。首次开火时将重置连杀数": "⚡ Equipped [Machine Gun] (30 rounds). Streak resets on first shot",
+    "⚡ 已装备 [UAV打击] (5次爆破)。首次打击时将重置连杀数": "⚡ Equipped [UAV Strike] (5 charges). Streak resets on first strike",
+    "⚡ [机枪首次开火] 连杀数重置为0": "⚡ [MG First Shot] Streak reset to 0",
+    "⚡ [UAV首次打击] 连杀数重置为0": "⚡ [UAV First Strike] Streak reset to 0",
+    "⚡ 已选中 [全图无限盲区] (7秒就绪)！(按 Space 键或 8 键手动开启)": "⚡ Selected [Full Blind Zone] (7s ready)! Press Space or 8 to activate",
+    "⚡ [3连杀达成] 机枪已就绪！按数字键 6 或点击右下角图标使用": "⚡ [3 Kills] Machine Gun ready! Press 6 or click icon",
+    "⚡ [5连杀达成] UAV打击已就绪！按数字键 7 或点击右下角图标使用": "⚡ [5 Kills] UAV Strike ready! Press 7 or click icon",
+    "⚡ [7连杀达成] 全图无限盲区已就绪！按数字键 8 或点击右下角图标使用": "⚡ [7 Kills] Full Blind Zone ready! Press 8 or click icon",
+    "⚡ 再次达到 7 连杀！刷新 [全图无限盲区] 预备时间为 7 秒！(按 Space 键或 8 键开启)": "⚡ [7 Kills Again] Refreshed Full Blind Zone to 7s! (Press Space or 8)"
+};
+
+function translateLogMessage(msg) {
+    if (window.__gameLang !== 'en') return msg;
+    if (LOG_TRANSLATION_MAP[msg]) return LOG_TRANSLATION_MAP[msg];
+    
+    // Level loading & debug messages
+    if (msg.startsWith("[开发调试] 测试关卡已载入: ")) {
+        const rawName = msg.replace("[开发调试] 测试关卡已载入: ", "").trim();
+        const enName = LEVEL_NAME_MAP[rawName] || rawName;
+        return `[Dev Debug] Test Sector loaded: ${enName}`;
+    }
+    if (msg.startsWith("已加载地图: ") || msg.startsWith("已加载地图：")) {
+        const rawName = msg.replace(/^已加载地图[:：]\s*/, "").trim();
+        const enName = LEVEL_NAME_MAP[rawName] || rawName;
+        return `Level loaded: ${enName}`;
+    }
+    if (msg.includes("地图加载成功") || msg.includes("加载成功") || msg.includes("载入成功")) {
+        let out = msg.replace("地图加载成功", "Map loaded successfully")
+                     .replace("加载成功", "Loaded successfully")
+                     .replace("载入成功", "Loaded successfully")
+                     .replace("已加载地图", "Level loaded");
+        for (const [zh, en] of Object.entries(LEVEL_NAME_MAP)) {
+            out = out.split(zh).join(en);
+        }
+        return out;
+    }
+
+    // Equipment & pickups
+    if (msg.startsWith("已装备: ")) {
+        const rawName = msg.replace("已装备: ", "").trim();
+        const enName = WEAPON_NAME_MAP[rawName] || rawName;
+        return `Equipped: ${enName}`;
+    }
+    if (msg.startsWith("拾取武器: ")) {
+        let rawName = msg.replace("拾取武器: ", "").replace(/\[|\]/g, "").trim();
+        const enName = WEAPON_NAME_MAP[rawName] || rawName;
+        return `Weapon acquired: [${enName}]`;
+    }
+    if (msg.startsWith("解锁新武器: ")) {
+        let rawName = msg.replace("解锁新武器: ", "").replace(/\[|\]|！/g, "").trim();
+        const enName = WEAPON_NAME_MAP[rawName] || rawName;
+        return `New weapon unlocked: [${enName}]!`;
+    }
+
+    // Wave announcements
+    if (msg.startsWith("第 ") && msg.includes(" 波开始，检测到 ") && msg.includes(" 名敌军。")) {
+        return msg.replace("第 ", "Wave ").replace(" 波开始，检测到 ", " started, detected ").replace(" 名敌军。", " hostiles.");
+    }
+    if (msg.startsWith("测试靶场第 ") && msg.includes(" 波: 生成 ") && msg.includes(" 个巡逻靶标。")) {
+        return msg.replace("测试靶场第 ", "Test Arena Wave ").replace(" 波: 生成 ", ": Spawned ").replace(" 个巡逻靶标。", " patrol targets.");
+    }
+
+    // Killstreaks unlock/lock
+    if (msg.includes("未解锁！需 3 连杀")) {
+        return msg.replace("❌ [机枪] 未解锁！需 3 连杀 (当前: ", "❌ [Machine Gun] Locked! Requires 3 kills (Current: ").replace(")", ")");
+    }
+    if (msg.includes("未解锁！需 5 连杀")) {
+        return msg.replace("❌ [UAV打击] 未解锁！需 5 连杀 (当前: ", "❌ [UAV Strike] Locked! Requires 5 kills (Current: ").replace(")", ")");
+    }
+    if (msg.includes("未解锁！需 7 连杀")) {
+        return msg.replace("❌ [全图无限盲区] 未解锁！需 7 连杀 (当前: ", "❌ [Full Blind Zone] Locked! Requires 7 kills (Current: ").replace(")", ")");
+    }
+
+    // Killstreak repeats
+    if (msg.includes("再次达到 3 连杀！")) {
+        return msg.replace("⚡ 再次达到 3 连杀！装备机枪并补充 30 发子弹 (当前: ", "⚡ [3 Kills Again] Equipped Machine Gun (+30 rounds, Total: ").replace(")", ")");
+    }
+    if (msg.includes("再次达到 5 连杀！")) {
+        return msg.replace("⚡ 再次达到 5 连杀！装备 UAV 并补充 5 次爆破打击 (当前: ", "⚡ [5 Kills Again] Equipped UAV Strike (+5 charges, Total: ").replace(")", ")");
+    }
+    if (msg.includes("补充 30 发机枪弹药！")) {
+        return msg.replace("⚡ [再次解锁连杀] 补充 30 发机枪弹药！(当前弹药: ", "⚡ [Streak Reward] +30 Machine Gun ammo! (Current: ").replace(")", ")");
+    }
+    if (msg.includes("补充 5 次 UAV 爆破打击！")) {
+        return msg.replace("⚡ [再次解锁连杀] 补充 5 次 UAV 爆破打击！(当前次数: ", "⚡ [Streak Reward] +5 UAV Strikes! (Current: ").replace(")", ")");
+    }
+
+    // Ammo / Status
+    if (msg.includes("机枪装备中")) {
+        return msg.replace("机枪装备中 (当前弹药: ", "Machine Gun equipped (Ammo: ").replace(")", ")");
+    }
+    if (msg.includes("装备机枪")) {
+        return msg.replace("装备机枪 (剩余弹药: ", "Equipped Machine Gun (Ammo: ").replace(")", ")");
+    }
+    if (msg.includes("UAV 打击准备中")) {
+        return msg.replace("UAV 打击准备中 (当前剩余: ", "UAV Strike ready (Remaining: ").replace(" 次)", "x)");
+    }
+    if (msg.includes("装备 UAV打击")) {
+        return msg.replace("装备 UAV打击 (剩余次数: ", "Equipped UAV Strike (Remaining: ").replace(")", ")");
+    }
+
+    // UAV Hit
+    if (msg.includes("UAV 打击命中坐标")) {
+        return msg.replace("⚡ UAV 打击命中坐标 (", "⚡ UAV Strike hit at (")
+                  .replace(")！(剩余 ", ") (Remaining: ")
+                  .replace(" 次)", "x)");
+    }
+
+    // Blind zone toggles
+    if (msg.startsWith("盲区已关闭")) {
+        return msg.replace("盲区已关闭 (能量耗尽)", "Blind Zone collapsed (Energy Depleted)")
+                  .replace("盲区已关闭 (手动关闭)", "Blind Zone deactivated (Manual)")
+                  .replace("盲区已关闭 (已瓦解)", "Blind Zone collapsed");
+    }
+    if (msg.includes("全图盲区已手动开启")) {
+        return msg.replace("⚡ [全图盲区已手动开启] 剩余 ", "⚡ [Full Blind Zone active] Remaining ");
+    }
+    if (msg.includes("全图盲区已暂停")) {
+        return msg.replace("⏸ [全图盲区已暂停] 剩余 ", "⏸ [Full Blind Zone paused] Remaining ")
+                  .replace(" (按 Space 或 8 键可随时重新开启)", " (Press Space or 8 to resume)");
+    }
+    if (msg.includes("全图盲区暂停/结算")) {
+        return msg.replace("⚡ [全图盲区暂停/结算] 剩余 ", "⚡ [Full Blind Zone settled] Remaining ")
+                  .replace("，结算盲区延迟伤害 (", ", settled delayed damage on ")
+                  .replace(" 个敌人)", " enemies");
+    }
+
+    // Fallback: replace any lingering standard terms
+    let out = msg;
+    for (const [zh, en] of Object.entries(WEAPON_NAME_MAP)) {
+        out = out.split(zh).join(en);
+    }
+    for (const [zh, en] of Object.entries(LEVEL_NAME_MAP)) {
+        out = out.split(zh).join(en);
+    }
+    return out;
+}
+
+function addLog(text) {
+    const log = document.getElementById('log-panel');
+    if (!log) return;
+    const line = document.createElement('div');
+    line.setAttribute('data-raw-text', text);
+    line.innerText = "> " + translateLogMessage(text);
+    log.appendChild(line);
+    if(log.children.length > 5) log.removeChild(log.children[0]);
+}
+window.addLog = addLog;
+
+function refreshLogPanelLanguage() {
+    const log = document.getElementById('log-panel');
+    if (!log) return;
+    Array.from(log.children).forEach(child => {
+        const raw = child.getAttribute('data-raw-text') || child.innerText.replace(/^>\s*/, '');
+        child.setAttribute('data-raw-text', raw);
+        child.innerText = "> " + translateLogMessage(raw);
+    });
+}
+window.refreshLogPanelLanguage = refreshLogPanelLanguage;
+
+function createExplosion(x, y, count = 15, color = null) {
+    const isLevel0 = (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test');
+    let chosenColor = color;
+    if (isLevel0) {
+        // 在 Level 0 中，爆炸和恶魔受击/死亡粒子绝不能出现绿色或蓝色
+        if (!chosenColor || chosenColor === '#00FF66' || chosenColor === '#00CCFF' || chosenColor === '#00E5FF' || chosenColor === '#00FF00' || chosenColor === '#38bdf8' || chosenColor === '#60a5fa' || chosenColor === '#93c5fd' || chosenColor === '#22c55e' || chosenColor === '#10b981') {
+            chosenColor = Math.random() < 0.6 ? '#ff2200' : (Math.random() < 0.5 ? '#f43f5e' : '#f97316');
+        }
+    } else {
+        if (!chosenColor) {
+            chosenColor = Math.random() > 0.3 ? '#FF3344' : '#f43f5e';
+        }
+    }
+    for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 1.5 + Math.random() * 4.5;
+        particles.push({
+            x: x, y: y,
+            vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+            life: 25 + Math.random() * 15, maxLife: 40,
+            color: chosenColor
+        });
+    }
+    if (particles.length > 120) {
+        particles.splice(0, particles.length - 120);
+    }
+}
+
+function findReachableDropLocation(origX, origY) {
+    const bounds = getLevelBounds();
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    const isTrainLevel = (levelId === 'level6_train');
+    
+    // Check if point is inside or dangerously close to any prop (seats, desks, tables, counters, toilets, etc.)
+    function isBlockedByProp(px, py, margin = 14) {
+        if (typeof props === 'undefined' || !props || !props.length) return false;
+        for (let p of props) {
+            const pw = p.w || 24;
+            const ph = p.h || 24;
+            if (px >= p.x - margin && px <= p.x + pw + margin &&
+                py >= p.y - margin && py <= p.y + ph + margin) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Train level specialized handling: central aisle is between y=95 and y=145 (center y=120)
+    if (isTrainLevel) {
+        let testX = Math.max(bounds.minX + 25, Math.min(bounds.maxX - 25, origX));
+        let testY = origY;
+
+        // If inside or behind north seats/structures (y < 88), push down to open aisle (y: 104)
+        if (origY < 88) {
+            testY = 104;
+        } else if (origY > 152) {
+            // If inside or behind south seats/structures (y > 152), push up to open aisle (y: 136)
+            testY = 136;
+        }
+
+        if (!checkObstacleCollision(testX, testY, 20) && !isBlockedByProp(testX, testY, 12)) {
+            return { x: testX, y: testY };
+        }
+    }
+
+    // Bank level teller desk handling
+    if (levelId === 'level3_bank') {
+        let tellerX = -1;
+        if (typeof obstacles !== 'undefined') {
+            const tg = obstacles.find(o => o.label === 'TELLER GLASS' || (o.type === 'glass' && o.label && o.label.includes('TELLER')));
+            if (tg) tellerX = tg.x;
+        }
+        if (tellerX > 0 && origX >= tellerX - 8 && origX <= tellerX + 55) {
+            origX = (origX < tellerX + 22) ? (tellerX - 22) : (tellerX + 65);
+        }
+    }
+
+    // Check if the original position is already open and reachable
+    if (!checkObstacleCollision(origX, origY, 22) && !isBlockedByProp(origX, origY, 14)) {
+        return { x: origX, y: origY };
+    }
+
+    // Search outward radially for the closest open, walkable point
+    const angles = [
+        0, Math.PI / 2, Math.PI, -Math.PI / 2,
+        Math.PI / 4, 3 * Math.PI / 4, -3 * Math.PI / 4, -Math.PI / 4,
+        Math.PI / 8, 3 * Math.PI / 8, 5 * Math.PI / 8, 7 * Math.PI / 8,
+        -Math.PI / 8, -3 * Math.PI / 8, -5 * Math.PI / 8, -7 * Math.PI / 8
+    ];
+
+    for (let dist = 16; dist <= 150; dist += 12) {
+        for (let angle of angles) {
+            let tx = origX + Math.cos(angle) * dist;
+            let ty = origY + Math.sin(angle) * dist;
+
+            // In train levels, avoid moving further toward exterior walls
+            if (isTrainLevel) {
+                if (origY < 90 && ty < origY) continue;
+                if (origY > 150 && ty > origY) continue;
+            }
+
+            if (tx - 20 < bounds.minX || tx + 20 > bounds.maxX || ty - 20 < bounds.minY || ty + 20 > bounds.maxY) {
+                continue;
+            }
+
+            if (!checkObstacleCollision(tx, ty, 20) && !isBlockedByProp(tx, ty, 12)) {
+                return { x: tx, y: ty };
+            }
+        }
+    }
+
+    // Fallback: relax prop clearance
+    for (let dist = 12; dist <= 160; dist += 16) {
+        for (let angle of angles) {
+            let tx = origX + Math.cos(angle) * dist;
+            let ty = origY + Math.sin(angle) * dist;
+            if (!checkObstacleCollision(tx, ty, 18)) {
+                return { x: tx, y: ty };
+            }
+        }
+    }
+
+    return { x: origX, y: origY };
+}
+
+function spawnDropItem(x, y) {
+    const reachable = findReachableDropLocation(x, y);
+    x = reachable.x;
+    y = reachable.y;
+
+    const rand = Math.random();
+    if (rand < 0.7) { 
+        const curLvl = getCurrentLevelId();
+        if (curLvl === 'level0_test') {
+            if (rand < 0.35) {
+                dropItems.push({ x, y, type: 'medkit', timer: 700 });
+            } else {
+                dropItems.push({ x, y, type: 'battery', timer: 700 });
+            }
+        } else {
+            if (rand < 0.25) {
+                dropItems.push({ x, y, type: 'medkit', timer: 700 });
+            } else if (rand < 0.50) {
+                dropItems.push({ x, y, type: 'battery', timer: 700 });
+            } else {
+                const allWps = [WEAPONS.PISTOL, WEAPONS.SNIPER, WEAPONS.SMG, WEAPONS.GRENADE];
+                const lockedWps = allWps.filter(w => !unlockedWeapons.includes(w.id));
+                const wpToDrop = lockedWps.length > 0 ? lockedWps[Math.floor(Math.random() * lockedWps.length)] : allWps[Math.floor(Math.random() * allWps.length)];
+                dropItems.push({ x, y, type: 'weapon', weaponData: wpToDrop, timer: 700 });
+            }
+        }
+    }
+}
+
+function toggleBlindZone() {
+    if (player.hp <= 0 || isGameOver || isPaused) return;
+
+    // 处于暗幕干扰者 (Jammer) 局部盲区压制内时，玩家无法启动自己的盲区发生器！
+    if (typeof inJammerBlindZone === 'function') {
+        const jammerState = inJammerBlindZone(player.x, player.y);
+        if (jammerState && jammerState.inZone) {
+            addLog("⚠️ 处于暗幕干扰者 (Jammer) 盲区压制内，战术盲区发生器被强力干扰无法启动！");
+            if (typeof soundManager !== 'undefined' && soundManager.playAlarm) soundManager.playAlarm();
+            if (typeof createExplosion === 'function') createExplosion(player.x, player.y, 8, '#C084FC');
+            return;
+        }
+    }
+
+    const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    if (isKillstreakSupportedLevel(currentLevelId) && level0InfiniteBlindTimer > 0) {
+        if (blindActive) {
+            pauseInfiniteBlindZone();
+        } else {
+            resumeInfiniteBlindZone();
+        }
+        return;
+    }
+    if (!blindActive) {
+        if (blindEnergy >= 15) {
+            blindActive = true;
+            const curLvl = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+            blindZone = { x: player.x, y: player.y, radius: (curLvl === 'level0_test' ? 300 : 240) };
+            addLog("盲区已开启");
+            if (typeof soundManager !== 'undefined') {
+                soundManager.playBlindZone();
+            }
+        } else {
+            addLog("能量不足，无法开启盲区！");
+        }
+    } else {
+        closeBlindZone("MANUAL DEACTIVATION");
+    }
+}
+
+function closeBlindZone(reason = "COLLAPSED") {
+    if (!blindActive && level0InfiniteBlindTimer <= 0) return;
+    const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    if (isKillstreakSupportedLevel(currentLevelId) && level0InfiniteBlindTimer > 0 && reason === "MANUAL DEACTIVATION") {
+        pauseInfiniteBlindZone();
+        return;
+    }
+    blindActive = false;
+    blindZone = null;
+    level0InfiniteBlindTimer = 0;
+    level0InfiniteBlindPaused = false;
+    level0InfiniteBlindActiveLast = false;
+    addLog(`盲区已关闭 (${reason === "ENERGY DEPLETED" ? "能量耗尽" : (reason === "MANUAL DEACTIVATION" ? "手动关闭" : "已瓦解")})`);
+    if (typeof soundManager !== 'undefined') {
+        soundManager.stopBlindZone();
+    }
+    
+    enemies.forEach(e => {
+        if (e.pendingDamage > 0) {
+            applyDamageToEnemy(e, e.pendingDamage);
+            e.pendingDamage = 0;
+            if (currentLevelId !== 'level0_test') {
+                e.alert = true; e.alertCooldown = 300;
+            }
+            e.hitTimer = 8;
+            createExplosion(e.x, e.y, 20);
+        }
+    });
+}
+
+function triggerSoulSacrificeEffect(x, y) {
+    bloodSacrificeSeals.push({
+        x: x, y: y,
+        radius: 12, maxRadius: 82,
+        timer: 0, duration: 150,
+        rotation: Math.random() * Math.PI * 2
+    });
+
+    for (let k = 0; k < 24; k++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spd = 2.0 + Math.random() * 3.5;
+        particles.push({
+            x: x + Math.cos(ang) * 12,
+            y: y + Math.sin(ang) * 12,
+            vx: Math.cos(ang) * spd + (player.x - x) * 0.02,
+            vy: Math.sin(ang) * spd - 2,
+            life: 35 + Math.floor(Math.random() * 20),
+            maxLife: 55,
+            color: Math.random() < 0.5 ? '#f43f5e' : (Math.random() < 0.5 ? '#fda4af' : '#fb7185'),
+            isSoulStreamer: true
+        });
+    }
+
+    createExplosion(x, y, 28, '#f43f5e');
+}
+
+function applyDamageToEnemy(enemy, amount, isSoulSiphon = false) {
+    const isUsingSoulSiphon = (currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id);
+    if (isUsingSoulSiphon && player.demonPactStacks > 0 && player.demonPactTimer > 0) {
+        amount = Math.round(amount * (1 + player.demonPactStacks * 0.15));
+    }
+    const wasAlive = enemy.hp > 0;
+
+    // 暗幕干扰者遭受攻击时立即发动局部盲区并在烟雾内战术闪避变轨
+    if (enemy.isJammer && wasAlive) {
+        if (typeof triggerJammerBlind === 'function') {
+            triggerJammerBlind(enemy, 'damage');
+        }
+        if (enemy.jammerBlindActive) {
+            enemy.jammerEvadeAngle = Math.random() * Math.PI * 2;
+            enemy.jammerEvadeBurst = 25; // 25 帧闪避机动加速
+            enemy.jammerEvadeTimer = 45;
+            if (typeof createExplosion === 'function') {
+                createExplosion(enemy.x, enemy.y, 8, '#C084FC');
+            }
+        }
+    }
+    if (enemy.shield > 0) {
+        const isDemon = enemy.isDemon || (getCurrentLevelId() === 'level0_test');
+        if (enemy.shield >= amount) {
+            enemy.shield -= amount;
+            createExplosion(enemy.x, enemy.y, 6, isDemon ? '#f97316' : (enemy.isJammer ? '#C084FC' : '#00CCFF'));
+            return;
+        } else {
+            const overflow = amount - enemy.shield;
+            enemy.shield = 0;
+            enemy.hp -= overflow;
+            createExplosion(enemy.x, enemy.y, enemy.isJammer ? 12 : 6, isDemon ? '#ff2200' : (enemy.isJammer ? '#C084FC' : '#FF3344'));
+            if (enemy.isJammer) {
+                for (let k = 0; k < 10; k++) {
+                    particles.push({
+                        x: enemy.x, y: enemy.y,
+                        vx: (Math.random() - 0.5) * 4.5,
+                        vy: (Math.random() - 0.5) * 4.5,
+                        life: 18, maxLife: 18,
+                        color: '#C084FC'
+                    });
+                }
+                if (typeof addLog === 'function') addLog("🛡️ 暗幕者的半弧形护盾已碎裂！");
+            }
+        }
+    } else {
+        enemy.hp -= amount;
+        const isDemon = enemy.isDemon || (getCurrentLevelId() === 'level0_test');
+        createExplosion(enemy.x, enemy.y, 8, isDemon ? '#ff2200' : '#FF3344');
+    }
+
+    if (wasAlive && enemy.hp <= 0) {
+        killCount++;
+        if (enemy.isJammer) {
+            enemy.jammerBlindActive = false;
+            if (typeof addLog === 'function') addLog("⚡ 暗幕干扰者已被击毙，局部盲区消散！");
+        }
+        const currentLevelId = getCurrentLevelId();
+        if (isKillstreakSupportedLevel(currentLevelId)) {
+            const isUsingReward = (currentWeapon.id === WEAPONS.MACHINE_GUN.id || currentWeapon.id === WEAPONS.UAV.id || (level0InfiniteBlindTimer > 0 && blindActive));
+            if (!isUsingReward) {
+                level0StreakCount++;
+                if (level0StreakCount === 3) {
+                    if (typeof addLog === 'function') addLog("⚡ [3连杀达成] 机枪已就绪！按数字键 6 或点击右下角图标使用");
+                    createExplosion(player.x, player.y, 16, '#FF9900');
+                } else if (level0StreakCount === 5) {
+                    if (typeof addLog === 'function') addLog("⚡ [5连杀达成] UAV打击已就绪！按数字键 7 或点击右下角图标使用");
+                    createExplosion(player.x, player.y, 20, '#00E5FF');
+                } else if (level0StreakCount === 7) {
+                    if (typeof addLog === 'function') addLog("⚡ [7连杀达成] 全图无限盲区已就绪！按数字键 8 或点击右下角图标使用");
+                    createExplosion(player.x, player.y, 24, '#E024FF');
+                }
+            }
+        }
+        if (enemy.isCerberus) {
+            if (typeof addLog === 'function') addLog("💀 狂暴的地狱三头犬轰然解体！三首湮灭为黑曜石碎屑与熄灭火星！");
+            createExplosion(enemy.x, enemy.y, 35, '#ff2200');
+            createExplosion(enemy.x, enemy.y, 25, '#f97316');
+            createExplosion(enemy.x, enemy.y, 18, '#10b981');
+        }
+        const isDemonDeath = enemy.isDemon || (currentLevelId === 'level0_test');
+        const killedBySoulSiphon = isUsingSoulSiphon && (isSoulSiphon || enemy.killedBySoulSiphon);
+        if (isDemonDeath && killedBySoulSiphon) {
+            triggerSoulSacrificeEffect(enemy.x, enemy.y);
+        } else if (isDemonDeath) {
+            createExplosion(enemy.x, enemy.y, 22, Math.random() < 0.6 ? '#ff2200' : '#f43f5e');
+        } else {
+            createExplosion(enemy.x, enemy.y, 18);
+        }
+        spawnDropItem(enemy.x, enemy.y);
+    }
+}
+
+function inBlindZone(x, y) {
+    if (!blindActive) return false;
+    if (level0InfiniteBlindTimer > 0) {
+        return true;
+    }
+    if (!blindZone) return false;
+    const dx = x - blindZone.x, dy = y - blindZone.y;
+    return (dx*dx + dy*dy) <= blindZone.radius * blindZone.radius;
+}
+
+function inJammerBlindZone(x, y) {
+    if (typeof enemies === 'undefined' || !enemies) return { inZone: false, jammer: null };
+    for (let i = 0; i < enemies.length; i++) {
+        const en = enemies[i];
+        if (en.hp > 0 && en.isJammer && en.jammerBlindActive) {
+            const rad = en.jammerBlindRadius || 130;
+            const zx = (typeof en.jammerZoneX === 'number') ? en.jammerZoneX : en.x;
+            const zy = (typeof en.jammerZoneY === 'number') ? en.jammerZoneY : en.y;
+            const dx = x - zx, dy = y - zy;
+            if ((dx * dx + dy * dy) <= rad * rad) {
+                return { inZone: true, jammer: en, radius: rad, zoneX: zx, zoneY: zy };
+            }
+        }
+    }
+    return { inZone: false, jammer: null };
+}
+
+function isLineBlockedByJammerZone(x1, y1, x2, y2) {
+    if (typeof enemies === 'undefined' || !enemies) return false;
+    for (let i = 0; i < enemies.length; i++) {
+        const en = enemies[i];
+        if (en.hp > 0 && en.isJammer && en.jammerBlindActive) {
+            const rad = en.jammerBlindRadius || 130;
+            const zx = (typeof en.jammerZoneX === 'number') ? en.jammerZoneX : en.x;
+            const zy = (typeof en.jammerZoneY === 'number') ? en.jammerZoneY : en.y;
+            
+            // 如果起点已在盲区内，说明玩家已深入盲区，视线不在此处做全局阻断（由深入逻辑和视锥扫射判定负责）
+            const d1Sq = (x1 - zx) * (x1 - zx) + (y1 - zy) * (y1 - zy);
+            if (d1Sq <= rad * rad) continue;
+            
+            // 玩家在盲区外：如果目标终点在盲区内，视线直接被阻断
+            const d2Sq = (x2 - zx) * (x2 - zx) + (y2 - zy) * (y2 - zy);
+            if (d2Sq <= rad * rad) return true;
+            
+            // 玩家和目标都在盲区外，但视线穿过了暗幕盲区圆（暗幕遮蔽视线）
+            const dx = x2 - x1, dy = y2 - y1;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq > 0) {
+                const t = Math.max(0, Math.min(1, ((zx - x1) * dx + (zy - y1) * dy) / lenSq));
+                const projX = x1 + t * dx;
+                const projY = y1 + t * dy;
+                const distSq = (zx - projX) * (zx - projX) + (zy - projY) * (zy - projY);
+                if (distSq <= rad * rad) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function getPlayerEffectiveFOV() {
+    const jammerCheck = inJammerBlindZone(player.x, player.y);
+    if (jammerCheck.inZone) {
+        return {
+            fov: Math.PI / 4.2,      // 局部盲区内视野角度狭窄 (约43度)
+            viewDistance: 160         // 局部盲区内视野距离严重衰减 (160px)
+        };
+    }
+    return {
+        fov: player.fov,
+        viewDistance: player.viewDistance
+    };
+}
+
+function isEntityInPool(x, y) {
+    const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    if (currentLevelId !== 'level4_yacht' && currentLevelId !== 'level0_test') return false;
+    for (let obs of obstacles) {
+        if (obs.type === 'pool' || obs.label === 'SWIMMING POOL') {
+            if (x >= obs.x && x <= obs.x + obs.w && y >= obs.y && y <= obs.y + obs.h) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function isEntityInIceLake(x, y, radius = 16) {
+    if (typeof obstacles === 'undefined' || !obstacles) return false;
+    for (let obs of obstacles) {
+        if (obs.type === 'ice_lake' || obs.type === 'ice') {
+            if (obs.points && Array.isArray(obs.points)) {
+                if (isPointInPolygon(x, y, obs.points)) return true;
+                if (radius > 0 && typeof pointCirclePolygonCollision === 'function') {
+                    if (pointCirclePolygonCollision(x, y, radius, obs.points)) return true;
+                }
+            } else if (obs.x !== undefined && obs.w !== undefined && obs.h !== undefined) {
+                if (x >= obs.x - radius && x <= obs.x + obs.w + radius && y >= obs.y - radius && y <= obs.y + obs.h + radius) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function isEntityInLava(x, y, radius = 16) {
+    if (typeof obstacles === 'undefined' || !obstacles) return false;
+    for (let obs of obstacles) {
+        if (obs.type === 'lava') {
+            if (obs.points && Array.isArray(obs.points)) {
+                if (isPointInPolygon(x, y, obs.points)) return true;
+                if (radius > 0 && typeof pointCirclePolygonCollision === 'function') {
+                    if (pointCirclePolygonCollision(x, y, radius, obs.points)) return true;
+                }
+            } else if (obs.x !== undefined && obs.w !== undefined && obs.h !== undefined) {
+                if (x >= obs.x - radius && x <= obs.x + obs.w + radius && y >= obs.y - radius && y <= obs.y + obs.h + radius) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function shoot() {
+    if (player.hp <= 0 || isGameOver || isPaused || shootCooldownTimer > 0) return;
+    
+    if (cachedIsPlayerInPool && currentWeapon.type !== 'grenade') {
+        if (typeof addLog === 'function') {
+            addLog("泳池内无法使用枪械");
+        }
+        return;
+    }
+
+    const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+
+    if (isKillstreakSupportedLevel(currentLevelId) && currentWeapon.id === WEAPONS.MACHINE_GUN.id) {
+        if (level0MgAmmo <= 0) {
+            if (typeof addLog === 'function') addLog("机枪弹药用尽！");
+            switchWeapon(WEAPONS.RIFLE);
+            return;
+        }
+        if (!level0MgFirstUseDone) {
+            level0StreakCount = 0;
+            level0MgFirstUseDone = true;
+            if (typeof addLog === 'function') addLog("⚡ [机枪首次开火] 连杀数重置为0");
+        }
+        level0MgAmmo--;
+    }
+
+    if (isKillstreakSupportedLevel(currentLevelId) && currentWeapon.type === 'uav') {
+        if (level0UavAmmo <= 0) {
+            if (typeof addLog === 'function') addLog("UAV 轰炸次数已用尽");
+            if (unlockedWeapons.includes(WEAPONS.MACHINE_GUN.id) && level0MgAmmo > 0) {
+                switchWeapon(WEAPONS.MACHINE_GUN);
+            } else {
+                switchWeapon(WEAPONS.RIFLE);
+            }
+            return;
+        }
+
+        if (!level0UavFirstUseDone) {
+            level0StreakCount = 0;
+            level0UavFirstUseDone = true;
+            if (typeof addLog === 'function') addLog("⚡ [UAV首次打击] 连杀数重置为0");
+        }
+
+        level0UavAmmo--;
+        shootCooldownTimer = currentWeapon.cooldown;
+        const worldMouse = getWorldMouse();
+        const tx = worldMouse.x;
+        const ty = worldMouse.y;
+
+        if (typeof soundManager !== 'undefined') {
+            soundManager.playShoot('grenade');
+        }
+
+        const isLvl0Uav = (getCurrentLevelId() === 'level0_test');
+        createExplosion(tx, ty, 30, isLvl0Uav ? '#ff2200' : '#00FF66');
+        createExplosion(tx, ty, 25, '#FF5500');
+        createExplosion(tx, ty, 15, '#FFFFFF');
+
+        for (let i = 0; i < 25; i++) {
+            particles.push({
+                x: tx + (Math.random() - 0.5) * 40,
+                y: ty + (Math.random() - 0.5) * 40,
+                vx: (Math.random() - 0.5) * 8,
+                vy: (Math.random() - 0.5) * 8,
+                life: 30 + Math.random() * 20,
+                maxLife: 50,
+                color: isLvl0Uav
+                    ? (Math.random() < 0.5 ? '#ff2200' : (Math.random() < 0.5 ? '#f97316' : '#ffffff'))
+                    : (Math.random() < 0.5 ? '#00FF66' : '#00E5FF')
+            });
+        }
+
+        if (typeof addLog === 'function') {
+            addLog(`⚡ UAV 打击命中坐标 (${Math.round(tx)}, ${Math.round(ty)})！(剩余 ${level0UavAmmo} 次)`);
+        }
+
+        enemies.forEach(e => {
+            if (e.hp <= 0) return;
+            const dist = Math.hypot(e.x - tx, e.y - ty);
+            if (dist <= (currentWeapon.blastRadius || 180)) {
+                e.shield = 0;
+                applyDamageToEnemy(e, 99999);
+                e.hitTimer = 10;
+                createExplosion(e.x, e.y, 25, '#FF3344');
+            }
+        });
+
+        if (level0UavAmmo <= 0) {
+            setTimeout(() => {
+                if (currentWeapon.id === WEAPONS.UAV.id) {
+                    if (unlockedWeapons.includes(WEAPONS.MACHINE_GUN.id)) {
+                        switchWeapon(WEAPONS.MACHINE_GUN);
+                    } else {
+                        switchWeapon(WEAPONS.RIFLE);
+                    }
+                }
+            }, 500);
+        }
+        return;
+    }
+    
+    if (cachedIsPlayerInPool && currentWeapon.type !== 'grenade') {
+        if (typeof addLog === 'function') {
+            addLog("泳池内无法使用枪械");
+        }
+        return;
+    }
+    
+    if (typeof soundManager !== 'undefined') {
+        soundManager.playShoot(currentWeapon.type);
+    }
+    
+    shootCooldownTimer = currentWeapon.cooldown;
+    if (currentWeapon.type !== 'grenade') {
+        player.flashTimer = 3;
+    } else {
+        player.flashTimer = 0;
+    }
+    const worldMouse = getWorldMouse();
+    const angle = Math.atan2(worldMouse.y - player.y, worldMouse.x - player.x);
+
+    if (currentWeapon.type === 'grenade') {
+        grenades.push({
+            x: player.x, y: player.y,
+            targetX: worldMouse.x, targetY: worldMouse.y,
+            startX: player.x, startY: player.y,
+            vx: Math.cos(angle) * currentWeapon.speed,
+            vy: Math.sin(angle) * currentWeapon.speed,
+            traveled: 0,
+            maxDist: Math.min(currentWeapon.range, Math.hypot(worldMouse.x - player.x, worldMouse.y - player.y)),
+            damage: currentWeapon.damage,
+            blastRadius: currentWeapon.blastRadius
+        });
+    } else if (currentWeapon.type === 'rune_scythe') {
+        const scytheDist = Math.hypot(worldMouse.x - player.x, worldMouse.y - player.y);
+        const maxD = Math.min(currentWeapon.range, Math.max(160, scytheDist));
+        runeScythes.push({
+            x: player.x + Math.cos(angle) * 20,
+            y: player.y + Math.sin(angle) * 20,
+            startX: player.x,
+            startY: player.y,
+            vx: Math.cos(angle) * currentWeapon.speed,
+            vy: Math.sin(angle) * currentWeapon.speed,
+            traveled: 0,
+            maxDist: maxD,
+            returning: false,
+            damage: currentWeapon.damage,
+            radius: currentWeapon.radius,
+            spinAngle: angle,
+            hitEnemies: new Set(),
+            speed: currentWeapon.speed
+        });
+    } else if (currentWeapon.type === 'lava_circle') {
+        const dist = Math.hypot(worldMouse.x - player.x, worldMouse.y - player.y);
+        const maxR = currentWeapon.range;
+        let tx = worldMouse.x;
+        let ty = worldMouse.y;
+        if (dist > maxR) {
+            tx = player.x + Math.cos(angle) * maxR;
+            ty = player.y + Math.sin(angle) * maxR;
+        }
+        lavaCircles.push({
+            x: tx,
+            y: ty,
+            radius: currentWeapon.radius || 95,
+            timer: 0,
+            delay: 15,
+            duration: 90,
+            damage: currentWeapon.damage,
+            tickTimer: 0
+        });
+        if (typeof addLog === 'function') {
+            addLog("🔥 召唤地狱熔岩降临法阵！");
+        }
+    } else if (currentWeapon.type === 'soul_siphon') {
+        const speed = currentWeapon.speed || 22;
+        playerBullets.push({
+            x: player.x + Math.cos(angle) * 20,
+            y: player.y + Math.sin(angle) * 20,
+            startX: player.x, startY: player.y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            traveled: 0,
+            maxRange: currentWeapon.range,
+            damage: currentWeapon.damage,
+            radius: currentWeapon.radius,
+            penetrations: 1,
+            isSoulSiphon: true
+        });
+    } else if (currentWeapon.type === 'shotgun') {
+        const pellets = currentWeapon.pellets || 12;
+        const spread = currentWeapon.spread || 0.28;
+        for (let i = 0; i < pellets; i++) {
+            const pelletAngle = angle + (Math.random() - 0.5) * spread;
+            const speedVar = currentWeapon.speed * (0.88 + Math.random() * 0.24);
+            playerBullets.push({
+                x: player.x + Math.cos(angle) * 24,
+                y: player.y + Math.sin(angle) * 24,
+                startX: player.x, startY: player.y,
+                vx: Math.cos(pelletAngle) * speedVar,
+                vy: Math.sin(pelletAngle) * speedVar,
+                traveled: 0,
+                maxRange: currentWeapon.range * (0.85 + Math.random() * 0.3),
+                damage: currentWeapon.damage,
+                radius: currentWeapon.radius,
+                penetrations: 1
+            });
+        }
+    } else {
+        playerBullets.push({
+            x: player.x + Math.cos(angle) * 24,
+            y: player.y + Math.sin(angle) * 24,
+            startX: player.x, startY: player.y,
+            vx: Math.cos(angle) * currentWeapon.speed,
+            vy: Math.sin(angle) * currentWeapon.speed,
+            traveled: 0,
+            maxRange: currentWeapon.range,
+            damage: currentWeapon.damage,
+            radius: currentWeapon.radius,
+            penetrations: 1
+        });
+    }
+
+    if (inBlindZone(player.x, player.y)) {
+        enemies.forEach(e => {
+            if (!inBlindZone(e.x, e.y) && !e.alert && Math.hypot(e.x - player.x, e.y - player.y) < 450) {
+                e.confusedTimer = 60;
+            }
+        });
+    }
+}
+
+function triggerGameOver(success) {
+    if (!success) {
+        const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+        if (currentLevelId === 'level0_test') {
+            player.hp = player.maxHp;
+            player.shield = player.maxShield;
+            return;
+        }
+    }
+    isGameOver = true;
+    const isEn = (window.__gameLang === 'en');
+    const screen = document.getElementById('game-over-screen');
+    const title = document.getElementById('over-title');
+    const desc = document.getElementById('over-desc');
+    if (screen) screen.style.display = 'flex';
+    if(success) {
+        if (title) { 
+            title.innerText = isEn ? "LEVEL CLEARED" : "关卡完成"; 
+            title.style.color = "#00FF66"; 
+        }
+        if (desc) desc.innerText = isEn ? `Area fully secured. Total Kills: ${killCount}` : `区域已完全肃清。总击杀数: ${killCount}`;
+    } else {
+        if (title) { 
+            title.innerText = isEn ? "MISSION FAILED" : "任务失败"; 
+            title.style.color = "#FF3344"; 
+        }
+        if (desc) desc.innerText = isEn ? `Operative eliminated on Wave ${wave}. Total Kills: ${killCount}` : `特工在第 ${wave} 波行动中阵亡。总击杀数: ${killCount}`;
+    }
+}
+
+function resetGame() {
+    wave = 1; killCount = 0; isGameOver = false; isPaused = false; gateAlarmCooldown = 0;
+    waveTransitionTimer = 0;
+    window.__levelObjectiveAchieved = false;
+    window.__endlessMode = false;
+    const curLvlReset = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    if (curLvlReset === 'level0_test') {
+        unlockedWeapons = [WEAPONS.TRIPLE_SHOTGUN.id, WEAPONS.RUNE_SCYTHE.id, WEAPONS.LAVA_CIRCLE.id, WEAPONS.SOUL_SIPHON.id];
+        currentWeapon = WEAPONS.TRIPLE_SHOTGUN;
+    } else {
+        unlockedWeapons = [WEAPONS.RIFLE.id];
+        currentWeapon = WEAPONS.RIFLE;
+    }
+    window.currentWeapon = currentWeapon;
+    if (typeof window.onWeaponChange === 'function' && currentWeapon) {
+        window.onWeaponChange(currentWeapon.id);
+    }
+    const banner = document.getElementById('alarm-banner');
+    if (banner) banner.style.display = 'none';
+    player.hp = 100; player.shield = 100; player.shieldActive = true; player.lastHitTimer = 0;
+    
+    blindActive = false; blindEnergy = MAX_BLIND_ENERGY; blindZone = null;
+    playerBullets.length = 0; grenades.length = 0; enemyBullets.length = 0; particles.length = 0; dropItems.length = 0; traps.length = 0;
+    runeScythes.length = 0; lavaCircles.length = 0; bloodSacrificeSeals.length = 0;
+    const screen = document.getElementById('game-over-screen');
+    if (screen) screen.style.display = 'none';
+
+    initMapLayout();
+    spawnWave();
+    if (typeof window.onGamePauseChange === 'function') {
+        window.onGamePauseChange(isPaused);
+    }
+}
+
+function update() {
+    if (window.__viewState && window.__viewState !== 'playing') {
+        isPaused = true;
+        if (typeof soundManager !== 'undefined') {
+            soundManager.updateGameState(isGameOver, true);
+        }
+        return;
+    }
+    if (typeof soundManager !== 'undefined') {
+        soundManager.updateGameState(isGameOver, isPaused);
+    }
+    if (isGameOver || isPaused) return;
+    if (shootCooldownTimer > 0) {
+        shootCooldownTimer--;
+    } else if (isMouseDown) {
+        shoot();
+    }
+    if (gateAlarmCooldown > 0) gateAlarmCooldown--;
+    if (typeof laserAlarmCooldown !== 'undefined' && laserAlarmCooldown > 0) laserAlarmCooldown--;
+
+    const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+
+    // Update automatic sliding glass doors in any level containing them
+    if (typeof props !== 'undefined' && Array.isArray(props)) {
+        props.forEach(p => {
+            if (p.type === 'auto_glass_door' || p.type === 'heavy_auto_door' || p.type === 'glass_sliding_door' || (p.label && (p.label.includes('AUTO GLASS DOOR') || p.label.includes('HEAVY AUTO DOOR') || p.label.includes('HEAVY DOOR') || p.label.includes('AUTO GATE')))) {
+                if (p.openProgress === undefined) p.openProgress = 0;
+                
+                let nearEntity = false;
+                
+                // Detect player proximity to door bounding box
+                const pdx = Math.max(p.x - player.x, 0, player.x - (p.x + p.w));
+                const pdy = Math.max(p.y - player.y, 0, player.y - (p.y + p.h));
+                const distPlayer = Math.hypot(pdx, pdy);
+                if (distPlayer < 65) {
+                    nearEntity = true;
+                } else if (typeof enemies !== 'undefined' && Array.isArray(enemies)) {
+                    // Detect alive enemies proximity
+                    for (let e of enemies) {
+                        if (e.hp > 0) {
+                            const edx = Math.max(p.x - e.x, 0, e.x - (p.x + p.w));
+                            const edy = Math.max(p.y - e.y, 0, e.y - (p.y + p.h));
+                            if (Math.hypot(edx, edy) < 60) {
+                                nearEntity = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (nearEntity) {
+                    p.openProgress = Math.min(1.0, p.openProgress + 0.08); // Smooth opening
+                } else {
+                    p.openProgress = Math.max(0.0, p.openProgress - 0.05); // Smooth closing
+                }
+
+                // Disables collision when open enough so entities pass through smoothly
+                p.noCollision = (p.openProgress > 0.4);
+            }
+        });
+    }
+    cachedIsPlayerInPool = isEntityInPool(player.x, player.y);
+    if (currentLevelId === 'level3_bank') {
+        // Update lasers
+        if (typeof lasers !== 'undefined') {
+            lasers.forEach(laser => {
+                if (laser.pulseType === 'flicker') {
+                    laser.timer = (laser.timer + 1) % laser.interval;
+                    laser.active = (laser.timer < laser.onTime);
+                } else if (laser.pulseType === 'moving_y') {
+                    laser.y += laser.speed * laser.dir;
+                    if (laser.y < laser.minY) {
+                        laser.y = laser.minY;
+                        laser.dir = 1;
+                    } else if (laser.y > laser.maxY) {
+                        laser.y = laser.maxY;
+                        laser.dir = -1;
+                    }
+                    laser.y1 = laser.y;
+                    laser.y2 = laser.y;
+                } else if (laser.pulseType === 'moving_x') {
+                    laser.x += laser.speed * laser.dir;
+                    if (laser.x < laser.minX) {
+                        laser.x = laser.minX;
+                        laser.dir = 1;
+                    } else if (laser.x > laser.maxX) {
+                        laser.x = laser.maxX;
+                        laser.dir = -1;
+                    }
+                    laser.x1 = laser.x;
+                    laser.x2 = laser.x;
+                }
+            });
+        }
+
+        // Check laser collision
+        if (typeof lasers !== 'undefined') {
+            lasers.forEach(laser => {
+                if (laser.active) {
+                    // Check player collision
+                    if (circleIntersectsSegment(player.x, player.y, 16, laser.x1, laser.y1, laser.x2, laser.y2)) {
+                        if (laserAlarmCooldown <= 0) {
+                            triggerGlobalAlarm();
+                            laserAlarmCooldown = 120;
+                            addLog("全图警报！");
+                        }
+                        // Continuous damage to player
+                        player.lastHitTimer = 180; // Delay health regen
+                        if (player.shield > 0) {
+                            const isPlayerInPool = cachedIsPlayerInPool;
+                            const shieldLoss = isPlayerInPool ? 0.8 * 1.5 : 0.8;
+                            player.shield = Math.max(0, player.shield - shieldLoss);
+                            player.hp = Math.max(0, player.hp - 0.2);
+                        } else {
+                            player.hp = Math.max(0, player.hp - 0.6);
+                        }
+                        // small continuous burn spark
+                        if (Math.random() < 0.25) {
+                            createExplosion(player.x + (Math.random() - 0.5) * 10, player.y + (Math.random() - 0.5) * 10, 2, '#FF3344');
+                        }
+                        if (player.hp <= 0) {
+                            triggerGameOver(false);
+                            return;
+                        }
+                    }
+
+                    // Check enemy collision
+                    enemies.forEach(e => {
+                        if (e.hp > 0 && circleIntersectsSegment(e.x, e.y, 18, laser.x1, laser.y1, laser.x2, laser.y2)) {
+                            // Constant damage to enemies
+                            applyDamageToEnemy(e, 0.8);
+                            e.alert = true;
+                            e.alertCooldown = 300;
+                            e.hitTimer = 2;
+                            if (Math.random() < 0.25) {
+                                createExplosion(e.x + (Math.random() - 0.5) * 10, e.y + (Math.random() - 0.5) * 10, 2, '#FF5533');
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        // Update fog grid reveal
+        if (!allBankCellsRevealed && typeof bankRevealGrid !== 'undefined' && bankRevealGrid.length > 0) {
+            const cellSize = 60;
+            let newlyRevealed = false;
+            for (let r = 0; r < bankGridRows; r++) {
+                for (let c = 0; c < bankGridCols; c++) {
+                    if (!bankRevealGrid[r][c]) {
+                        const cx = c * cellSize + cellSize / 2;
+                        const cy = r * cellSize + cellSize / 2;
+                        if (Math.hypot(cx - player.x, cy - player.y) <= 240 && isInFOV({ x: cx, y: cy })) {
+                            bankRevealGrid[r][c] = true;
+                            revealedBankCellsCount++;
+                            newlyRevealed = true;
+                        }
+                    }
+                }
+            }
+            if (newlyRevealed && scannableBankCellsCount > 0) {
+                const progress = Math.min(100, Math.floor((revealedBankCellsCount / scannableBankCellsCount) * 100));
+                if (progress >= 92) {
+                    allBankCellsRevealed = true;
+                    addLog("战术平面图 100% 同步，完整地图已载入");
+                }
+            }
+        }
+    }
+
+    if (player.demonPactTimer > 0) {
+        player.demonPactTimer--;
+        if (player.demonPactTimer <= 0) {
+            player.demonPactStacks = 0;
+        }
+    }
+
+    let moveSpeed = player.speed;
+    if (currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id && player.demonPactStacks > 0 && player.demonPactTimer > 0) {
+        moveSpeed *= (1 + player.demonPactStacks * 0.1);
+    }
+    const isPlayerInPool = cachedIsPlayerInPool;
+    const isPlayerInIce = isEntityInIceLake(player.x, player.y);
+    const isPlayerInLava = isEntityInLava(player.x, player.y);
+    const playerInJammer = inJammerBlindZone(player.x, player.y).inZone;
+
+    if (isPlayerInPool) {
+        moveSpeed *= 0.5;
+    } else if (isPlayerInIce) {
+        moveSpeed *= 0.55; // 冰湖行动变缓
+    } else if (isPlayerInLava) {
+        moveSpeed *= 0.45; // 岩浆行动变迟缓
+    }
+
+    if (playerInJammer) {
+        moveSpeed *= 0.45; // 误入暗幕者局部盲区：行动变迟缓 (类似 observer 进入玩家发动的盲区)
+        if (Math.random() < 0.1) {
+            particles.push({
+                x: player.x + (Math.random() - 0.5) * 16,
+                y: player.y + (Math.random() - 0.5) * 16,
+                vx: (Math.random() - 0.5) * 1.5,
+                vy: (Math.random() - 0.5) * 1.5,
+                life: 14, maxLife: 14,
+                color: '#c084fc'
+            });
+        }
+    }
+
+    if (isPlayerInLava) {
+        // 进入岩浆：直接清空护甲持续扣减生命值
+        player.shield = 0;
+        player.lastHitTimer = 180;
+        player.hp = Math.max(0, player.hp - 0.85);
+        
+        if (Math.random() < 0.35) {
+            createExplosion(player.x + (Math.random() - 0.5) * 14, player.y + (Math.random() - 0.5) * 14, 2, '#ff2200');
+        }
+
+        if (!window._lastLavaLogTime || Date.now() - window._lastLavaLogTime > 3000) {
+            window._lastLavaLogTime = Date.now();
+            if (typeof addLog === 'function') addLog("🔥 踏入深渊熔岩！护甲气化，生命值急剧遭熔断灼烧！");
+        }
+
+        if (player.hp <= 0) {
+            triggerGameOver(false);
+            return;
+        }
+    }
+    let dx = 0, dy = 0;
+    if (player.rootTimer > 0) {
+        player.rootTimer--;
+        player.walkCycle = 0;
+        if (Math.random() < 0.35 && particles.length < 120) {
+            particles.push({
+                x: player.x + (Math.random() - 0.5) * 22,
+                y: player.y + (Math.random() - 0.5) * 22,
+                vx: (Math.random() - 0.5) * 1.5,
+                vy: (Math.random() - 0.5) * 1.5,
+                life: 14, maxLife: 14,
+                color: Math.random() < 0.5 ? '#10b981' : '#9333ea'
+            });
+        }
+    } else {
+        if (keys['KeyW'] || keys['w'] || keys['ArrowUp']) dy -= 1;
+        if (keys['KeyS'] || keys['s'] || keys['ArrowDown']) dy += 1;
+        if (keys['KeyA'] || keys['a'] || keys['ArrowLeft']) dx -= 1;
+        if (keys['KeyD'] || keys['d'] || keys['ArrowRight']) dx += 1;
+    }
+    
+    if (dx !== 0 || dy !== 0) {
+        if (dx !== 0 && dy !== 0) { dx *= 0.7071; dy *= 0.7071; }
+        player.walkCycle += 0.22;
+        if (typeof soundManager !== 'undefined') soundManager.playFootstep();
+    } else { player.walkCycle = 0; }
+    
+    let nextX = player.x + dx * moveSpeed;
+    let nextY = player.y + dy * moveSpeed;
+
+    let collidesWithLaser = false;
+    if (currentLevelId === 'level3_bank' && typeof lasers !== 'undefined') {
+        lasers.forEach(laser => {
+            if (laser.active) {
+                if (circleIntersectsSegment(nextX, nextY, 14, laser.x1, laser.y1, laser.x2, laser.y2)) {
+                    collidesWithLaser = true;
+                    if (laserAlarmCooldown <= 0) {
+                        triggerGlobalAlarm();
+                        laserAlarmCooldown = 120;
+                        addLog("全图警报！");
+                        createExplosion(player.x, player.y, 12, '#FF3344');
+                    }
+                }
+            }
+        });
+    }
+
+    if (!checkObstacleCollision(nextX, nextY, 18) && !collidesWithLaser) {
+        let maxXVal = width - 20;
+        let maxYVal = height - 20;
+        if (currentLevelId === 'level4_yacht') {
+            maxXVal = (window.level4MapWidth || 2400) - 20;
+            maxYVal = 700 - 20;
+        } else if (currentLevelId === 'level0_test') {
+            maxXVal = (window.level0MapWidth || 3200) - 20;
+            maxYVal = (window.level0MapHeight || 1000) - 20;
+        } else if (currentLevelId === 'level6_train') {
+            maxXVal = (window.level6MapWidth || 7200) - 20;
+            maxYVal = (window.level6MapHeight || 240) - 20;
+        }
+        player.x = Math.max(20, Math.min(maxXVal, nextX));
+        player.y = Math.max(15, Math.min(maxYVal, nextY));
+    }
+    const worldMouse = getWorldMouse();
+    player.angle = Math.atan2(worldMouse.y - player.y, worldMouse.x - player.x);
+    if (player.flashTimer > 0) player.flashTimer--;
+
+    if (gateAlarmCooldown <= 0) {
+        securityGates.forEach(gate => {
+            if (player.x > gate.x - 12 && player.x < gate.x + gate.w + 12 &&
+                player.y > gate.y && player.y < gate.y + gate.h) {
+                triggerGlobalAlarm();
+                gateAlarmCooldown = 120;
+                addLog("安检门警报触发！所有区域戒备！");
+                createExplosion(player.x, player.y, 8, '#FF3344');
+            }
+        });
+    }
+
+    if (player.lastHitTimer > 0) {
+        player.lastHitTimer--;
+    } else if (player.shield < player.maxShield) {
+        const isPlayerInPool = cachedIsPlayerInPool;
+        const shieldRegen = isPlayerInPool ? 0.15 * 0.33 : 0.15;
+        player.shield = Math.min(player.maxShield, player.shield + shieldRegen);
+    }
+    
+    if (isKillstreakSupportedLevel(currentLevelId)) {
+        if (level0InfiniteBlindTimer > 0) {
+            if (!level0InfiniteBlindPaused) {
+                level0InfiniteBlindTimer--;
+                blindActive = true;
+                blindEnergy = MAX_BLIND_ENERGY;
+                blindZone = { x: player.x, y: player.y, radius: 4000 };
+            } else {
+                blindActive = false;
+                blindZone = null;
+            }
+            level0InfiniteBlindActiveLast = true;
+        } else if (level0InfiniteBlindActiveLast) {
+            blindActive = false;
+            blindZone = null;
+            level0InfiniteBlindPaused = false;
+            level0InfiniteBlindActiveLast = false;
+            if (typeof addLog === 'function') {
+                addLog("全图盲区效果已到期");
+            }
+        }
+    }
+
+    if (blindActive) {
+        // 压制校验：若玩家在开启自身盲区期间误入敌方暗幕干扰者 (Jammer) 盲区，自身盲区被强行瓦解！
+        if (typeof inJammerBlindZone === 'function' && inJammerBlindZone(player.x, player.y).inZone) {
+            closeBlindZone("JAMMER DISRUPTED");
+            addLog("⚠️ 误入暗幕干扰区，便携式盲区发生器遭受严重脉冲干扰，盲区被强行瓦解！");
+            if (typeof createExplosion === 'function') createExplosion(player.x, player.y, 14, '#C084FC');
+        } else if (isKillstreakSupportedLevel(currentLevelId) && level0InfiniteBlindTimer > 0) {
+            blindEnergy = MAX_BLIND_ENERGY;
+        } else {
+            blindEnergy = Math.max(0, blindEnergy - BLIND_CONSUME_RATE);
+            if (blindEnergy <= 0) closeBlindZone("ENERGY DEPLETED");
+        }
+    } else {
+        blindEnergy = Math.min(MAX_BLIND_ENERGY, blindEnergy + BLIND_RECOVER_RATE);
+    }
+
+    for (let i = dropItems.length - 1; i >= 0; i--) {
+        let item = dropItems[i];
+        item.timer--;
+        if (item.timer <= 0) { dropItems.splice(i, 1); continue; }
+        const distToPlayer = Math.hypot(player.x - item.x, player.y - item.y);
+        // Magnetic pull when player is close (within 46px)
+        if (distToPlayer < 46 && distToPlayer > 0) {
+            const pullSpeed = 2.2;
+            item.x += ((player.x - item.x) / distToPlayer) * pullSpeed;
+            item.y += ((player.y - item.y) / distToPlayer) * pullSpeed;
+        }
+        if (distToPlayer < 34) {
+            if (typeof soundManager !== 'undefined') soundManager.playPickup();
+            if (item.type === 'medkit') {
+                player.hp = Math.min(player.maxHp, player.hp + 35);
+                addLog("拾取医疗包 (+35 生命值)");
+                createExplosion(player.x, player.y, 10, '#00FF66');
+            } else if (item.type === 'battery') {
+                player.shield = Math.min(player.maxShield, player.shield + 50);
+                blindEnergy = Math.min(MAX_BLIND_ENERGY, blindEnergy + 40);
+                addLog("拾取补给 (+50 防弹衣 / +40 能量)");
+                createExplosion(player.x, player.y, 10, '#00CCFF');
+            } else if (item.type === 'weapon') {
+                const wp = item.weaponData;
+                if (!unlockedWeapons.includes(wp.id)) {
+                    unlockedWeapons.push(wp.id);
+                    addLog(`解锁新武器: [${wp.name}]！`);
+                } else {
+                    addLog(`拾取武器: [${wp.name}]`);
+                }
+                switchWeapon(wp);
+                createExplosion(player.x, player.y, 12, '#FFFF00');
+            } else if (item.type === 'classified_drive' || item.type === 'gold_vault_crown') {
+                level3TargetSecured = true;
+                addLog("💾 已获取绝密数据芯片！区域主电源已重启，照明系统恢复。");
+                createExplosion(player.x, player.y, 35, '#00CCFF');
+                for (let j = 0; j < 30; j++) {
+                    particles.push({
+                        x: player.x,
+                        y: player.y,
+                        vx: (Math.random() - 0.5) * 7,
+                        vy: (Math.random() - 0.5) * 7,
+                        life: 40 + Math.random() * 30,
+                        maxLife: 70,
+                        color: j % 2 === 0 ? '#00FF66' : '#00CCFF'
+                    });
+                }
+            }
+            dropItems.splice(i, 1);
+        }
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx; p.y += p.vy;
+        if (p.isSoulStreamer) {
+            p.vx += (player.x - p.x) * 0.008;
+            p.vy += (player.y - p.y) * 0.008;
+            p.vx *= 0.94;
+            p.vy *= 0.94;
+        }
+        p.life--;
+        if (p.life <= 0) particles.splice(i, 1);
+    }
+    
+    for (let i = grenades.length - 1; i >= 0; i--) {
+        let g = grenades[i];
+        let nextGPointX = g.x + g.vx;
+        let nextGPointY = g.y + g.vy;
+
+        const bounds = getLevelBounds();
+        let hitBoundary = (nextGPointX < bounds.minX || nextGPointX > bounds.maxX || nextGPointY < bounds.minY || nextGPointY > bounds.maxY);
+        let hitObs = checkLineObstacleIntersection(g.x, g.y, nextGPointX, nextGPointY);
+
+        let hitProp = null;
+        if (!hitObs) {
+            for (let p of props) {
+                if (p.noCollision) continue;
+                if (p.w && p.h && lineIntersectsRect(g.x, g.y, nextGPointX, nextGPointY, p)) {
+                    hitProp = p;
+                    break;
+                }
+            }
+        }
+
+        // Restrict grenade throwing so it cannot leave the pool if started inside
+        const startsInPool = isEntityInPool(g.startX, g.startY);
+        const endsInPool = isEntityInPool(nextGPointX, nextGPointY);
+        if (startsInPool && !endsInPool) {
+            hitBoundary = true;
+            if (typeof addLog === 'function') {
+                addLog("手榴弹无法扔出泳池外");
+            }
+        }
+
+        // Grenades CANNOT pass solid walls, glass walls, props, or outer boundaries.
+        // Grenades CAN ONLY pass low_wall (orange partition / low obstacles).
+        if (hitBoundary || hitProp || (hitObs && (hitObs.type === 'solid' || hitObs.type === 'glass'))) {
+            g.traveled = g.maxDist; // Instantly detonate at current position on hitting solid obstacle
+        } else {
+            g.x = nextGPointX; g.y = nextGPointY;
+            g.traveled += Math.hypot(g.vx, g.vy);
+        }
+
+        if (g.traveled >= g.maxDist) {
+            const isExplosionInPool = isEntityInPool(g.x, g.y);
+            createExplosion(g.x, g.y, isExplosionInPool ? 15 : 35, isExplosionInPool ? '#00E5FF' : '#FF5500');
+            if (typeof soundManager !== 'undefined') {
+                soundManager.playExplosion();
+            }
+            enemies.forEach(e => {
+                if (e.hp <= 0) return;
+                const d = Math.hypot(e.x - g.x, e.y - g.y);
+                if (d <= g.blastRadius) {
+                    let finalDmg = g.damage;
+                    if (isExplosionInPool) {
+                        finalDmg *= 0.15; // Heavily discounted
+                    }
+                    const dmg = Math.floor(finalDmg * (1 - d / g.blastRadius * 0.4));
+                    const isObsSeesPlayer = (e.isObserver || e.isJammer) && inBlindZone(player.x, player.y) && (function() {
+                        const pdx = player.x - e.x, pdy = player.y - e.y;
+                        const dist = Math.hypot(pdx, pdy);
+                        if (dist < 110) {
+                            const angleToPlayer = Math.atan2(pdy, pdx);
+                            let diff = angleToPlayer - e.angle;
+                            diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+                            return Math.abs(diff) < (Math.PI / 12) && canSee(e.x, e.y, player.x, player.y);
+                        }
+                        return false;
+                    })();
+
+                    if (inBlindZone(e.x, e.y) && !isObsSeesPlayer) {
+                        e.pendingDamage += dmg;
+                    } else {
+                        applyDamageToEnemy(e, dmg);
+                        // Resolve existing pendingDamage immediately!
+                        if (e.pendingDamage > 0) {
+                            applyDamageToEnemy(e, e.pendingDamage);
+                            e.pendingDamage = 0;
+                            createExplosion(e.x, e.y, 20);
+                        }
+                        e.alert = true; e.alertCooldown = 300; e.hitTimer = 6;
+                    }
+                }
+            });
+            grenades.splice(i, 1);
+        }
+    }
+
+    for (let i = playerBullets.length - 1; i >= 0; i--) {
+        let b = playerBullets[i];
+        let nextBX = b.x + b.vx;
+        let nextBY = b.y + b.vy;
+
+        let hitObs = checkLineObstacleIntersection(b.x, b.y, nextBX, nextBY);
+        if (hitObs) {
+            if (hitObs.type === 'glass') {
+                // 玻璃属性规范：无论何种子弹，穿透玻璃（包括餐车玻璃隔断与VIP玻璃自动门）均穿透并衰减伤害，不分穿透特性子弹
+                b.damage = Math.max(4, b.damage * 0.7);
+                createExplosion(nextBX, nextBY, 4, '#00CCFF');
+                b.x = nextBX; b.y = nextBY;
+            } else {
+                playerBullets.splice(i, 1); continue;
+            }
+        } else {
+            b.x = nextBX; b.y = nextBY;
+        }
+
+        b.traveled += Math.hypot(b.vx, b.vy);
+
+        const bounds = getLevelBounds();
+        if (b.traveled >= b.maxRange || b.x < bounds.minX - 100 || b.x > bounds.maxX + 100 || b.y < bounds.minY - 100 || b.y > bounds.maxY + 100) {
+            playerBullets.splice(i, 1); continue;
+        }
+        for (let e of enemies) {
+            if (e.hp <= 0) continue;
+            if (Math.hypot(b.x - e.x, b.y - e.y) < 22) {
+                const isObsSeesPlayer = (e.isObserver || e.isJammer) && inBlindZone(player.x, player.y) && (function() {
+                    const pdx = player.x - e.x, pdy = player.y - e.y;
+                    const dist = Math.hypot(pdx, pdy);
+                    if (dist < 110) {
+                        const angleToPlayer = Math.atan2(pdy, pdx);
+                        let diff = angleToPlayer - e.angle;
+                        diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+                        return Math.abs(diff) < (Math.PI / 12) && canSee(e.x, e.y, player.x, player.y);
+                    }
+                    return false;
+                })();
+
+                if (inBlindZone(e.x, e.y) && !isObsSeesPlayer) {
+                    e.pendingDamage += b.damage;
+                    if (b.isSoulSiphon && currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id) {
+                        e.killedBySoulSiphon = true;
+                    }
+                } else {
+                    applyDamageToEnemy(e, b.damage, !!b.isSoulSiphon);
+                    e.hitTimer = 6;
+                    if (b.isSoulSiphon && currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id) {
+                        player.hp = Math.min(player.maxHp, player.hp + 2);
+                        player.shield = Math.min(player.maxShield, player.shield + 4);
+                        createExplosion(e.x, e.y, 8, '#f43f5e');
+                        particles.push({
+                            x: e.x, y: e.y,
+                            vx: (player.x - e.x) * 0.08,
+                            vy: (player.y - e.y) * 0.08,
+                            life: 16, maxLife: 16,
+                            color: '#fb7185'
+                        });
+                        if (e.hp <= 0) {
+                            player.demonPactStacks = Math.min((player.demonPactStacks || 0) + 1, 5);
+                            player.demonPactTimer = 240;
+                            if (typeof addLog === 'function') {
+                                addLog(`😈 恶魔血祭! 层数: ${player.demonPactStacks}/5 (移速+${player.demonPactStacks * 10}%, 攻击+${player.demonPactStacks * 15}%)`);
+                            }
+                        }
+                    }
+                    // Resolve existing pendingDamage immediately since we are doing real-time damage now!
+                    if (e.pendingDamage > 0) {
+                        applyDamageToEnemy(e, e.pendingDamage);
+                        e.pendingDamage = 0;
+                        createExplosion(e.x, e.y, 20);
+                    }
+                    if (inBlindZone(player.x, player.y) && !e.isObserver && !e.isJammer) {
+                        e.confusedTimer = 80;
+                    } else {
+                        e.alert = true; e.alertCooldown = 300;
+                    }
+                }
+                playerBullets.splice(i, 1); break;
+            }
+        }
+    }
+
+    updateLevel0MagicWeapons();
+
+    for (let i = enemyBullets.length - 1; i >= 0; i--) {
+        let eb = enemyBullets[i];
+        let nextEBX = eb.x + eb.vx;
+        let nextEBY = eb.y + eb.vy;
+
+        let hitObs = checkLineObstacleIntersection(eb.x, eb.y, nextEBX, nextEBY);
+        if (hitObs) {
+            if (hitObs.type === 'glass') {
+                // 敌军子弹穿透玻璃同样衰减伤害并继续飞行
+                if (eb.damageMultiplier === undefined) eb.damageMultiplier = 1.0;
+                eb.damageMultiplier *= 0.7;
+                createExplosion(nextEBX, nextEBY, 3, '#00CCFF');
+                eb.x = nextEBX; eb.y = nextEBY;
+            } else {
+                enemyBullets.splice(i, 1); continue;
+            }
+        } else {
+            eb.x = nextEBX; eb.y = nextEBY;
+        }
+
+        const bounds = getLevelBounds();
+        if (eb.x < bounds.minX - 100 || eb.x > bounds.maxX + 100 || eb.y < bounds.minY - 100 || eb.y > bounds.maxY + 100) {
+            enemyBullets.splice(i, 1); continue;
+        }
+        if (Math.hypot(eb.x - player.x, eb.y - player.y) < 22) {
+            if (typeof soundManager !== 'undefined') soundManager.playHit();
+            player.lastHitTimer = 180; // set 3 second delay on regeneration
+            const dmgMult = (eb.damageMultiplier !== undefined) ? eb.damageMultiplier : 1.0;
+            if (eb.isHellfire) {
+                createExplosion(eb.x, eb.y, 16, '#ff2200');
+                if (player.shield > 0) {
+                    player.shield = Math.max(0, player.shield - 20 * dmgMult);
+                    player.hp = Math.max(0, player.hp - 8 * dmgMult);
+                } else {
+                    player.hp = Math.max(0, player.hp - 20 * dmgMult);
+                }
+                addLog("🔥 遭到了恶魔地狱火球的灼烧爆破！");
+            } else if (player.shield > 0) {
+                const isPlayerInPool = cachedIsPlayerInPool;
+                const shieldLoss = (isPlayerInPool ? 15 * 1.5 : 15) * dmgMult;
+                player.shield = Math.max(0, player.shield - shieldLoss);
+                player.hp = Math.max(0, player.hp - 3 * dmgMult);
+                createExplosion(eb.x, eb.y, 6, '#00CCFF');
+            } else {
+                player.hp = Math.max(0, player.hp - 12 * dmgMult);
+                createExplosion(eb.x, eb.y, 6, '#FF3344');
+            }
+            enemyBullets.splice(i, 1);
+            if (player.hp <= 0) { triggerGameOver(false); return; }
+        }
+    }
+    
+    let anyCameraDetecting = false;
+    cameras.forEach(cam => {
+        if (cam.type === 'infernal_eye' || (cam.sweepRange && cam.sweepRange >= Math.PI * 1.9)) {
+            // 360度单向匀速旋转：以恒定角速度平滑推进，彻底消除正弦波极值造成的忽慢忽快
+            if (cam.currentAngle === undefined) {
+                cam.currentAngle = cam.baseAngle || 0;
+            }
+            cam.currentAngle += (cam.sweepSpeed || 0.009);
+            if (cam.currentAngle >= Math.PI * 2) cam.currentAngle -= Math.PI * 2;
+            if (cam.currentAngle < 0) cam.currentAngle += Math.PI * 2;
+        } else {
+            cam.sweepTimer += cam.sweepSpeed;
+            cam.currentAngle = cam.baseAngle + Math.sin(cam.sweepTimer) * cam.sweepRange;
+        }
+        
+        let inSight = false;
+        if (!inBlindZone(player.x, player.y) && player.hp > 0) {
+            const pdx = player.x - cam.x;
+            const pdy = player.y - cam.y;
+            const dist = Math.hypot(pdx, pdy);
+            
+            const maxRange = cam.fovRange || 320;
+            const halfFov = cam.fovAngle ? (cam.fovAngle / 2) : 0.45;
+            if (dist < maxRange) {
+                const angleToPlayer = Math.atan2(pdy, pdx);
+                let diff = angleToPlayer - cam.currentAngle;
+                diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+
+                if (Math.abs(diff) < halfFov) {
+                    inSight = true;
+                }
+            }
+        }
+
+        if (inSight) {
+            const wasDetecting = cam.detecting;
+            cam.detecting = true;
+            cam.cooldownTimer = 180;
+            triggerGlobalAlarm();
+            if (!wasDetecting) {
+                if (cam.type === 'soul_lantern') {
+                    if (typeof addLog === 'function') addLog("👻 误入幽冥噬魂魂灯冷光！深渊怨灵尖啸拉响全域警报！");
+                    createExplosion(cam.x, cam.y, 14, '#38bdf8');
+                } else if (cam.type === 'gargoyle_sentinel') {
+                    if (typeof addLog === 'function') addLog("🗿 触发狱火石像鬼烈焰凝视！恶魔雕像吐出火柱全图戒备！");
+                    createExplosion(cam.x, cam.y, 18, '#f97316');
+                } else if (cam.type === 'infernal_eye') {
+                    if (typeof addLog === 'function') addLog("👁️ 暴露在深渊全视魔眼之下！远古邪神之瞳怒视，全图恶魔狂暴！");
+                    createExplosion(cam.x, cam.y, 22, '#f43f5e');
+                } else {
+                    if (typeof addLog === 'function') addLog("监控警报触发！所有区域戒备！");
+                }
+            }
+        } else {
+            if (cam.cooldownTimer > 0) {
+                cam.cooldownTimer--;
+            } else {
+                cam.detecting = false;
+            }
+        }
+
+        if (cam.detecting) anyCameraDetecting = true;
+    });
+
+    if (!anyCameraDetecting && gateAlarmCooldown <= 0) {
+        const banner = document.getElementById('alarm-banner');
+        if (banner) banner.style.display = 'none';
+        if (typeof soundManager !== 'undefined') {
+            soundManager.stopAlarm();
+        }
+    }
+    
+    // 敌人相互推挤防重叠卡死机制 (Enemy Mutual Separation & Unstick Pass)
+    const aliveEnemies = enemies.filter(e => e.hp > 0);
+    for (let i = 0; i < aliveEnemies.length; i++) {
+        const e1 = aliveEnemies[i];
+        for (let j = i + 1; j < aliveEnemies.length; j++) {
+            const e2 = aliveEnemies[j];
+            const edx = e2.x - e1.x;
+            const edy = e2.y - e1.y;
+            const edist = Math.hypot(edx, edy);
+            const minDist = 28; // 敌人体型物理间距
+            if (edist < minDist && edist > 0.001) {
+                // 柔性流体斥力防重叠：限制单帧最大位移 (<= 0.35px)，彻底根除因硬碰撞回弹导致的剧烈抽搐抖动
+                const push = Math.min(0.35, (minDist - edist) * 0.08);
+                const nx = edx / edist;
+                const ny = edy / edist;
+                
+                const e1x = e1.x - nx * push;
+                const e1y = e1.y - ny * push;
+                if (!checkObstacleCollision(e1x, e1y, 15.5)) {
+                    e1.x = e1x;
+                    e1.y = e1y;
+                }
+
+                const e2x = e2.x + nx * push;
+                const e2y = e2.y + ny * push;
+                if (!checkObstacleCollision(e2x, e2y, 15.5)) {
+                    e2.x = e2x;
+                    e2.y = e2y;
+                }
+            }
+        }
+    }
+
+    let aliveCount = 0;
+    enemies.forEach(e => {
+        if (e.hp <= 0) {
+            if (e.deathAlpha > 0) e.deathAlpha -= 0.08;
+            return;
+        }
+        aliveCount++;
+        ensureEntityInBounds(e, 16);
+        if (e.hitTimer > 0) e.hitTimer--;
+        if (e.flashTimer > 0) e.flashTimer--;
+        if (e.shootCooldown > 0) e.shootCooldown--;
+        if (e.spawnGraceTimer > 0) e.spawnGraceTimer--;
+
+        // 盲区推迟伤害结算校验：若盲区不处于激活状态，或敌人已离开盲区，立即重挫并结算推迟伤害！
+        if (e.pendingDamage > 0) {
+            if (!blindActive || !inBlindZone(e.x, e.y)) {
+                applyDamageToEnemy(e, e.pendingDamage);
+                e.pendingDamage = 0;
+                e.hitTimer = 8;
+                createExplosion(e.x, e.y, 20, e.isDemon ? '#ff2200' : '#f43f5e');
+                e.alert = true;
+                e.alertCooldown = 300;
+            }
+        }
+
+        const enemyInPool = isEntityInPool(e.x, e.y);
+        const enemyInIce = isEntityInIceLake(e.x, e.y, 16);
+        const enemyInLava = isEntityInLava(e.x, e.y, 16);
+        const playerInIce = isEntityInIceLake(player.x, player.y, 16);
+
+        // =========================================================
+        // 冰湖恐慌逃跑核心状态机 (COCYTUS ICE LAKE PANIC ESCAPE STATE MACHINE)
+        // 彻底根除: 1. 盲区激活时跳过恐惧 2. 临界线 1px 高频翻转导致的无遮挡原地踌躇卡死
+        // =========================================================
+        const pdx = player.x - e.x, pdy = player.y - e.y;
+        const distToPlayer = Math.hypot(pdx, pdy) || 1;
+        const dist = distToPlayer;
+
+        // 触发恐慌逃跑标准：恶魔或撒旦在冰湖中且距离 < 380px，或已处于恐慌逃跑锁定状态中
+        const shouldTriggerPanic = (enemyInIce || playerInIce) && distToPlayer < 380;
+        if (shouldTriggerPanic) {
+            e.panicTimer = Math.max(e.panicTimer || 0, 90); // 锁定至少 90 帧 (1.5秒) 持续奔逃，禁止高频掉头踌躇
+            e.panicSourceX = player.x;
+            e.panicSourceY = player.y;
+        }
+
+        if (e.panicTimer && e.panicTimer > 0) {
+            e.panicTimer--;
+            const panicSrcX = (e.panicSourceX !== undefined) ? e.panicSourceX : player.x;
+            const panicSrcY = (e.panicSourceY !== undefined) ? e.panicSourceY : player.y;
+            const escapeDx = e.x - panicSrcX;
+            const escapeDy = e.y - panicSrcY;
+            const escapeDist = Math.hypot(escapeDx, escapeDy) || 1;
+
+            // 逃跑矢量方向：沿背对撒旦方向延伸 320px
+            const escapeTargetX = e.x + (escapeDx / escapeDist) * 320;
+            const escapeTargetY = e.y + (escapeDy / escapeDist) * 320;
+            
+            // 冰湖内速度打折 (1.2px/f)，一旦逃出冰湖登上陆地加速奔逃 (2.2px/f)
+            let panicSpeed = enemyInIce ? 1.2 : 2.2;
+            
+            const escapeAngle = getObstacleSteeredHeading(e, escapeTargetX, escapeTargetY, panicSpeed, 16);
+            const mx = Math.cos(escapeAngle) * panicSpeed;
+            const my = Math.sin(escapeAngle) * panicSpeed;
+            const oldX = e.x, oldY = e.y;
+            
+            tryMoveEnemy(e, mx, my, 16);
+            
+            const movedDist = Math.hypot(e.x - oldX, e.y - oldY);
+            if (movedDist > 0.15) {
+                const actualMoveAngle = Math.atan2(e.y - oldY, e.x - oldX);
+                e.angle = turnAngleTowards(e.angle, actualMoveAngle, 0.22);
+                e.walkCycle += 0.14;
+            } else {
+                e.angle = turnAngleTowards(e.angle, escapeAngle, 0.22);
+            }
+
+            if (Math.random() < 0.25 && particles.length < 100) {
+                particles.push({
+                    x: e.x + (Math.random() - 0.5) * 10,
+                    y: e.y + (Math.random() - 0.5) * 10,
+                    vx: (Math.random() - 0.5) * 2.5,
+                    vy: (Math.random() - 0.5) * 2.5,
+                    life: 14, maxLife: 14,
+                    color: '#93c5fd'
+                });
+            }
+            if (!window._lastPanicLogTime || Date.now() - window._lastPanicLogTime > 4000) {
+                window._lastPanicLogTime = Date.now();
+                if (typeof addLog === 'function') addLog("😱 恶魔靠近冰湖与撒旦，陷入极度恐慌慌张逃出冰湖！");
+            }
+            return; // 优先全力奔逃，绕过盲区定身与盲目追击
+        }
+
+        // 暗幕者 (Jammer) 局部盲区技能维护循环：
+        // 规则：登场不默认开启，受到攻击时发动，或被玩家近身 (距离 < 200) 时发动；冷却结束后不自动开启
+        if (e.isJammer && e.hp > 0) {
+            if (e.jammerBlindActive) {
+                e.jammerBlindDuration = (e.jammerBlindDuration || 540) - 1;
+                if (e.jammerBlindDuration <= 0) {
+                    e.jammerBlindActive = false;
+                    e.jammerBlindCooldown = 360; // 冷却 6 秒
+                    if (typeof createExplosion === 'function') {
+                        createExplosion(e.jammerZoneX || e.x, e.jammerZoneY || e.y, 14, '#C084FC');
+                    }
+                }
+            } else {
+                if (e.jammerBlindCooldown > 0) {
+                    e.jammerBlindCooldown--;
+                }
+                // 近身诱敌标准：玩家进入极近搏击/近身刺杀距离 (dist <= 85px) 时瞬间引爆局部盲区！
+                const distToPlayerNow = Math.hypot(player.x - e.x, player.y - e.y);
+                if (e.jammerBlindCooldown <= 0 && distToPlayerNow <= 85 && typeof triggerJammerBlind === 'function') {
+                    triggerJammerBlind(e, 'proximity');
+                }
+            }
+        }
+
+        const inZone = inBlindZone(e.x, e.y);
+        const jammerCheck = inJammerBlindZone(e.x, e.y);
+        const inJammerZone = jammerCheck.inZone;
+
+        // 地狱三头犬专有技能冷却与身尾反击判定
+        if (e.isCerberus && e.hp > 0) {
+            if (e.pounceCooldown > 0) e.pounceCooldown--;
+            if (e.tailCooldown > 0) e.tailCooldown--;
+            if (e.tailLashAnim > 0) e.tailLashAnim--;
+            if (e.meleeCooldown > 0) e.meleeCooldown--;
+
+            // 身后接近反击机制：如果玩家从身后接近 (rear ~140度扇形，距离 < 88px)，先受其龙尾抽击并定身
+            const angleToPlayer = Math.atan2(pdy, pdx);
+            let rearDiff = Math.abs(Math.atan2(Math.sin(angleToPlayer - e.angle), Math.cos(angleToPlayer - e.angle)));
+            if (rearDiff > 1.85 && distToPlayer < 88 && (e.tailCooldown || 0) <= 0 && e.spawnGraceTimer <= 0) {
+                e.tailCooldown = 130;
+                e.tailLashAnim = 25; // 触发尾部抽打甩击动画
+                const tailDmg = 16;  // 伤害稍低，保证容错
+                if (player.shield > 0) {
+                    player.shield = Math.max(0, player.shield - 12);
+                    player.hp = Math.max(0, player.hp - 4);
+                } else {
+                    player.hp = Math.max(0, player.hp - tailDmg);
+                }
+                player.lastHitTimer = 180;
+                player.rootTimer = 55; // 定身约 0.9 秒！
+
+                if (typeof soundManager !== 'undefined') soundManager.playExplosion();
+                createExplosion(player.x, player.y, 22, '#10b981'); // 龙尾蛇毒爆裂
+                createExplosion(player.x, player.y, 16, '#9333ea'); // 毒藤荆棘束缚
+                if (typeof addLog === 'function') addLog("⚠️ 踏入地狱三头犬后方！遭受龙尾毒蛇骨刺反手暴抽，陷入剧毒定身 1 秒！");
+
+                // 受到尾部攻击后，三头犬立刻转身快速近身扑咬！
+                e.angle = angleToPlayer;
+                e.alert = true;
+                e.alertCooldown = 350;
+                e.isPouncing = true;
+                e.pounceTimer = 24;
+                e.pounceCooldown = 90;
+
+                if (player.hp <= 0) { triggerGameOver(false); return; }
+            }
+        }
+
+        // 普通敌人 (非 Observer，非 Jammer，非 Cerberus)：
+        // 误入玩家盲区 OR 误入暗幕者局部盲区 -> 被定住并缓慢迷茫游走
+        // 注意：暗幕者自身 (e.isJammer) 与三头犬 (e.isCerberus) 不受迷茫定身限制！
+        if ((inZone || inJammerZone) && !e.isObserver && !e.isJammer && !e.isCerberus) {
+            if (Math.random() < 0.1) e.confusedAngle = e.angle + (Math.random() - 0.5) * 2.2;
+            e.angle += (e.confusedAngle - e.angle) * 0.12;
+            // 盲区定住/减速并缓慢迷茫游走
+            let slowSpeed = 0.35;
+            if (enemyInIce) slowSpeed *= 0.5;
+            tryMoveEnemy(e, Math.cos(e.angle) * slowSpeed, Math.sin(e.angle) * slowSpeed, 16);
+            return;
+        }
+
+        if (e.confusedTimer > 0 && !e.isObserver && !e.isJammer && !e.isCerberus) {
+            e.confusedTimer--;
+            if (Math.random() < 0.12) {
+                e.confusedAngle = e.angle + (Math.random() - 0.5) * 2.5;
+            }
+            if (e.confusedAngle !== undefined) {
+                e.angle += (e.confusedAngle - e.angle) * 0.15;
+            }
+            return;
+        }
+        
+        let _visibleCached = null;
+        const checkVisible = () => {
+            if (_visibleCached === null) {
+                _visibleCached = canSee(e.x, e.y, player.x, player.y);
+            }
+            return _visibleCached;
+        };
+        
+        const playerInBlind = inBlindZone(player.x, player.y);
+        let playerIsHidden = playerInBlind && !e.isObserver && !e.isJammer && !e.isCerberus;
+
+        // 视角度数与观察距离必须与渲染的黄色/红光/紫光战术 FOV 完全一致
+        let fovAngle = Math.PI / 3; // 60 度视角扇形
+        let fovRange = 260;
+        if (e.isCerberus) {
+            fovAngle = Math.PI * 0.72; // 三头犬三首拥有 130 度宽广猎杀全景视锥
+            fovRange = 290;
+        } else if (e.isObserver && (playerInBlind || inJammerZone)) {
+            fovAngle = Math.PI / 6; // 30 度受限视角
+            fovRange = 110;
+        } else if (e.isJammer && playerInBlind) {
+            fovAngle = Math.PI / 6; // 30 度受限视角
+            fovRange = 110;
+        }
+
+        let inEnemyFOV = false;
+        if (distToPlayer <= fovRange) {
+            const angleToPlayer = Math.atan2(pdy, pdx);
+            let diff = angleToPlayer - e.angle;
+            diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+            // 处于视锥扇形区域内、或极近距离(<32px)、或三头犬地狱嗅觉感知范围(<140px)
+            if (Math.abs(diff) <= fovAngle / 2 || distToPlayer < 32 || (e.isCerberus && distToPlayer < 140)) {
+                inEnemyFOV = true;
+            }
+        }
+
+        if (((e.isObserver || e.isJammer) && playerInBlind) || (e.isObserver && inJammerZone)) {
+            playerIsHidden = !inEnemyFOV;
+        }
+        if (e.isCerberus) {
+            // 三头犬无视盲区对视线的干扰，地狱嗅觉与三首警觉直感始终看破隐蔽
+            playerIsHidden = false;
+        }
+
+        const isTrainLvl = (typeof currentLevelId !== 'undefined' && currentLevelId === 'level6_train');
+        const alarmBannerEl = document.getElementById('alarm-banner');
+        const isGlobalAlarmActive = alarmBannerEl && alarmBannerEl.style.display !== 'none';
+
+        // 敌人未戒备时，只有当玩家【进入视锥扇形】且【未隐藏】且【无障碍物阻挡】时，才会触发警报！
+        const canDetectPlayer = inEnemyFOV;
+        if (e.spawnGraceTimer <= 0 && canDetectPlayer && !playerIsHidden && checkVisible()) {
+            if (!e.alert && typeof soundManager !== 'undefined') soundManager.playAlert();
+            e.alert = true;
+            e.alertCooldown = 400; 
+        }
+        
+        if (isGlobalAlarmActive) {
+            e.alert = true;
+            e.alertCooldown = 300;
+        } else if (e.alert) {
+            if (!checkVisible() || playerIsHidden) {
+                e.alertCooldown--;
+                if (e.alertCooldown <= 0) {
+                    e.alert = false;
+                }
+            } else {
+                e.alertCooldown = 300;
+            }
+        }
+
+        let attractedToTrap = null;
+        if (e.isObserver && traps.length > 0 && !(e.alert && !playerIsHidden && e.spawnGraceTimer <= 0)) {
+            let closestDist = Infinity;
+            traps.forEach(t => {
+                const d = Math.hypot(t.x - e.x, t.y - e.y);
+                if (d < closestDist) {
+                    closestDist = d;
+                    attractedToTrap = t;
+                }
+            });
+        }
+
+        if (attractedToTrap) {
+            const tdx = attractedToTrap.x - e.x, tdy = attractedToTrap.y - e.y;
+            const d = Math.hypot(tdx, tdy);
+            if (d < 16) {
+                // Trigger trap explosion and instant kill!
+                createExplosion(attractedToTrap.x, attractedToTrap.y, 25, '#FF3300');
+                if (typeof soundManager !== 'undefined') {
+                    soundManager.playExplosion();
+                }
+                applyDamageToEnemy(e, e.maxHp + 100);
+                
+                const tIndex = traps.indexOf(attractedToTrap);
+                if (tIndex > -1) traps.splice(tIndex, 1);
+                addLog("观察者已被陷阱消灭");
+            } else {
+                const moveAngle = Math.atan2(tdy, tdx);
+                
+                let speed = e.patrolSpeed * 1.3;
+                if (playerInBlind) speed = 0.55;
+                if (enemyInPool) speed *= 0.5;
+                
+                const oldX = e.x, oldY = e.y;
+                let moved = tryMoveEnemy(e, Math.cos(moveAngle) * speed, Math.sin(moveAngle) * speed, 16);
+                const movedDist = Math.hypot(e.x - oldX, e.y - oldY);
+                if (movedDist > 0.15) {
+                    const actualMoveAngle = Math.atan2(e.y - oldY, e.x - oldX);
+                    e.angle = turnAngleTowards(e.angle, actualMoveAngle, 0.15);
+                    e.walkCycle += 0.12;
+                }
+                adjustEnemyFacingToAvoidWalls(e);
+            }
+        } else if (e.alert && !playerIsHidden && e.spawnGraceTimer <= 0) {
+            let steerTargetX = player.x;
+            let steerTargetY = player.y;
+
+            let moveSpeed = e.isDemon ? 2.6 : 1.5;
+            if (e.isCerberus) {
+                moveSpeed = 2.95; // 行动中至快（比恶魔 2.6 略快）
+            }
+            if (((e.isObserver || e.isJammer) && playerInBlind) || (e.isObserver && inJammerZone)) moveSpeed = 0.5;
+            if (e.isCerberus && (playerInBlind || inZone || inJammerZone)) {
+                moveSpeed *= 0.65; // 三头犬虽然视线看破盲区，但进入盲区行动仍受阻碍！
+            }
+            if (enemyInPool) moveSpeed *= 0.5;
+
+            // 地狱三头犬爆发扑咬与冲刺冲锋 (Cerberus Sudden Pounce Rush)
+            if (e.isCerberus) {
+                // 离玩家近到一定地步 (60 ~ 230px) 会突然加速近身
+                if (distToPlayer < 230 && distToPlayer > 60 && (e.pounceCooldown || 0) <= 0 && checkVisible()) {
+                    e.isPouncing = true;
+                    e.pounceTimer = 26;
+                    e.pounceCooldown = 130;
+                    if (typeof soundManager !== 'undefined') soundManager.playAlert();
+                    createExplosion(e.x, e.y, 14, '#f97316');
+                }
+
+                if (e.isPouncing && e.pounceTimer > 0) {
+                    e.pounceTimer--;
+                    moveSpeed = 4.65; // 瞬间爆发极速猛扑
+                    if (Math.random() < 0.6 && particles.length < 130) {
+                        particles.push({
+                            x: e.x + (Math.random() - 0.5) * 16,
+                            y: e.y + (Math.random() - 0.5) * 16,
+                            vx: -Math.cos(e.angle) * 2 + (Math.random() - 0.5),
+                            vy: -Math.sin(e.angle) * 2 + (Math.random() - 0.5),
+                            life: 14, maxLife: 14,
+                            color: Math.random() < 0.5 ? '#ff3300' : '#f97316'
+                        });
+                    }
+                    if (e.pounceTimer <= 0) {
+                        e.isPouncing = false;
+                    }
+                }
+            }
+
+            // 暗幕干扰者 (Jammer) 在发动局部盲区期间的核心战术逻辑：
+            // 1. 严格停留在自身盲区范围内 (离中心不超过 jammerBlindRadius - 20)，绝不冒失跑出盲区！
+            // 2. 避免傻站中心被盲狙猜中，沿烟雾内圈 (约 60~85px 半径) 灵活周旋与机动规避
+            // 3. 挨打或近身引爆后获得爆发闪避移速与离子烟幕拖尾
+            if (e.isJammer && e.jammerBlindActive) {
+                const zx = (typeof e.jammerZoneX === 'number') ? e.jammerZoneX : e.x;
+                const zy = (typeof e.jammerZoneY === 'number') ? e.jammerZoneY : e.y;
+                const safeZoneRad = Math.max(40, (e.jammerBlindRadius || 130) - 22);
+
+                e.jammerEvadeTimer = (e.jammerEvadeTimer || 0) - 1;
+                if (e.jammerEvadeTimer <= 0) {
+                    e.jammerEvadeAngle = (e.jammerEvadeAngle || 0) + (Math.random() < 0.5 ? 1 : -1) * (0.9 + Math.random() * 0.9);
+                    e.jammerEvadeTimer = 35 + Math.floor(Math.random() * 25);
+                }
+
+                const evadeRad = Math.min(safeZoneRad * 0.75, 78);
+                let evadeTargetX = zx + Math.cos(e.jammerEvadeAngle || 0) * evadeRad;
+                let evadeTargetY = zy + Math.sin(e.jammerEvadeAngle || 0) * evadeRad;
+
+                // 若玩家深入暗幕，暗幕者围绕玩家周旋包抄走位
+                const distPlayerToZone = Math.hypot(player.x - zx, player.y - zy);
+                if (distPlayerToZone < safeZoneRad) {
+                    const angleFromPlayer = Math.atan2(e.y - player.y, e.x - player.x);
+                    const combatAngle = angleFromPlayer + (Math.sin(e.walkCycle || 0) * 0.75);
+                    evadeTargetX = player.x + Math.cos(combatAngle) * 60;
+                    evadeTargetY = player.y + Math.sin(combatAngle) * 60;
+                }
+
+                // 强制约束目标点在盲区安全圈内
+                const dTargetCenter = Math.hypot(evadeTargetX - zx, evadeTargetY - zy);
+                if (dTargetCenter > safeZoneRad) {
+                    const ang = Math.atan2(evadeTargetY - zy, evadeTargetX - zx);
+                    evadeTargetX = zx + Math.cos(ang) * safeZoneRad;
+                    evadeTargetY = zy + Math.sin(ang) * safeZoneRad;
+                }
+
+                steerTargetX = evadeTargetX;
+                steerTargetY = evadeTargetY;
+
+                // 闪避爆发速度
+                if (e.jammerEvadeBurst && e.jammerEvadeBurst > 0) {
+                    e.jammerEvadeBurst--;
+                    moveSpeed = 2.4;
+                    if (Math.random() < 0.35) {
+                        particles.push({
+                            x: e.x + (Math.random() - 0.5) * 10,
+                            y: e.y + (Math.random() - 0.5) * 10,
+                            vx: (Math.random() - 0.5) * 1.5,
+                            vy: (Math.random() - 0.5) * 1.5,
+                            life: 14, maxLife: 14,
+                            color: '#C084FC'
+                        });
+                    }
+                } else {
+                    moveSpeed = 1.45;
+                }
+            } else {
+                // 核心寻路：引入 Path Lock 路径锁定与导航承诺系统，杜绝走一半回头、来回徘徊 Bug！
+                const navTarget = updateEnemyNavTarget(e, player.x, player.y);
+                steerTargetX = navTarget.x;
+                steerTargetY = navTarget.y;
+            }
+
+            // Train-specific corridor navigation & speedup to bridge carriages
+            if (isTrainLvl) {
+                const isFar = Math.abs(pdx) > 150;
+                if (isFar && !checkVisible()) {
+                    const targetAisleY = (e.x >= 2400 && e.x <= 3600) ? 180 : 120;
+                    steerTargetY = targetAisleY;
+                }
+                if (Math.abs(pdx) > 400) {
+                    moveSpeed = Math.min(3.2, 1.8 + Math.abs(pdx) / 750);
+                }
+
+                // 防脱节/掉队机制 (Anti-straggler): 当玩家甩开敌人较远且在屏幕外时，敌人迅速在玩家相邻车厢中央走道合流包抄
+                const aliveCount = enemies.filter(en => en.hp > 0).length;
+                if ((isGlobalAlarmActive || aliveCount <= 4) && Math.abs(pdx) > 950 && Math.abs(e.x - player.x) > (window.innerWidth || 1000)) {
+                    e.stragglerTimer = (e.stragglerTimer || 0) + 1;
+                    if (e.stragglerTimer > 70 || (e.stuckFrames && e.stuckFrames > 20)) {
+                        const targetAdvX = Math.max(80, Math.min(7120, player.x - Math.sign(pdx) * 520));
+                        const targetAdvY = (targetAdvX >= 2400 && targetAdvX <= 3600) ? 180 : 120;
+                        if (!checkObstacleCollision(targetAdvX, targetAdvY, 16)) {
+                            e.x = targetAdvX;
+                            e.y = targetAdvY;
+                            e.stuckFrames = 0;
+                            e.stragglerTimer = 0;
+                        }
+                    }
+                }
+            }
+            
+            // 引入停止距离迟滞区间 (Hysteresis): 距离 < 38 时进入射击保持姿态，距离 > 52 时才重新起步追逐，彻底消除 1px 临界值反复抽搐
+            if (!e.isHoldingDistance && distToPlayer < 38) {
+                e.isHoldingDistance = true;
+            } else if (e.isHoldingDistance && distToPlayer > 52) {
+                e.isHoldingDistance = false;
+            }
+
+            if (!e.isHoldingDistance || (e.isJammer && e.jammerBlindActive)) {
+                const moveAngle = getObstacleSteeredHeading(e, steerTargetX, steerTargetY, moveSpeed, 16);
+                const mx = Math.cos(moveAngle) * moveSpeed;
+                const my = Math.sin(moveAngle) * moveSpeed;
+                const oldX = e.x, oldY = e.y;
+                let moved = tryMoveEnemy(e, mx, my, 16);
+                const movedDist = Math.hypot(e.x - oldX, e.y - oldY);
+                if (movedDist > 0.15) {
+                    const actualMoveAngle = Math.atan2(e.y - oldY, e.x - oldX);
+                    e.angle = turnAngleTowards(e.angle, actualMoveAngle, 0.16);
+                    e.walkCycle += 0.15;
+                    e.stuckFrames = 0;
+                } else {
+                    e.stuckFrames = (e.stuckFrames || 0) + 1;
+                    e.angle = turnAngleTowards(e.angle, moveAngle, 0.16);
+                }
+            } else {
+                e.angle = turnAngleTowards(e.angle, Math.atan2(pdy, pdx), 0.16);
+            }
+
+            // 地狱三头犬近距三首撕咬 (Cerberus Triple-Head Ravage)
+            if (e.isCerberus && distToPlayer < 65 && checkVisible() && (e.meleeCooldown || 0) <= 0) {
+                e.meleeCooldown = 38;
+                if (typeof soundManager !== 'undefined') soundManager.playExplosion();
+                createExplosion(player.x, player.y, 28, '#ff2200');
+                createExplosion(player.x, player.y, 18, '#f97316');
+                // 伤害极高但留足容错 (总计 34 点伤害，避免单次秒杀)
+                if (player.shield > 0) {
+                    player.shield = Math.max(0, player.shield - 22);
+                    player.hp = Math.max(0, player.hp - 12);
+                } else {
+                    player.hp = Math.max(0, player.hp - 34);
+                }
+                player.lastHitTimer = 180;
+                addLog("🐺 遭到地狱三头犬的三首利齿暴烈撕咬！");
+                if (player.hp <= 0) { triggerGameOver(false); return; }
+            } else if (e.isDemon && !e.isCerberus && distToPlayer < 65 && checkVisible() && (e.meleeCooldown || 0) <= 0) {
+                // 普通恶魔近战利爪
+                e.meleeCooldown = 35;
+                if (typeof soundManager !== 'undefined') soundManager.playExplosion();
+                createExplosion(player.x, player.y, 25, '#ff2200');
+                if (player.shield > 0) {
+                    player.shield = Math.max(0, player.shield - 25);
+                    player.hp = Math.max(0, player.hp - 10);
+                } else {
+                    player.hp = Math.max(0, player.hp - 25);
+                }
+                player.lastHitTimer = 180;
+                addLog("🔥 遭到了地狱恶魔的烈焰利爪撕咬！");
+                if (player.hp <= 0) { triggerGameOver(false); return; }
+            }
+            if (e.meleeCooldown > 0) e.meleeCooldown--;
+
+            // 远程射击：地狱三头犬无远程手段 (Pure Melee Only)
+            if (checkVisible() && e.shootCooldown <= 0 && !enemyInPool && !e.isCerberus) {
+                if (e.isDemon) {
+                    e.shootCooldown = 28; // 恶魔快速连发地狱火弹
+                    e.flashTimer = 4;
+                    if (typeof soundManager !== 'undefined') soundManager.playEnemyShoot();
+                    // 恶魔 3 连地狱火散射 (3-Orb Spread Hellfire Volley)
+                    const spreads = [-0.22, 0, 0.22];
+                    spreads.forEach(spreadAng => {
+                        const fireAng = e.angle + spreadAng;
+                        enemyBullets.push({
+                            x: e.x + Math.cos(fireAng) * 20,
+                            y: e.y + Math.sin(fireAng) * 20,
+                            vx: Math.cos(fireAng) * 10,
+                            vy: Math.sin(fireAng) * 10,
+                            penetrations: 1,
+                            isHellfire: true
+                        });
+                    });
+                } else {
+                    e.shootCooldown = Math.max(38, 60 - wave * 2);
+                    e.flashTimer = 3;
+                    if (typeof soundManager !== 'undefined') soundManager.playEnemyShoot();
+                    enemyBullets.push({
+                        x: e.x + Math.cos(e.angle) * 20, y: e.y + Math.sin(e.angle) * 20,
+                        vx: Math.cos(e.angle) * 8.5, vy: Math.sin(e.angle) * 8.5,
+                        penetrations: 1,
+                        isHellfire: false
+                    });
+                }
+            }
+        } else if (e.isJammer && e.jammerBlindActive) {
+            // 暗幕干扰者未被警觉但盲区激活时，同样严格留在自身暗幕圈内机动游弋
+            const zx = (typeof e.jammerZoneX === 'number') ? e.jammerZoneX : e.x;
+            const zy = (typeof e.jammerZoneY === 'number') ? e.jammerZoneY : e.y;
+            const safeZoneRad = Math.max(35, (e.jammerBlindRadius || 130) - 22);
+
+            e.jammerEvadeTimer = (e.jammerEvadeTimer || 0) - 1;
+            if (e.jammerEvadeTimer <= 0) {
+                e.jammerEvadeAngle = (e.jammerEvadeAngle || 0) + (Math.random() < 0.5 ? 1 : -1) * (0.8 + Math.random() * 0.8);
+                e.jammerEvadeTimer = 40 + Math.floor(Math.random() * 30);
+            }
+
+            const targetPX = zx + Math.cos(e.jammerEvadeAngle || 0) * (safeZoneRad * 0.7);
+            const targetPY = zy + Math.sin(e.jammerEvadeAngle || 0) * (safeZoneRad * 0.7);
+            const speed = 0.85;
+
+            const moveAngle = getObstacleSteeredHeading(e, targetPX, targetPY, speed, 16);
+            const mx = Math.cos(moveAngle) * speed;
+            const my = Math.sin(moveAngle) * speed;
+            const oldX = e.x, oldY = e.y;
+
+            let moved = tryMoveEnemy(e, mx, my, 16);
+            const movedDist = Math.hypot(e.x - oldX, e.y - oldY);
+            if (movedDist > 0.15) {
+                const actualMoveAngle = Math.atan2(e.y - oldY, e.x - oldX);
+                e.angle = turnAngleTowards(e.angle, actualMoveAngle, 0.12);
+                e.walkCycle += 0.08;
+            }
+        } else if (typeof waypoints !== 'undefined' && waypoints && waypoints.length > 0) {
+            if (e.targetWaypoint === undefined || e.targetWaypoint >= waypoints.length) {
+                e.targetWaypoint = 0;
+            }
+            const target = waypoints[e.targetWaypoint];
+            const tdx = target.x - e.x, tdy = target.y - e.y;
+            const distToTarget = Math.hypot(tdx, tdy);
+
+            if (e.waypointPauseTimer && e.waypointPauseTimer > 0) {
+                e.waypointPauseTimer--;
+                e.scanAngle = (e.scanAngle || 0) + 0.03;
+                e.angle += Math.sin(e.scanAngle) * 0.015;
+            } else if (distToTarget < 24) {
+                selectNextWaypoint(e);
+            } else {
+                let speed = e.patrolSpeed || 1.2;
+                if (((e.isObserver || e.isJammer) && playerInBlind) || (e.isObserver && inJammerZone) || inBlindZone(e.x, e.y) || (!e.isJammer && inJammerZone)) {
+                    speed = 0.35;
+                }
+                if (enemyInPool) speed *= 0.5;
+
+                const moveAngle = getObstacleSteeredHeading(e, target.x, target.y, speed, 16);
+                const mx = Math.cos(moveAngle) * speed;
+                const my = Math.sin(moveAngle) * speed;
+                const oldX = e.x, oldY = e.y;
+
+                let moved = tryMoveEnemy(e, mx, my, 16);
+                const movedDist = Math.hypot(e.x - oldX, e.y - oldY);
+
+                if (movedDist > 0.15) {
+                    const actualMoveAngle = Math.atan2(e.y - oldY, e.x - oldX);
+                    e.scanAngle = (e.scanAngle || 0) + 0.02;
+                    const targetFacing = actualMoveAngle + Math.sin(e.scanAngle) * 0.14;
+                    e.angle = turnAngleTowards(e.angle, targetFacing, 0.12);
+                    e.walkCycle += 0.1;
+                    e.stuckFrames = 0;
+                } else {
+                    e.stuckFrames = (e.stuckFrames || 0) + 1;
+                    if (e.stuckFrames > 25) {
+                        selectNextWaypoint(e);
+                    }
+                }
+            }
+        }
+    });
+
+    // Helicopter tail rotor contact damage logic
+    if (typeof props !== 'undefined' && (typeof currentLevelId !== 'undefined' ? currentLevelId === 'level4_yacht' : false)) {
+        const heli = props.find(p => p.type === 'helicopter');
+        if (heli) {
+            const cx = heli.x + heli.w / 2;
+            const cy = heli.y + heli.h / 2;
+            const bodyWidth = heli.h * 0.22;
+            const dx_local = -heli.w * 0.68;
+            const dy_local = -bodyWidth * 0.3;
+            const angle = heli.angle || 0;
+            const tailRotorWorld = {
+                x: cx + dx_local * Math.cos(angle) - dy_local * Math.sin(angle),
+                y: cy + dx_local * Math.sin(angle) + dy_local * Math.cos(angle)
+            };
+
+            // Player contact
+            if (player.hp > 0) {
+                const distPlayer = Math.hypot(player.x - tailRotorWorld.x, player.y - tailRotorWorld.y);
+                if (distPlayer < 28) {
+                    player.lastHitTimer = 180;
+                    if (player.shield > 0) {
+                        player.shield = Math.max(0, player.shield - 1.2);
+                        player.hp = Math.max(0, player.hp - 0.3);
+                    } else {
+                        player.hp = Math.max(0, player.hp - 1.0);
+                    }
+                    if (Math.random() < 0.25) {
+                        createExplosion(player.x, player.y, 4, '#ef4444');
+                        if (typeof soundManager !== 'undefined') {
+                            soundManager.playHit();
+                        }
+                    }
+                    if (player.hp <= 0) {
+                        triggerGameOver(false);
+                        return;
+                    }
+                }
+            }
+
+            // Enemies contact
+            enemies.forEach(e => {
+                if (e.hp > 0) {
+                    const distEnemy = Math.hypot(e.x - tailRotorWorld.x, e.y - tailRotorWorld.y);
+                    if (distEnemy < 28) {
+                        applyDamageToEnemy(e, 1.2);
+                        e.alert = true;
+                        e.alertCooldown = 300;
+                        e.hitTimer = 2;
+                    }
+                }
+            });
+        }
+    }
+
+    if (aliveCount === 0) {
+        waveTransitionTimer++;
+        const targetWave = getLevelTargetWave();
+        if (window.__storyBriefingEnabled && wave >= targetWave && !window.__levelObjectiveAchieved && waveTransitionTimer === 45) {
+            window.__levelObjectiveAchieved = true;
+            if (typeof window.onLevelObjectiveCompleted === 'function') {
+                window.onLevelObjectiveCompleted({
+                    levelIndex: (typeof levelManager !== 'undefined' && levelManager.currentIndex !== undefined) ? levelManager.currentIndex : 0,
+                    wave: wave,
+                    targetWave: targetWave,
+                    kills: killCount
+                });
+            }
+            togglePause(true);
+        } else if (waveTransitionTimer > 80) {
+            wave++; waveTransitionTimer = 0;
+            spawnWave();
+        }
+    }
+
+    const hpBar = document.getElementById('player-hp-bar');
+    if (hpBar) hpBar.style.width = (player.hp / player.maxHp * 100) + '%';
+
+    const shieldBar = document.getElementById('player-shield-bar');
+    if (shieldBar) shieldBar.style.width = (player.shield / player.maxShield * 100) + '%';
+
+    const blindBar = document.getElementById('blind-energy-bar');
+    if (blindBar) blindBar.style.width = (blindEnergy / MAX_BLIND_ENERGY * 100) + '%';
+    
+    const isEn = (window.__gameLang === 'en');
+    const label = document.getElementById('blind-label');
+    if (label) {
+        if (blindActive) {
+            label.innerText = isEn ? "BLIND ZONE ACTIVE [SPACE]" : "盲区开启中 [SPACE]";
+            label.style.color = "#FF3344";
+        } else {
+            label.innerText = isEn ? "BLIND ZONE [SPACE]" : "盲区能量 [SPACE]";
+            label.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : "#00FF66";
+        }
+    }
+
+    const targetWave = getLevelTargetWave();
+    const waveTitle = document.getElementById('wave-title');
+    if (waveTitle) {
+        if (!window.__storyBriefingEnabled) {
+            waveTitle.innerText = isEn ? `WAVE: ${wave}` : `波次: ${wave}`;
+            waveTitle.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : "#00FF66";
+        } else if (window.__endlessMode) {
+            waveTitle.innerText = isEn ? `WAVE: ${wave} [ENDLESS]` : `波次: ${wave} [无尽坚守]`;
+            waveTitle.style.color = "#FFCC00";
+        } else {
+            waveTitle.innerText = isEn ? `WAVE: ${wave} / ${targetWave}` : `波次: ${wave} / 目标: ${targetWave}波`;
+            waveTitle.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : "#00FF66";
+        }
+    }
+
+    const enemiesLeft = document.getElementById('enemies-left');
+    if (enemiesLeft) enemiesLeft.innerText = aliveCount > 0 ? (isEn ? `HOSTILES: ${aliveCount}` : `剩余敌人: ${aliveCount}`) : (isEn ? "NEXT WAVE INCOMING..." : "下一波即将到来...");
+
+    const scoreCount = document.getElementById('score-count');
+    if (scoreCount) scoreCount.innerText = isEn ? `KILLS: ${killCount}` : `击杀数: ${killCount}`;
+}
+
+function drawZones() {
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+    if (levelId === 'level0_test') return;
+    zones.forEach(z => {
+        if (typeof isObjectRevealed === 'function' && !isObjectRevealed(z.x, z.y, z.w, z.h)) {
+            return;
+        }
+        ctx.save();
+        if (levelId === 'level1_airport') {
+            ctx.strokeStyle = 'rgba(0, 255, 102, 0.4)';
+            ctx.fillStyle = 'rgba(0, 255, 102, 0.05)';
+        } else if ((levelId === 'level0_test' || levelId === 'level6_train')) {
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
+            ctx.fillStyle = 'rgba(14, 165, 233, 0.04)';
+        } else if (levelId === 'level5_hotel' || levelId === 'level4_test') {
+            ctx.strokeStyle = 'rgba(236, 72, 153, 0.45)';
+            ctx.fillStyle = 'rgba(236, 72, 153, 0.015)';
+        } else if (levelId === 'level4_yacht') {
+            ctx.strokeStyle = 'rgba(6, 182, 212, 0.5)';
+            ctx.fillStyle = 'rgba(6, 182, 212, 0.08)';
+        } else if (levelId === 'level2_subway') {
+            ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)';
+            ctx.fillStyle = 'rgba(245, 158, 11, 0.06)';
+        } else {
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.5)';
+            ctx.fillStyle = 'rgba(30, 58, 138, 0.22)';
+        }
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]); // 战术虚线外框
+        ctx.strokeRect(z.x, z.y, z.w, z.h);
+        ctx.fillRect(z.x, z.y, z.w, z.h);
+        
+        ctx.font = 'bold 9px monospace';
+        const txtW = ctx.measureText(z.name).width;
+        const align = z.align || 'center';
+        let labelX = z.labelX !== undefined ? z.labelX : (z.x + z.w / 2);
+        let labelY = z.labelY !== undefined ? z.labelY : (z.y + 14);
+
+        let badgeX = labelX;
+        if (align === 'center') {
+            badgeX = labelX - txtW / 2;
+        } else if (align === 'right') {
+            badgeX = labelX - txtW;
+        }
+
+        // Background pill badge for zone name so it stays clean and readable
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+        ctx.fillRect(badgeX - 5, labelY - 8, txtW + 10, 12);
+        ctx.strokeStyle = levelId === 'level7_lab' ? 'rgba(16,185,129,0.6)' : (levelId === 'level1_airport' ? 'rgba(0,255,102,0.4)' : ((levelId === 'level0_test' || levelId === 'level6_train') ? 'rgba(56,189,248,0.6)' : ((levelId === 'level5_hotel' || levelId === 'level4_test') ? 'rgba(236,72,153,0.6)' : (levelId === 'level4_yacht' ? 'rgba(6,182,212,0.5)' : (levelId === 'level2_subway' ? 'rgba(245,158,11,0.4)' : 'rgba(59,130,246,0.4)')))));
+        ctx.lineWidth = 0.8;
+        ctx.setLineDash([]);
+        ctx.strokeRect(badgeX - 5, labelY - 8, txtW + 10, 12);
+
+        ctx.fillStyle = levelId === 'level7_lab' ? '#10B981' : (levelId === 'level1_airport' ? '#00FF66' : ((levelId === 'level0_test' || levelId === 'level6_train') ? '#38BDF8' : ((levelId === 'level5_hotel' || levelId === 'level4_test') ? '#F43F5E' : (levelId === 'level4_yacht' ? '#06B6D4' : (levelId === 'level2_subway' ? '#FBBF24' : '#93C5FD')))));
+        ctx.textAlign = align;
+        ctx.fillText(z.name, labelX, labelY);
+        ctx.restore();
+    });
+}
+
+function drawPropTagLabel(p) {
+    if (p.hideLabel) return;
+    const text = p.displayName !== undefined ? p.displayName : p.label;
+    if (!text) return;
+
+    ctx.save();
+
+    ctx.font = 'bold 7.5px monospace';
+    const txtW = ctx.measureText(text).width;
+    let tagX = p.labelX !== undefined ? p.labelX : (p.x + (p.w - txtW) / 2);
+    let tagY = p.labelY !== undefined ? p.labelY : (p.y - 5);
+    
+    if (p.tagPosition === 'bottom') {
+        tagY = p.y + p.h + 8;
+    } else if (p.tagPosition === 'top') {
+        tagY = p.y - 5;
+    } else if (p.tagPosition === 'inside') {
+        tagY = p.y + p.h / 2 + 3;
+    } else if (p.tagPosition === 'right') {
+        tagX = p.x + p.w + 6;
+        tagY = p.y + p.h / 2 + 3;
+    } else if (p.tagPosition === 'left') {
+        tagX = p.x - txtW - 6;
+        tagY = p.y + p.h / 2 + 3;
+    } else if (p.labelY === undefined && p.y < 85 && p.tagPosition !== 'top') {
+        tagY = p.y + p.h + 8;
+    }
+
+    if (p.tagXOffset) tagX += p.tagXOffset;
+    if (p.tagYOffset) tagY += p.tagYOffset;
+
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+    const limitWidth = levelId === 'level7_lab' ? (window.level7MapWidth || 3200) : (levelId === 'level4_yacht' ? (window.level4MapWidth || 2400) : (levelId === 'level0_test' ? (window.level0MapWidth || 3200) : (levelId === 'level6_train' ? (window.level6MapWidth || 7200) : width)));
+    tagX = Math.max(4, Math.min(limitWidth - txtW - 6, tagX));
+
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.fillRect(tagX - 4, tagY - 7, txtW + 8, 10);
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(tagX - 4, tagY - 7, txtW + 8, 10);
+
+    ctx.fillStyle = '#e2e8f0';
+    ctx.textAlign = 'left';
+    ctx.fillText(text, tagX, tagY);
+
+    ctx.restore();
+}
+
+function drawAllPropLabels() {
+    props.forEach(p => {
+        if (typeof isObjectRevealed === 'function' && !isObjectRevealed(p.x, p.y, p.w || 1, p.h || 1)) {
+            return;
+        }
+        const camX = window.cameraX || 0;
+        if (p.x + (p.w || 50) < camX - 150 || p.x > camX + width + 150) {
+            return;
+        }
+        drawPropTagLabel(p);
+    });
+}
+
+function drawProps() {
+    props.forEach(p => {
+        if (typeof isObjectRevealed === 'function' && !isObjectRevealed(p.x, p.y, p.w || 1, p.h || 1)) {
+            return;
+        }
+        const camX = window.cameraX || 0;
+        if (p.x + (p.w || 50) < camX - 150 || p.x > camX + width + 150) {
+            return;
+        }
+        ctx.save();
+        if (typeof p.draw === 'function') {
+            p.draw(ctx);
+            ctx.restore();
+            return;
+        }
+        const lbl = (p.label || '').toUpperCase();
+
+        const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+        const isHotelLevel = (currentLevelId === 'level5_hotel');
+        const isTrainLevel = ((currentLevelId === 'level0_test' || currentLevelId === 'level6_train'));
+        const isYachtLevel = (currentLevelId === 'level4_yacht');
+        const isSubwayLevel = (currentLevelId === 'level2_subway');
+        const isBankLevel = (currentLevelId === 'level3_bank');
+        const isAirportLevel = (currentLevelId === 'level1_airport');
+
+        if (p.type === 'auto_glass_door' || p.type === 'glass_sliding_door' || (lbl.includes('GLASS') && lbl.includes('DOOR')) || lbl.includes('AUTO GATE') || p.type === 'subway_gate') {
+            // High-Fidelity Automatic Double-Leaf Sliding Glass Door / Platform Screen Gate
+            ctx.save();
+            const openProg = p.openProgress !== undefined ? p.openProgress : 0;
+            const isOpening = openProg > 0.05;
+            const isHorizontal = p.w >= p.h;
+
+            if (isHorizontal) {
+                // === 水平感应自动双开玻璃屏蔽门 / 站台闸门 (Horizontal Automatic Double Sliding Glass Gate) ===
+                // 1. 结构阴影
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+                ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+                // 2. 左右两侧机械立柱收纳机箱 (Side Jamb Housing Posts)
+                const postW = 8;
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(p.x, p.y, postW, p.h);
+                ctx.fillRect(p.x + p.w - postW, p.y, postW, p.h);
+                ctx.strokeStyle = '#38bdf8';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(p.x, p.y, postW, p.h);
+                ctx.strokeRect(p.x + p.w - postW, p.y, postW, p.h);
+
+                // 上下双道导轨基座 (Top & Bottom Track Guide Rails)
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(p.x + postW, p.y, p.w - postW * 2, 2);
+                ctx.fillRect(p.x + postW, p.y + p.h - 2, p.w - postW * 2, 2);
+                ctx.fillStyle = '#475569';
+                ctx.fillRect(p.x + postW, p.y + 0.5, p.w - postW * 2, 1);
+                ctx.fillRect(p.x + postW, p.y + p.h - 1.5, p.w - postW * 2, 1);
+
+                // 3. 中央微波红外运动感应器 (Center Motion Sensor)
+                const sensorX = p.x + p.w / 2;
+                const sensorY = p.y + p.h / 2;
+
+                // 感应器透镜指示灯 (待机明青色 / 感应开启亮绿色)
+                ctx.fillStyle = isOpening ? '#22c55e' : '#06b6d4';
+                ctx.shadowColor = isOpening ? '#22c55e' : '#06b6d4';
+                ctx.shadowBlur = 4;
+                ctx.beginPath();
+                ctx.arc(sensorX, sensorY, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+
+                // 地面感应微光扫描区域
+                if (isOpening) {
+                    const scanGrad = ctx.createRadialGradient(sensorX, sensorY, 2, sensorX, sensorY, 36);
+                    scanGrad.addColorStop(0, 'rgba(34, 197, 94, 0.32)');
+                    scanGrad.addColorStop(1, 'rgba(34, 197, 94, 0)');
+                    ctx.fillStyle = scanGrad;
+                    ctx.beginPath();
+                    ctx.arc(sensorX, sensorY, 36, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // 4. 左右双向水平滑动钢化玻璃门扇 (Dual Sliding Glass Leaves)
+                const trackXLeft = p.x + postW;
+                const trackXRight = p.x + p.w - postW;
+                const totalW = trackXRight - trackXLeft;
+                const halfW = totalW / 2;
+
+                const maxRetract = halfW - 2;
+                const slideOffset = maxRetract * openProg;
+
+                // 左门扇向左缩进
+                const leftLeafX = trackXLeft - slideOffset;
+                const leftLeafW = halfW;
+
+                // 右门扇向右缩进
+                const rightLeafX = trackXLeft + halfW + slideOffset;
+                const rightLeafW = halfW;
+
+                const glassY = p.y + 1;
+                const glassH = p.h - 2;
+
+                const drawHorizontalLeaf = (gx, gw, isLeftPanel) => {
+                    if (gw <= 1) return;
+
+                    // 高透青色安全玻璃
+                    ctx.fillStyle = 'rgba(6, 182, 212, 0.28)';
+                    ctx.fillRect(gx, glassY, gw, glassH);
+
+                    // 不锈钢包边
+                    ctx.strokeStyle = '#cbd5e1';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(gx, glassY, gw, glassH);
+
+                    // 安全警示磨砂竖条纹 (Frosted Manifestation Stripe)
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                    ctx.lineWidth = 0.8;
+                    const frostX = gx + gw / 2;
+                    ctx.beginPath();
+                    ctx.moveTo(frostX - 4, glassY + 1); ctx.lineTo(frostX - 4, glassY + glassH - 1);
+                    ctx.moveTo(frostX + 4, glassY + 1); ctx.lineTo(frostX + 4, glassY + glassH - 1);
+                    ctx.stroke();
+
+                    // 中缝醒目黄色防夹警示胶条 (Safety Edge)
+                    ctx.fillStyle = '#f59e0b';
+                    const seamX = isLeftPanel ? (gx + gw - 2) : gx;
+                    ctx.fillRect(seamX, glassY, 2, glassH);
+
+                    // 斜向防反光镜面高光
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+                    ctx.beginPath();
+                    ctx.moveTo(gx, glassY);
+                    ctx.lineTo(gx + gw * 0.4, glassY);
+                    ctx.lineTo(gx + gw * 0.2, glassY + glassH);
+                    ctx.lineTo(gx, glassY + glassH);
+                    ctx.closePath();
+                    ctx.fill();
+                };
+
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(p.x - 10, p.y - 4, p.w + 20, p.h + 8);
+                ctx.clip();
+
+                drawHorizontalLeaf(leftLeafX, leftLeafW, true);
+                drawHorizontalLeaf(rightLeafX, rightLeafW, false);
+
+                ctx.restore();
+
+                // 闭合时中央缓冲密封胶条
+                if (openProg < 0.1) {
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(trackXLeft + halfW - 1, glassY, 2, glassH);
+                }
+
+                // 左右机箱立柱警示光带
+                ctx.strokeStyle = isOpening ? '#22c55e' : '#38bdf8';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + postW, p.y);
+                ctx.moveTo(p.x + p.w - postW, p.y); ctx.lineTo(p.x + p.w, p.y);
+                ctx.moveTo(p.x, p.y + p.h); ctx.lineTo(p.x + postW, p.y + p.h);
+                ctx.moveTo(p.x + p.w - postW, p.y + p.h); ctx.lineTo(p.x + p.w, p.y + p.h);
+                ctx.stroke();
+
+            } else {
+                // === 垂直感应自动双开玻璃门 (Vertical Automatic Double Sliding Glass Door) ===
+                // 1. Structural Drop Shadow
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+                ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+                // 2. Heavy Titanium Steel Outer Frame (Side Posts)
+                ctx.fillStyle = '#1e293b'; // Slate dark steel
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 1.2;
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                // Top Header Box (Motor housing & optical sensor mount)
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(p.x - 2, p.y, p.w + 4, 8);
+                ctx.strokeStyle = '#38bdf8';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(p.x - 2, p.y, p.w + 4, 8);
+
+                // Bottom Floor Guide Rail Track
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(p.x - 2, p.y + p.h - 8, p.w + 4, 8);
+                ctx.strokeStyle = '#38bdf8';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(p.x - 2, p.y + p.h - 8, p.w + 4, 8);
+
+                // 3. Overhead Infrared Optical Motion Sensor
+                const sensorX = p.x + p.w / 2;
+                const sensorY = p.y + 4;
+
+                // Sensor Lens Indicator LED (Cyan standby, Green opening)
+                ctx.fillStyle = isOpening ? '#22c55e' : '#06b6d4';
+                ctx.beginPath();
+                ctx.arc(sensorX, sensorY, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Sensor Laser Scan Cone on floor when triggered
+                if (isOpening) {
+                    const scanGrad = ctx.createRadialGradient(sensorX, sensorY, 2, sensorX, p.y + p.h / 2, 36);
+                    scanGrad.addColorStop(0, 'rgba(34, 197, 94, 0.35)');
+                    scanGrad.addColorStop(1, 'rgba(34, 197, 94, 0)');
+                    ctx.fillStyle = scanGrad;
+                    ctx.beginPath();
+                    ctx.arc(sensorX, sensorY, 36, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // 4. Dual Sliding Tempered Glass Panels (Retracting Top & Bottom)
+                const trackYTop = p.y + 6;
+                const trackYBot = p.y + p.h - 6;
+                const totalH = trackYBot - trackYTop; // ~78px
+                const halfH = totalH / 2;             // ~39px
+
+                // Maximum slide retraction distance into housing frames
+                const maxRetract = halfH - 4;
+                const slideOffset = maxRetract * openProg;
+
+                // Top Panel: Retracts UPWARDS into top header housing
+                const topLeafY = trackYTop - slideOffset;
+                const topLeafH = halfH;
+
+                // Bottom Panel: Retracts DOWNWARDS into bottom floor guide
+                const botLeafY = trackYTop + halfH + slideOffset;
+                const botLeafH = halfH;
+
+                const glassX = p.x + 2;
+                const glassW = p.w - 4;
+
+                // Helper to render 1 glass leaf panel
+                const drawGlassLeaf = (gy, gh, isTopPanel) => {
+                    if (gh <= 1) return;
+
+                    // Translucent Cyan Tinted Safety Glass Body
+                    ctx.fillStyle = 'rgba(6, 182, 212, 0.28)';
+                    ctx.fillRect(glassX, gy, glassW, gh);
+
+                    // Polished Stainless Steel Edging Bezel
+                    ctx.strokeStyle = '#cbd5e1';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(glassX, gy, glassW, gh);
+
+                    // Etched Frosted Safety Manifestation Lines
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+                    ctx.lineWidth = 0.8;
+                    const frostY = gy + gh / 2;
+                    ctx.beginPath();
+                    ctx.moveTo(glassX + 1, frostY - 4);
+                    ctx.lineTo(glassX + glassW - 1, frostY - 4);
+                    ctx.moveTo(glassX + 1, frostY + 4);
+                    ctx.lineTo(glassX + glassW - 1, frostY + 4);
+                    ctx.stroke();
+
+                    // VIP Gold Crest Strip at center meeting seam
+                    ctx.fillStyle = '#f59e0b';
+                    const seamY = isTopPanel ? (gy + gh - 2) : gy;
+                    ctx.fillRect(glassX + 1, seamY, glassW - 2, 2);
+
+                    // Diagonal Specular Reflection Highlight
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.32)';
+                    ctx.beginPath();
+                    ctx.moveTo(glassX, gy);
+                    ctx.lineTo(glassX + glassW, gy + gh * 0.4);
+                    ctx.lineTo(glassX + glassW, gy + gh * 0.6);
+                    ctx.lineTo(glassX, gy + gh * 0.2);
+                    ctx.closePath();
+                    ctx.fill();
+                };
+
+                // Clip within outer frame bounds so panels slide into housings neatly
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(p.x - 4, p.y - 10, p.w + 8, p.h + 20);
+                ctx.clip();
+
+                // Render Top & Bottom Sliding Glass Leaves
+                drawGlassLeaf(topLeafY, topLeafH, true);
+                drawGlassLeaf(botLeafY, botLeafH, false);
+
+                ctx.restore();
+
+                // Center Seam Rubber Buffer Strip (visible when closed)
+                if (openProg < 0.1) {
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(glassX + 1, trackYTop + halfH - 1, glassW - 2, 2);
+                }
+
+                // Vertical Frame Jamb Soft Illumination LED Strips
+                ctx.strokeStyle = isOpening ? '#22c55e' : '#38bdf8';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x + 1, p.y + 8); ctx.lineTo(p.x + 1, p.y + p.h - 8);
+                ctx.moveTo(p.x + p.w - 1, p.y + 8); ctx.lineTo(p.x + p.w - 1, p.y + p.h - 8);
+                ctx.stroke();
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'heavy_auto_door' || lbl.includes('HEAVY AUTO DOOR') || lbl.includes('HEAVY DOOR') || lbl.includes('厚重自动门') || lbl.includes('ARMORED DOOR')) {
+            // Heavy Armored Automatic Blast Sliding Door
+            ctx.save();
+            const openProg = p.openProgress !== undefined ? p.openProgress : 0;
+            const isOpening = openProg > 0.05;
+
+            // 1. Heavy Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. Heavy Armored Frame Base
+            ctx.fillStyle = '#0f172a'; // Deep slate dark steel
+            ctx.fillRect(p.x - 2, p.y, p.w + 4, p.h);
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(p.x - 2, p.y, p.w + 4, p.h);
+
+            // Hazard Stripes on Side Pillars (Black & Yellow diagonal safety warnings)
+            const stripeStep = 6;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(p.x - 2, p.y, 4, p.h);
+            ctx.rect(p.x + p.w - 2, p.y, 4, p.h);
+            ctx.clip();
+            ctx.fillStyle = '#f59e0b'; // Hazard Yellow
+            for (let sy = p.y - 10; sy < p.y + p.h + 10; sy += stripeStep * 2) {
+                ctx.beginPath();
+                ctx.moveTo(p.x - 4, sy);
+                ctx.lineTo(p.x + p.w + 4, sy + 8);
+                ctx.lineTo(p.x + p.w + 4, sy + 12);
+                ctx.lineTo(p.x - 4, sy + 4);
+                ctx.closePath();
+                ctx.fill();
+            }
+            ctx.restore();
+
+            // Heavy Top Pneumatic Cylinder Housing
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x - 3, p.y, p.w + 6, 10);
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x - 3, p.y, p.w + 6, 10);
+
+            // Hydraulic pressure gauge / status LED
+            ctx.fillStyle = isOpening ? '#22c55e' : '#ef4444'; // Red locked, Green opening
+            ctx.beginPath();
+            ctx.arc(p.x + p.w / 2, p.y + 5, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Heavy Bottom Reinforced Threshold Rail
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x - 3, p.y + p.h - 10, p.w + 6, 10);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x - 3, p.y + p.h - 10, p.w + 6, 10);
+
+            // 3. Sliding Blast Door Panels (Top & Bottom heavy armored steel leaves)
+            const trackYTop = p.y + 8;
+            const trackYBot = p.y + p.h - 8;
+            const totalH = trackYBot - trackYTop;
+            const halfH = totalH / 2;
+
+            const maxRetract = halfH - 2;
+            const slideOffset = maxRetract * openProg;
+
+            const topLeafY = trackYTop - slideOffset;
+            const botLeafY = trackYTop + halfH + slideOffset;
+
+            const doorX = p.x + 1;
+            const doorW = p.w - 2;
+
+            // Clip sliding leaves within the frame
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(p.x - 4, p.y - 12, p.w + 8, p.h + 24);
+            ctx.clip();
+
+            const drawArmoredLeaf = (gy, gh, isTopPanel) => {
+                if (gh <= 1) return;
+
+                // Gunmetal Steel Armor Plate
+                ctx.fillStyle = '#334155';
+                ctx.fillRect(doorX, gy, doorW, gh);
+
+                // Steel Plate Outer Bezel
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 1.2;
+                ctx.strokeRect(doorX, gy, doorW, gh);
+
+                // Reinforced Armor Cross Bracing / Ribs
+                ctx.strokeStyle = '#1e293b';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(doorX + 2, gy + 3); ctx.lineTo(doorX + doorW - 2, gy + gh - 3);
+                ctx.moveTo(doorX + doorW - 2, gy + 3); ctx.lineTo(doorX + 2, gy + gh - 3);
+                ctx.stroke();
+
+                // Narrow Armored Glass Slit (Tactical observation window)
+                const slitY = gy + gh / 2 - 2;
+                ctx.fillStyle = 'rgba(56, 189, 248, 0.7)'; // Cyan armor glass
+                ctx.fillRect(doorX + 2, slitY, doorW - 4, 4);
+                ctx.strokeStyle = '#0284c7';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(doorX + 2, slitY, doorW - 4, 4);
+
+                // Heavy Interlocking Steel Lock Teeth at center seam
+                ctx.fillStyle = '#f59e0b';
+                const seamY = isTopPanel ? (gy + gh - 3) : gy;
+                ctx.fillRect(doorX, seamY, doorW, 3);
+            };
+
+            drawArmoredLeaf(topLeafY, halfH, true);
+            drawArmoredLeaf(botLeafY, halfH, false);
+
+            ctx.restore();
+
+            // Center Red Glowing Laser Seam when fully closed
+            if (openProg < 0.08) {
+                ctx.strokeStyle = '#ef4444';
+                ctx.lineWidth = 1.5;
+                ctx.shadowColor = '#ef4444';
+                ctx.shadowBlur = 4;
+                ctx.beginPath();
+                ctx.moveTo(doorX - 2, trackYTop + halfH);
+                ctx.lineTo(doorX + doorW + 2, trackYTop + halfH);
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'control_console' || lbl.includes('CONTROL CONSOLE') || lbl.includes('SCREEN CONSOLE') || lbl.includes('控制台'))) {
+            // High-Tech Semi-Enclosed U-Shaped Operator Command Console Pod (环绕型多屏幕控制台)
+            ctx.save();
+            const isFacingDown = p.facing === 'down';
+
+            // 1. Soft Ambient Cyan Light Emission Glow on Floor
+            ctx.shadowColor = '#06b6d4';
+            ctx.shadowBlur = 12;
+            ctx.fillStyle = 'rgba(6, 182, 212, 0.15)';
+            ctx.fillRect(p.x - 4, p.y - 4, p.w + 8, p.h + 8);
+            ctx.shadowBlur = 0;
+
+            // 2. Drop Shadow for 3D Elevation
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 3. U-Shaped Carbon-Fiber & Slate Titanium Hull Base (Recessed center pocket for operator seat)
+            const cx = p.x + p.w / 2;
+            const pocketW = 32;
+            const pocketH = 22;
+            const pocketX = cx - pocketW / 2;
+
+            ctx.beginPath();
+            if (isFacingDown) {
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(p.x + p.w, p.y);
+                ctx.lineTo(p.x + p.w, p.y + p.h);
+                ctx.lineTo(pocketX + pocketW, p.y + p.h);
+                ctx.lineTo(pocketX + pocketW, p.y + p.h - pocketH);
+                ctx.lineTo(pocketX, p.y + p.h - pocketH);
+                ctx.lineTo(pocketX, p.y + p.h);
+                ctx.lineTo(p.x, p.y + p.h);
+            } else {
+                ctx.moveTo(p.x, p.y + p.h);
+                ctx.lineTo(p.x + p.w, p.y + p.h);
+                ctx.lineTo(p.x + p.w, p.y);
+                ctx.lineTo(pocketX + pocketW, p.y);
+                ctx.lineTo(pocketX + pocketW, p.y + pocketH);
+                ctx.lineTo(pocketX, p.y + pocketH);
+                ctx.lineTo(pocketX, p.y);
+                ctx.lineTo(p.x, p.y);
+            }
+            ctx.closePath();
+
+            const deskGrad = ctx.createLinearGradient(p.x, p.y, p.x + p.w, p.y + p.h);
+            deskGrad.addColorStop(0, '#0f172a');
+            deskGrad.addColorStop(0.5, '#1e293b');
+            deskGrad.addColorStop(1, '#0f172a');
+            ctx.fillStyle = deskGrad;
+            ctx.fill();
+
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+
+            // Corner Metallic Brackets
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(p.x - 1, p.y - 1, 6, 4);
+            ctx.fillRect(p.x + p.w - 5, p.y - 1, 6, 4);
+            ctx.fillRect(p.x - 1, p.y + p.h - 3, 6, 4);
+            ctx.fillRect(p.x + p.w - 5, p.y + p.h - 3, 6, 4);
+
+            // 4. Wrapped 3-Monitor Curved Display Array
+            const cenW = 36;
+            const cenH = 11;
+            const cenX = cx - cenW / 2;
+            const cenY = isFacingDown ? (p.y + 4) : (p.y + p.h - cenH - 4);
+
+            const sideW = 18;
+            const sideH = 12;
+            const leftX = p.x + 4;
+            const leftY = isFacingDown ? (p.y + 6) : (p.y + p.h - sideH - 6);
+            const rightX = p.x + p.w - sideW - 4;
+            const rightY = leftY;
+
+            const drawConsoleScreen = (sx, sy, sw, sh, colorTheme, screenType) => {
+                ctx.fillStyle = '#020617';
+                ctx.fillRect(sx - 1, sy - 1, sw + 2, sh + 2);
+                ctx.strokeStyle = colorTheme;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(sx - 1, sy - 1, sw + 2, sh + 2);
+
+                const scrGrad = ctx.createLinearGradient(sx, sy, sx + sw, sy + sh);
+                scrGrad.addColorStop(0, '#020617');
+                scrGrad.addColorStop(0.6, colorTheme === '#38bdf8' ? '#0369a1' : (colorTheme === '#22c55e' ? '#15803d' : '#0f766e'));
+                scrGrad.addColorStop(1, '#020617');
+                ctx.fillStyle = scrGrad;
+                ctx.fillRect(sx, sy, sw, sh);
+
+                if (screenType === 'radar') {
+                    // Tactical Radar Scope with concentric rings & blip
+                    const rx = sx + sw / 2;
+                    const ry = sy + sh / 2;
+                    ctx.strokeStyle = 'rgba(34, 197, 94, 0.5)';
+                    ctx.lineWidth = 0.8;
+                    ctx.beginPath();
+                    ctx.arc(rx, ry, 3, 0, Math.PI * 2);
+                    ctx.arc(rx, ry, 5.5, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.strokeStyle = '#22c55e';
+                    ctx.beginPath();
+                    ctx.moveTo(rx, ry); ctx.lineTo(rx + 4, ry - 3);
+                    ctx.stroke();
+                    ctx.fillStyle = '#ef4444'; ctx.fillRect(rx + 2, ry - 3, 1.5, 1.5);
+                    ctx.fillStyle = '#eab308'; ctx.fillRect(rx - 3, ry + 2, 1.5, 1.5);
+                } else if (screenType === 'center') {
+                    // Train Schematic + Telemetry Wave
+                    ctx.strokeStyle = '#38bdf8';
+                    ctx.lineWidth = 0.8;
+                    ctx.strokeRect(sx + 2, sy + 2, sw - 4, 3);
+                    // 6 car status blocks
+                    for (let c = 0; c < 6; c++) {
+                        ctx.fillStyle = c === 4 ? '#eab308' : '#22c55e';
+                        ctx.fillRect(sx + 3 + c * 5, sy + 3, 4, 1.5);
+                    }
+                    // Telemetry sine line
+                    ctx.strokeStyle = '#22d3ee';
+                    ctx.beginPath();
+                    let wx = sx + 2;
+                    ctx.moveTo(wx, sy + sh - 3);
+                    for (let i = 0; i < 7; i++) {
+                        wx += 4;
+                        ctx.lineTo(wx, sy + sh - 3 + (i % 2 === 0 ? -3 : 2));
+                    }
+                    ctx.stroke();
+                } else if (screenType === 'telemetry') {
+                    // Equalizer spectrum bars + status indicators
+                    for (let b = 0; b < 5; b++) {
+                        const bh = 3 + (b % 3) * 2;
+                        ctx.fillStyle = b === 4 ? '#f59e0b' : '#2dd4bf';
+                        ctx.fillRect(sx + 2 + b * 3, sy + sh - 2 - bh, 2, bh);
+                    }
+                    ctx.fillStyle = '#22c55e';
+                    ctx.fillRect(sx + 2, sy + 2, sw - 4, 1.5);
+                    ctx.fillRect(sx + 2, sy + 4.5, sw - 8, 1.5);
+                }
+
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(sx + 2, sy + sh - 2); ctx.lineTo(sx + sw - 2, sy + 2);
+                ctx.stroke();
+            };
+
+            drawConsoleScreen(leftX, leftY, sideW, sideH, '#22c55e', 'radar');
+            drawConsoleScreen(cenX, cenY, cenW, cenH, '#38bdf8', 'center');
+            drawConsoleScreen(rightX, rightY, sideW, sideH, '#2dd4bf', 'telemetry');
+
+            // 5. Desktop Controls & Hardware
+            const deskY = isFacingDown ? (p.y + p.h - 14) : (p.y + 6);
+
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + 6, deskY, 8, 8);
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath();
+            ctx.arc(p.x + 10, deskY + 4, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + p.w - 14, deskY, 8, 8);
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath();
+            ctx.arc(p.x + p.w - 10, deskY + 4, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            const kbX = cx - 18;
+            const kbW = 36;
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(kbX, deskY + 1, kbW, 6);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(kbX, deskY + 1, kbW, 6);
+
+            ctx.fillStyle = '#38bdf8'; ctx.fillRect(kbX + 2, deskY + 2.5, 4, 3);
+            ctx.fillStyle = '#22c55e'; ctx.fillRect(kbX + 8, deskY + 2.5, 4, 3);
+            ctx.fillStyle = '#eab308'; ctx.fillRect(kbX + 14, deskY + 2.5, 4, 3);
+            ctx.fillStyle = '#ef4444'; ctx.fillRect(kbX + 20, deskY + 2.5, 4, 3);
+
+            ctx.fillStyle = '#06b6d4';
+            ctx.beginPath();
+            ctx.arc(kbX + 30, deskY + 4, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'command_display' || lbl.includes('COMMAND MAIN DISPLAY') || lbl.includes('COMMAND SCREEN') || lbl.includes('大屏幕'))) {
+            // High-Fidelity Ultra-Wide Tactical Command Display Screen Array
+            ctx.save();
+
+            // 1. Soft Floor Cyan Illumination Glow
+            ctx.shadowColor = '#0284c7';
+            ctx.shadowBlur = 15;
+            ctx.fillStyle = 'rgba(2, 132, 199, 0.2)';
+            ctx.fillRect(p.x - 6, p.y, p.w + 12, p.h + 20);
+            ctx.shadowBlur = 0;
+
+            // 2. Heavy Steel Wall Mounting Brackets
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 20, p.y - 2, 8, 4);
+            ctx.fillRect(p.x + 70, p.y - 2, 8, 4);
+            ctx.fillRect(p.x + 120, p.y - 2, 8, 4);
+            ctx.fillRect(p.x + 170, p.y - 2, 8, 4);
+
+            // 3. Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 4. Heavy Titanium Bezel Frame
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Seamless Multi-Tile Bezels (3 Panels)
+            const tileW = (p.w - 4) / 3;
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 2 + tileW, p.y); ctx.lineTo(p.x + 2 + tileW, p.y + p.h);
+            ctx.moveTo(p.x + 2 + tileW * 2, p.y); ctx.lineTo(p.x + 2 + tileW * 2, p.y + p.h);
+            ctx.stroke();
+
+            // Active Display Face Gradient
+            const screenGrad = ctx.createLinearGradient(p.x, p.y, p.x + p.w, p.y + p.h);
+            screenGrad.addColorStop(0, '#0f172a');
+            screenGrad.addColorStop(0.3, '#0369a1');
+            screenGrad.addColorStop(0.7, '#0f172a');
+            screenGrad.addColorStop(1, '#0284c7');
+            ctx.fillStyle = screenGrad;
+            ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, p.h - 4);
+
+            // Global Wireframe Grid
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
+            ctx.lineWidth = 0.8;
+            for (let gx = p.x + 12; gx < p.x + p.w - 10; gx += 16) {
+                ctx.beginPath(); ctx.moveTo(gx, p.y + 2); ctx.lineTo(gx, p.y + p.h - 2); ctx.stroke();
+            }
+            ctx.beginPath(); ctx.moveTo(p.x + 2, p.y + p.h / 2); ctx.lineTo(p.x + p.w - 2, p.y + p.h / 2); ctx.stroke();
+
+            // Panel 1 (Left Tile): Track Profile & System Status
+            ctx.fillStyle = '#38bdf8';
+            ctx.font = '8px monospace';
+            ctx.fillText('ROUTE OK', p.x + 6, p.y + 10);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(p.x + 6, p.y + 12, 38, 3);
+
+            // Elevation profile curve
+            ctx.strokeStyle = '#22d3ee';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 6, p.y + p.h - 4);
+            ctx.lineTo(p.x + 25, p.y + p.h - 8);
+            ctx.lineTo(p.x + 45, p.y + p.h - 5);
+            ctx.lineTo(p.x + 60, p.y + p.h - 10);
+            ctx.stroke();
+
+            // Panel 2 (Center Tile): Whole Train 6-Car Power Grid Schematic
+            const cT2 = p.x + tileW + 6;
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(cT2, p.y + 4, tileW - 12, 6);
+            for (let c = 0; c < 6; c++) {
+                ctx.fillStyle = c === 4 ? '#eab308' : '#22c55e';
+                ctx.fillRect(cT2 + 2 + c * 8, p.y + 5.5, 6, 3);
+            }
+            ctx.fillStyle = '#38bdf8';
+            ctx.font = '7px monospace';
+            ctx.fillText('SYS: NOMINAL', cT2 + 4, p.y + 16);
+
+            // Panel 3 (Right Tile): Security Matrix & Annunciators
+            const rT3 = p.x + tileW * 2 + 6;
+            for (let z = 0; z < 6; z++) {
+                ctx.fillStyle = z === 5 ? '#f59e0b' : '#22c55e';
+                ctx.fillRect(rT3 + (z % 3) * 10, p.y + 4 + Math.floor(z / 3) * 6, 8, 4);
+            }
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(rT3 + 36, p.y + 4, 18, 4);
+            ctx.fillRect(rT3 + 36, p.y + 10, 14, 4);
+
+            // Diagonal Specular Glare Lines
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 30, p.y + p.h - 2); ctx.lineTo(p.x + 70, p.y + 2);
+            ctx.moveTo(p.x + 120, p.y + p.h - 2); ctx.lineTo(p.x + 160, p.y + 2);
+            ctx.stroke();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'conference_table' || lbl.includes('CONFERENCE TABLE') || lbl.includes('MEETING TABLE') || lbl.includes('会议桌'))) {
+            // High-Tech Executive Command Conference Table (长形指挥会议桌)
+            ctx.save();
+            // Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Metallic Table Body with Rounded Chamfered Corners
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 6);
+            ctx.fill();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+
+            // Inner Dark Slate / Carbon Fiber Inlay
+            ctx.fillStyle = '#1e293b';
+            ctx.beginPath();
+            ctx.roundRect(p.x + 4, p.y + 4, p.w - 8, p.h - 8, 4);
+            ctx.fill();
+
+            // Center Embedded Tactical Holographic Glass Ribbon / Screen Stripe
+            const stripeGrad = ctx.createLinearGradient(p.x, p.y, p.x + p.w, p.y);
+            stripeGrad.addColorStop(0, 'rgba(2, 132, 199, 0.4)');
+            stripeGrad.addColorStop(0.5, 'rgba(56, 189, 248, 0.85)');
+            stripeGrad.addColorStop(1, 'rgba(2, 132, 199, 0.4)');
+            ctx.fillStyle = stripeGrad;
+            ctx.fillRect(p.x + 12, p.y + p.h / 2 - 3, p.w - 24, 6);
+            ctx.strokeStyle = '#22d3ee';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + 12, p.y + p.h / 2 - 3, p.w - 24, 6);
+
+            // Integrated Microphone Stalks & Touch Terminal Nodes for Attendees
+            const numNodes = 5;
+            const nodeStep = (p.w - 30) / (numNodes - 1);
+            for (let i = 0; i < numNodes; i++) {
+                const nx = p.x + 15 + i * nodeStep;
+                // North Side Node
+                ctx.fillStyle = '#38bdf8';
+                ctx.fillRect(nx - 2, p.y + 6, 4, 2);
+                ctx.fillStyle = '#22c55e';
+                ctx.fillRect(nx - 1, p.y + 9, 2, 2);
+
+                // South Side Node
+                ctx.fillStyle = '#38bdf8';
+                ctx.fillRect(nx - 2, p.y + p.h - 8, 4, 2);
+                ctx.fillStyle = '#22c55e';
+                ctx.fillRect(nx - 1, p.y + p.h - 11, 2, 2);
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'command_seat' || lbl.includes('COMMAND SEAT') || lbl.includes('COMMAND CHAIR') || lbl.includes('指挥座位'))) {
+            // High-Tech Ergonomic Tactical Operator Chair
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+
+            // 5-Star Metallic Base with Caster Wheels
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1.2;
+            for (let a = 0; a < 5; a++) {
+                const ang = (a * Math.PI * 2) / 5;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx + Math.cos(ang) * (p.w * 0.4), cy + Math.sin(ang) * (p.h * 0.4));
+                ctx.stroke();
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(cx + Math.cos(ang) * (p.w * 0.4) - 1.5, cy + Math.sin(ang) * (p.h * 0.4) - 1.5, 3, 3);
+            }
+
+            // Ergonomic Dark Navy Leather Seat Cushion
+            ctx.fillStyle = '#1e293b';
+            ctx.beginPath();
+            ctx.roundRect(p.x + 5, p.y + 5, p.w - 10, p.h - 10, 4);
+            ctx.fill();
+            ctx.strokeStyle = '#0284c7';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Seat Stitched Cushion Grooves
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 8, cy); ctx.lineTo(p.x + p.w - 8, cy);
+            ctx.stroke();
+
+            // Backrest & Headrest Pillow
+            const isFacingDown = p.facing === 'down';
+            const brY = isFacingDown ? (p.y + 3) : (p.y + p.h - 7);
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 6, brY, p.w - 12, 4);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.strokeRect(p.x + 6, brY, p.w - 12, 4);
+
+            // Headrest Cushion Accent
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(cx - 4, isFacingDown ? p.y + 2 : p.y + p.h - 4, 8, 2);
+
+            // Padded Armrests with Touch Indicator LED
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 2, cy - 4, 3, 8);
+            ctx.fillRect(p.x + p.w - 5, cy - 4, 3, 8);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(p.x + 3, cy - 2, 1, 2);
+            ctx.fillRect(p.x + p.w - 4, cy - 2, 1, 2);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'cockpit_chair' || lbl.includes('CAPTAIN PILOT CHAIR') || lbl.includes('PILOT SEAT') || lbl.includes('驾驶员座椅') || lbl.includes('CAPTAIN CHAIR'))) {
+            // High-Tech Armored Flight Captain Seat
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+
+            // Heavy Duty Steel Pedestal Base
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w - 8, p.h - 8);
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x + 4, p.y + 4, p.w - 8, p.h - 8);
+
+            // Armored Leather Bucket Seat
+            ctx.fillStyle = '#0b1329';
+            ctx.beginPath();
+            ctx.roundRect(p.x + 5, p.y + 5, p.w - 10, p.h - 10, 4);
+            ctx.fill();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Side Support Wings
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x + 3, cy - 8, 3, 16);
+            ctx.fillRect(p.x + p.w - 6, cy - 8, 3, 16);
+
+            // Safety Harness Straps (Crossed Amber Straps)
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(cx - 6, cy - 7); ctx.lineTo(cx + 6, cy + 7);
+            ctx.moveTo(cx + 6, cy - 7); ctx.lineTo(cx - 6, cy + 7);
+            ctx.stroke();
+
+            // Central Quick-Release Metal Buckle
+            ctx.fillStyle = '#e2e8f0';
+            ctx.fillRect(cx - 2.5, cy - 2.5, 5, 5);
+
+            // Flight Control Joysticks on Armrests
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + 1, cy - 6, 2, 12);
+            ctx.fillRect(p.x + p.w - 3, cy - 6, 2, 12);
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(p.x + 1, cy - 8, 2, 3);
+            ctx.fillRect(p.x + p.w - 3, cy - 8, 2, 3);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'cockpit_main_console' || lbl.includes('COCKPIT MAIN CONSOLE') || lbl.includes('FLIGHT CONTROL') || lbl.includes('屏幕中控'))) {
+            // Master Front Flight Deck Hyper-Realistic 180° Wrap-Around Panoramic HUD Cockpit Console (屏幕中控)
+            ctx.save();
+            const cy = p.y + p.h / 2;
+
+            // 1. Ambient Floor Cyan/Teal Glow Emission
+            ctx.shadowColor = '#06b6d4';
+            ctx.shadowBlur = 16;
+            ctx.fillStyle = 'rgba(6, 182, 212, 0.2)';
+            ctx.beginPath();
+            ctx.arc(p.x + p.w * 0.7, cy, p.h / 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            // 2. Horseshoe / Semi-Circular Wrap-Around Titanium Hull Base
+            const outerR = Math.min(p.w * 0.92, p.h / 2);
+            const innerR = Math.max(12, outerR - 26);
+            const arcCx = p.x + p.w - outerR - 4;
+
+            // Build perfectly 100% symmetrical horseshoe path function
+            const drawConsoleHullPath = (ox = 0, oy = 0) => {
+                ctx.beginPath();
+                // Outer semi-circle arc wrapping from North (-PI/2) to South (PI/2)
+                ctx.arc(arcCx + ox, cy + oy, outerR, -Math.PI / 2, Math.PI / 2, false);
+                // Bottom leg to inner arc
+                ctx.lineTo(arcCx + ox, cy + innerR + oy);
+                // Inner semi-circle arc wrapping from South (PI/2) to North (-PI/2)
+                ctx.arc(arcCx + ox, cy + oy, innerR, Math.PI / 2, -Math.PI / 2, true);
+                // Top leg to outer arc
+                ctx.lineTo(arcCx + ox, cy - outerR + oy);
+                ctx.closePath();
+            };
+
+            // Path-based drop shadow (exact shape match, no rectangular overhangs)
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+            drawConsoleHullPath(3, 3);
+            ctx.fill();
+
+            // Draw main console body
+            drawConsoleHullPath(0, 0);
+
+            // Metallic Dark Slate Carbon-Fiber Radial Gradient
+            const bodyGrad = ctx.createRadialGradient(arcCx, cy, innerR, arcCx, cy, outerR);
+            bodyGrad.addColorStop(0, '#0f172a');
+            bodyGrad.addColorStop(0.5, '#1e293b');
+            bodyGrad.addColorStop(0.85, '#0f172a');
+            bodyGrad.addColorStop(1, '#020617');
+            ctx.fillStyle = bodyGrad;
+            ctx.fill();
+
+            // Chamfered Metallic Outer Bevel Accent Line
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+
+            // 3. Wrapped 3-Segment Panoramic Curved HUD Glasses (North Radar Arc, Center Flight Vector Arc, South Engine Arc)
+            const drawArcScreen = (startAngle, endAngle, mainColor, scrType) => {
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(arcCx, cy, outerR - 3, startAngle, endAngle, false);
+                ctx.arc(arcCx, cy, outerR - 20, endAngle, startAngle, true);
+                ctx.closePath();
+
+                // Glass Gradient
+                const glassGrad = ctx.createRadialGradient(arcCx, cy, outerR - 20, arcCx, cy, outerR - 3);
+                glassGrad.addColorStop(0, '#020617');
+                glassGrad.addColorStop(0.5, mainColor);
+                glassGrad.addColorStop(1, '#020617');
+                ctx.fillStyle = glassGrad;
+                ctx.fill();
+
+                ctx.strokeStyle = '#22d3ee';
+                ctx.lineWidth = 1.2;
+                ctx.stroke();
+
+                // Custom Graphic Overlay per Segment
+                if (scrType === 'radar') {
+                    // Radar Arc Overlay
+                    const midA = (startAngle + endAngle) / 2;
+                    const rx = arcCx + Math.cos(midA) * (outerR - 11);
+                    const ry = cy + Math.sin(midA) * (outerR - 11);
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                    ctx.lineWidth = 0.8;
+                    ctx.beginPath();
+                    ctx.arc(rx, ry, 5, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.fillStyle = '#ef4444';
+                    ctx.fillRect(rx - 1, ry - 1, 2, 2);
+                } else if (scrType === 'flight') {
+                    // Flight Artificial Horizon Line & Pitch Ticks
+                    ctx.strokeStyle = '#fef08a';
+                    ctx.lineWidth = 1.2;
+                    ctx.beginPath();
+                    ctx.moveTo(p.x + 16, cy - 6); ctx.lineTo(p.x + 36, cy); ctx.lineTo(p.x + 16, cy + 6);
+                    ctx.stroke();
+
+                    ctx.strokeStyle = '#22c55e';
+                    ctx.lineWidth = 0.8;
+                    ctx.beginPath();
+                    ctx.moveTo(p.x + 24, cy - 12); ctx.lineTo(p.x + 36, cy - 12);
+                    ctx.moveTo(p.x + 24, cy + 12); ctx.lineTo(p.x + 36, cy + 12);
+                    ctx.stroke();
+                } else if (scrType === 'engine') {
+                    // Engine Heat Bars
+                    const midA = (startAngle + endAngle) / 2;
+                    const ex = arcCx + Math.cos(midA) * (outerR - 11);
+                    const ey = cy + Math.sin(midA) * (outerR - 11);
+                    ctx.fillStyle = '#22c55e';
+                    ctx.fillRect(ex - 5, ey - 2, 10, 2);
+                    ctx.fillRect(ex - 5, ey + 2, 7, 2);
+                }
+                ctx.restore();
+            };
+
+            // Top North Arc (Tactical Radar Scope)
+            drawArcScreen(-Math.PI * 0.44, -Math.PI * 0.16, 'rgba(2, 132, 199, 0.75)', 'radar');
+            // Center Arc (Flight Vector & Velocity Windshield HUD)
+            drawArcScreen(-Math.PI * 0.13, Math.PI * 0.13, 'rgba(6, 182, 212, 0.85)', 'flight');
+            // Bottom South Arc (Engine Reactor & Telemetry Dials)
+            drawArcScreen(Math.PI * 0.16, Math.PI * 0.44, 'rgba(15, 118, 110, 0.75)', 'engine');
+
+            // 4. Physical Flight Controls (Throttle Levers, Yoke Handles & Illuminated Switches)
+            // Throttle Quadrant (North Side)
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 6, cy - 44, 12, 7);
+            ctx.fillStyle = '#f59e0b'; // Amber lever knobs
+            ctx.fillRect(p.x + 8, cy - 46, 3, 10);
+            ctx.fillRect(p.x + 13, cy - 46, 3, 10);
+
+            // Emergency Stop Button (South Side)
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath();
+            ctx.arc(p.x + 12, cy + 42, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#f59e0b'; // Yellow hazard shroud
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Array of Glowing LED Toggle Switches along inner rim
+            for (let i = 0; i < 6; i++) {
+                const ang = -Math.PI * 0.35 + i * (Math.PI * 0.7 / 5);
+                const swX = arcCx + Math.cos(ang) * (innerR + 3);
+                const swY = cy + Math.sin(ang) * (innerR + 3);
+                ctx.fillStyle = i % 2 === 0 ? '#38bdf8' : '#22c55e';
+                ctx.fillRect(swX - 1.5, swY - 1.5, 3, 3);
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (lbl.includes('PREP COUNTER') || (p.type === 'counter' && lbl.includes('PREP')))) {
+            // High-fidelity Train Kitchen Preparation Station (不锈钢与胡桃木复古备餐操作台)
+            ctx.save();
+            // 1. Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            // 2. Base Dark Mahogany Cabinet
+            ctx.fillStyle = '#3b1106';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+
+            // 3. Food-Grade Brushed Stainless Steel Top Surface
+            const metalGrad = ctx.createLinearGradient(p.x, p.y, p.x, p.y + p.h);
+            metalGrad.addColorStop(0, '#f1f5f9');
+            metalGrad.addColorStop(0.5, '#cbd5e1');
+            metalGrad.addColorStop(1, '#94a3b8');
+            ctx.fillStyle = metalGrad;
+            ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2);
+
+            // Outer Brass Frame Edge
+            ctx.strokeStyle = '#d97706';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 4. Built-in Double-Basin Stainless Steel Sink (双槽不锈钢水槽)
+            const sinkX = p.x + 6;
+            const sinkY = p.y + 3;
+            const sinkW = 22;
+            const sinkH = p.h - 6;
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(sinkX, sinkY, sinkW, sinkH);
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(sinkX, sinkY, sinkW, sinkH);
+            // Left & right basin basins with metallic gradient
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(sinkX + 2, sinkY + 2, 8, sinkH - 4);
+            ctx.fillRect(sinkX + 12, sinkY + 2, 8, sinkH - 4);
+            // Chrome Goose-neck Faucet Tap
+            ctx.strokeStyle = '#f8fafc';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(sinkX + 11, sinkY + sinkH / 2, 2.5, 0, Math.PI);
+            ctx.stroke();
+
+            // 5. Wooden Cutting Board with Lemon Slices & Chef Knife (切菜砧板与水果片)
+            const boardX = p.x + 34;
+            const boardY = p.y + 4;
+            ctx.fillStyle = '#78350f'; // Maple wood
+            ctx.fillRect(boardX, boardY, 16, p.h - 8);
+            ctx.strokeStyle = '#451a03';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(boardX, boardY, 16, p.h - 8);
+            // Lemon & Lime rounds
+            ctx.fillStyle = '#fef08a';
+            ctx.beginPath(); ctx.arc(boardX + 4, boardY + 5, 2.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#84cc16';
+            ctx.beginPath(); ctx.arc(boardX + 11, boardY + 9, 2, 0, Math.PI * 2); ctx.fill();
+
+            // 6. Stack of Fine Blue-Pattern Porcelain Dishes (青花餐盘叠放)
+            const plateX = p.x + 58;
+            const plateY = p.y + p.h / 2;
+            for (let i = 0; i < 3; i++) {
+                ctx.fillStyle = '#f8fafc';
+                ctx.beginPath(); ctx.arc(plateX + i * 3, plateY, 4.5, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#1d4ed8'; // Blue rim accent
+                ctx.lineWidth = 0.7;
+                ctx.stroke();
+            }
+
+            // 7. Condiment/Sauce Dispenser Bottles (调味酱罐)
+            const condX = p.x + p.w - 14;
+            const condY = p.y + 4;
+            const sauces = ['#ef4444', '#eab308', '#16a34a'];
+            for (let s = 0; s < 3; s++) {
+                ctx.fillStyle = sauces[s];
+                ctx.fillRect(condX + s * 4, condY, 3, p.h - 8);
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (lbl.includes('PREP CABINET') || (p.type === 'display_cabinet' && lbl.includes('PREP')))) {
+            // High-fidelity Train Preparation Glass Display & Wine Cabinet (餐车展示柜与冷藏储酒柜)
+            ctx.save();
+            // 1. Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            // 2. Rich Mahogany Outer Frame
+            ctx.fillStyle = '#2c0e06';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#b45309';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. Illuminated Glass Window Pane
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.12)';
+            ctx.fillRect(p.x + 4, p.y + 3, p.w - 8, p.h - 6);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + 4, p.y + 3, p.w - 8, p.h - 6);
+
+            // 4. Stainless Steel Wire Shelves
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 5, p.y + p.h / 2);
+            ctx.lineTo(p.x + p.w - 5, p.y + p.h / 2);
+            ctx.stroke();
+
+            // 5. Display Items inside: Wine Decanter, Fruit Bowl, Dessert Tray
+            // Crystal Wine Decanter (水晶醒酒器)
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.85)';
+            ctx.beginPath(); ctx.arc(p.x + 15, p.y + p.h / 2 - 2, 4, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 0.6; ctx.stroke();
+
+            // Fruit Bowl (水果拼盘)
+            ctx.fillStyle = '#f8fafc';
+            ctx.beginPath(); ctx.ellipse(p.x + 40, p.y + p.h / 2 + 1, 8, 3, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#dc2626'; // Red apples
+            ctx.beginPath(); ctx.arc(p.x + 36, p.y + p.h / 2, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#84cc16'; // Green grapes
+            ctx.beginPath(); ctx.arc(p.x + 42, p.y + p.h / 2, 2, 0, Math.PI * 2); ctx.fill();
+
+            // French Dessert Cake Tray (法式精致糕点托盘)
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(p.x + 62, p.y + p.h / 2 - 4, 12, 6);
+            ctx.fillStyle = '#ec4899'; // Strawberry icing
+            ctx.fillRect(p.x + 64, p.y + p.h / 2 - 3, 3, 4);
+            ctx.fillStyle = '#8b5cf6'; // Blueberry icing
+            ctx.fillRect(p.x + 69, p.y + p.h / 2 - 3, 3, 4);
+
+            // 6. Refrigeration Temperature Digital LED Status Display (04°C 冷藏度指示)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + p.w - 18, p.y + 4, 12, 5);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(p.x + p.w - 16, p.y + 5, 8, 3);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'vip_seat' || p.type === 'vip_booth' || lbl.includes('VIP SEAT') || lbl.includes('VIP RECLINER') || lbl.includes('VIP座椅'))) {
+            // VIP First-Class Executive Deep Crimson Leather Recliner Seat (深红真皮头等舱座椅, 靠背朝左, 面朝右)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 1. Dark Mahogany Outer Shell on LEFT / West (靠背左侧包围木壳与黄铜包边 - 靠背朝左)
+            const shellW = Math.max(6, Math.floor(p.w * 0.18));
+            ctx.fillStyle = '#2a0c0e'; // Dark red mahogany wood
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, shellW + 3, p.h, [6, 0, 0, 6]);
+            ctx.fill();
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // 2. High Plush Tufted Deep Crimson Leather Backrest & Headrest on LEFT (靠背与深红真皮头枕 - 靠背朝左)
+            const backX = p.x + 3;
+            const backW = Math.max(8, Math.floor(p.w * 0.22));
+            const backH = Math.max(14, p.h - 6);
+            const backY = p.y + 3;
+
+            // Deep Crimson / Wine Red Stitched Leather (深红/酒红皇室真皮)
+            const backGrad = ctx.createLinearGradient(backX, backY, backX + backW, backY);
+            backGrad.addColorStop(0, '#450a0a');
+            backGrad.addColorStop(0.5, '#7f1d1d');
+            backGrad.addColorStop(1, '#991b1b');
+            ctx.fillStyle = backGrad;
+            ctx.fillRect(backX, backY, backW, backH);
+            ctx.strokeStyle = '#be123c'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(backX, backY, backW, backH);
+
+            // Vertical tufting stitch lines & Brass rivets (靠背竖向缝线与铆钉)
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)'; ctx.lineWidth = 0.6;
+            for (let s = 1; s <= 3; s++) {
+                const sy = backY + (backH / 4) * s;
+                ctx.beginPath(); ctx.moveTo(backX, sy); ctx.lineTo(backX + backW, sy); ctx.stroke();
+            }
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(backX + 1, backY + 2, 1.5, 1.5);
+            ctx.fillRect(backX + 1, backY + backH - 3.5, 1.5, 1.5);
+
+            // 3. Ergonomic Main Cushion (深红主座椅垫, 向右延伸)
+            const seatX = backX + backW;
+            const seatW = Math.max(12, Math.floor(p.w * 0.35));
+            const seatY = p.y + 4;
+            const seatH = p.h - 8;
+
+            ctx.fillStyle = '#881337'; // Deep crimson red
+            ctx.fillRect(seatX, seatY, seatW, seatH);
+            ctx.strokeStyle = '#f43f5e'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(seatX, seatY, seatW, seatH);
+
+            // Double contrast gold stitching on cushion
+            ctx.strokeStyle = 'rgba(251, 191, 36, 0.4)'; ctx.lineWidth = 0.5;
+            ctx.strokeRect(seatX + 2, seatY + 2, Math.max(2, seatW - 4), Math.max(2, seatH - 4));
+
+            // 4. Power Extendable Footrest / Legrest on RIGHT (右侧电动脚托/腿托 - 延伸至右)
+            const footX = seatX + seatW;
+            const footW = Math.max(4, Math.floor(p.w * 0.12));
+            const footY = p.y + 6;
+            const footH = p.h - 12;
+            ctx.fillStyle = '#7f1d1d';
+            ctx.fillRect(footX, footY, footW, footH);
+            ctx.strokeStyle = '#be123c'; ctx.lineWidth = 0.6;
+            ctx.strokeRect(footX, footY, footW, footH);
+
+            // 5. Top & Bottom Ergonomic Armrests (上下两侧红木扶手)
+            const armH = Math.max(4, Math.floor(p.h * 0.16));
+            // Top Armrest
+            ctx.fillStyle = '#2a0c0e';
+            ctx.fillRect(p.x + 2, p.y + 1, p.w - 12, armH);
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + 2, p.y + 1, p.w - 12, armH);
+            // Cup Holder & Control Button on Top Armrest
+            ctx.fillStyle = '#e2e8f0';
+            ctx.beginPath(); ctx.arc(p.x + seatX + 4, p.y + 1 + armH / 2, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#38bdf8'; // Glowing blue button
+            ctx.fillRect(p.x + backX + 2, p.y + 2, 2.5, 1.5);
+
+            // Bottom Armrest
+            ctx.fillStyle = '#2a0c0e';
+            ctx.fillRect(p.x + 2, p.y + p.h - 1 - armH, p.w - 12, armH);
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + 2, p.y + p.h - 1 - armH, p.w - 12, armH);
+
+            // 6. Personal Mahogany Cocktail Tray & Drink (右侧个人专属小木桌与饮料 - 木质外观)
+            const trayX = p.x + p.w - Math.max(6, Math.floor(p.w * 0.18));
+            const trayY = p.y + armH + 2;
+            const trayW = Math.max(5, Math.floor(p.w * 0.16));
+            const trayH = Math.max(8, p.h - (armH * 2) - 4);
+
+            // Polished Mahogany Wooden Tray (小桌板改用红木/胡桃木材质，去除廉价灰色)
+            ctx.fillStyle = '#1c0a00';
+            ctx.fillRect(trayX, trayY, trayW, trayH);
+            ctx.fillStyle = '#451a03'; // Warm polished mahogany wood top
+            ctx.fillRect(trayX + 1, trayY + 1, Math.max(1, trayW - 2), Math.max(1, trayH - 2));
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.8; // Brass edging
+            ctx.strokeRect(trayX, trayY, trayW, trayH);
+
+            // Drink glass on tray
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.85)';
+            ctx.beginPath(); ctx.arc(trayX + trayW / 2, trayY + trayH / 2, 2, 0, Math.PI * 2); ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'dining_booth' || lbl.includes('DINING BOOTH') || lbl.includes('餐车卡座') || lbl.includes('BISTRO BOOTH'))) {
+            // Restaurant Car Booth per Sketch: 3 SEPARATE RECTANGLES with CLEAR 8px GAP - Left Chair [ ], Center Table [   ], Right Chair [ ]
+            ctx.save();
+
+            const chairW = 10;
+            const chairH = p.h;
+            const leftChairX = p.x;
+            const leftChairY = p.y;
+
+            // 1. Left Chair (左侧独立豪华墨绿绒面卡座 [ ])
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(leftChairX + 2, leftChairY + 2, chairW, chairH);
+
+            // Wood Frame (West edge) & Deep Emerald Velvet Cushion (facing East)
+            ctx.fillStyle = '#2b1810'; // 暗红木雕花靠背
+            ctx.fillRect(leftChairX, leftChairY, 3, chairH);
+            
+            // Cushion Gradient (墨绿丝绒垫)
+            const leftCushGrad = ctx.createLinearGradient(leftChairX + 3, leftChairY, leftChairX + chairW, leftChairY);
+            leftCushGrad.addColorStop(0, '#052e16');
+            leftCushGrad.addColorStop(0.5, '#14532d');
+            leftCushGrad.addColorStop(1, '#166534');
+            ctx.fillStyle = leftCushGrad;
+            ctx.fillRect(leftChairX + 3, leftChairY, chairW - 3, chairH);
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(leftChairX, leftChairY, chairW, chairH);
+
+            // Soft Vertical Tufting Stitch Lines (靠背缝线工艺)
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 0.6;
+            for (let s = 1; s <= 3; s++) {
+                const sy = leftChairY + (chairH / 4) * s;
+                ctx.beginPath();
+                ctx.moveTo(leftChairX + 3, sy);
+                ctx.lineTo(leftChairX + chairW, sy);
+                ctx.stroke();
+            }
+
+            // Brass Corner Studs (黄铜铆钉)
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(leftChairX + 0.5, leftChairY + 1, 1.5, 1.5);
+            ctx.fillRect(leftChairX + 0.5, leftChairY + chairH - 2.5, 1.5, 1.5);
+
+            // 2. Right Chair (右侧独立豪华墨绿绒面卡座 [ ])
+            const rightChairX = p.x + p.w - chairW;
+            const rightChairY = p.y;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(rightChairX + 2, rightChairY + 2, chairW, chairH);
+
+            // Wood Frame (East edge) & Deep Emerald Velvet Cushion (facing West)
+            ctx.fillStyle = '#2b1810'; // 暗红木雕花靠背
+            ctx.fillRect(rightChairX + chairW - 3, rightChairY, 3, chairH);
+
+            const rightCushGrad = ctx.createLinearGradient(rightChairX, rightChairY, rightChairX + chairW - 3, rightChairY);
+            rightCushGrad.addColorStop(0, '#166534');
+            rightCushGrad.addColorStop(0.5, '#14532d');
+            rightCushGrad.addColorStop(1, '#052e16');
+            ctx.fillStyle = rightCushGrad;
+            ctx.fillRect(rightChairX, rightChairY, chairW - 3, chairH);
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(rightChairX, rightChairY, chairW, chairH);
+
+            // Soft Vertical Tufting Stitch Lines
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 0.6;
+            for (let s = 1; s <= 3; s++) {
+                const sy = rightChairY + (chairH / 4) * s;
+                ctx.beginPath();
+                ctx.moveTo(rightChairX, sy);
+                ctx.lineTo(rightChairX + chairW - 3, sy);
+                ctx.stroke();
+            }
+
+            // Brass Corner Studs
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(rightChairX + chairW - 2, rightChairY + 1, 1.5, 1.5);
+            ctx.fillRect(rightChairX + chairW - 2, rightChairY + chairH - 2.5, 1.5, 1.5);
+
+            // 3. Center Table (中间独立餐桌 [   ]) - 两侧保持 8px 清晰露出的拼花木地板缝隙
+            const gap = 8;
+            const tableX = leftChairX + chairW + gap;
+            const tableW = p.w - (chairW * 2 + gap * 2);
+            const tableY = p.y + 4;
+            const tableH = p.h - 8;
+
+            // Table Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(tableX + 1.5, tableY + 2, tableW - 1, tableH);
+
+            // Outer Dark Mahogany Table Border Frame
+            ctx.fillStyle = '#451a03';
+            ctx.fillRect(tableX, tableY, tableW, tableH);
+
+            // Crisp White Linen Tablecloth with soft texture
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(tableX + 1.5, tableY + 1.5, tableW - 3, tableH - 3);
+
+            // Golden Silk Table Runner (桌中间金色丝绒桌旗)
+            ctx.fillStyle = 'rgba(180, 83, 9, 0.25)';
+            ctx.fillRect(tableX + tableW * 0.35, tableY + 1.5, tableW * 0.3, tableH - 3);
+
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(tableX, tableY, tableW, tableH);
+
+            // Center Warm Art-Deco Brass Lamp & Light Beam (中心复古台灯与暖光源)
+            const lampX = tableX + tableW / 2;
+            const lampY = tableY + tableH / 2;
+
+            // Warm radial illumination cast on tablecloth
+            const lampLight = ctx.createRadialGradient(lampX, lampY, 1, lampX, lampY, 14);
+            lampLight.addColorStop(0, 'rgba(254, 240, 138, 0.65)');
+            lampLight.addColorStop(1, 'rgba(254, 240, 138, 0)');
+            ctx.fillStyle = lampLight;
+            ctx.beginPath(); ctx.arc(lampX, lampY, 14, 0, Math.PI * 2); ctx.fill();
+
+            // Brass Lamp Base & Shade
+            ctx.fillStyle = '#fbbf24';
+            ctx.beginPath(); ctx.arc(lampX, lampY, 3.5, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#b45309'; ctx.lineWidth = 0.8; ctx.stroke();
+
+            // Fine Dining Place Settings (精致西餐餐具配置):
+            // Top & Bottom Porcelain Dinner Plates with Gold Rims (上/下金边青花主餐盘)
+            const plateRadius = 4.5;
+            // Top Plate
+            ctx.fillStyle = '#f8fafc';
+            ctx.beginPath(); ctx.arc(lampX, tableY + 9, plateRadius, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.6; ctx.stroke();
+            ctx.fillStyle = '#451a03'; // Main course dish center
+            ctx.beginPath(); ctx.arc(lampX, tableY + 9, 2, 0, Math.PI * 2); ctx.fill();
+
+            // Bottom Plate
+            ctx.fillStyle = '#f8fafc';
+            ctx.beginPath(); ctx.arc(lampX, tableY + tableH - 9, plateRadius, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.6; ctx.stroke();
+            ctx.fillStyle = '#451a03';
+            ctx.beginPath(); ctx.arc(lampX, tableY + tableH - 9, 2, 0, Math.PI * 2); ctx.fill();
+
+            // Silver Cutlery (Fork left, Knife right)
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 0.7;
+            // Top cutlery
+            ctx.beginPath(); ctx.moveTo(lampX - 7, tableY + 6); ctx.lineTo(lampX - 7, tableY + 12); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(lampX + 7, tableY + 6); ctx.lineTo(lampX + 7, tableY + 12); ctx.stroke();
+            // Bottom cutlery
+            ctx.beginPath(); ctx.moveTo(lampX - 7, tableY + tableH - 12); ctx.lineTo(lampX - 7, tableY + tableH - 6); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(lampX + 7, tableY + tableH - 12); ctx.lineTo(lampX + 7, tableY + tableH - 6); ctx.stroke();
+
+            // Crystal Wine Glasses filled with Translucent Ruby Red Wine (红酒高脚杯)
+            ctx.fillStyle = '#991b1b';
+            ctx.beginPath(); ctx.arc(lampX - 9, lampY - 2, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.5; ctx.stroke();
+
+            ctx.fillStyle = '#991b1b';
+            ctx.beginPath(); ctx.arc(lampX + 9, lampY + 2, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.5; ctx.stroke();
+
+            // Center Table Mini Flower Vase (桌中微型小花瓶)
+            ctx.fillStyle = '#f43f5e'; // Pink rose flower bloom
+            ctx.beginPath(); ctx.arc(lampX + 4, lampY - 4, 1.5, 0, Math.PI * 2); ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'train_bistro_bar' || lbl.includes('BISTRO BAR') || lbl.includes('BAR COUNTER') || lbl.includes('餐车吧台'))) {
+            // Train Dining Car & VIP Car Bar Counter per IMG_6915 Sketch:
+            // North Bar: ━━━━━━┚ (Main horizontal body on left, vertical L-wing at RIGHT end extending UP to wall)
+            // South Bar: ━━━━━━┓ (Main horizontal body on left, vertical L-wing at RIGHT end extending DOWN to wall)
+            ctx.save();
+            const isNorth = p.facing === 'down' || (p.label && p.label.includes('NORTH'));
+            const isVipBar = lbl.includes('VIP') || (p.displayName && p.displayName.includes('VIP')) || (p.label && p.label.includes('VIP'));
+            
+            // L-wing dimensions: vertical wing is on the RIGHT (East) side
+            const wingW = p.wingW || 20;
+            const wingX = p.x + p.w - wingW;
+            const barH = p.h || 18;
+
+            // 1. Drop Shadows for L-shape per sketch
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.beginPath();
+            if (isNorth) {
+                // North Shadow
+                ctx.moveTo(p.x + 3, p.y + 3);
+                ctx.lineTo(wingX + 3, p.y + 3);
+                ctx.lineTo(wingX + 3, 13);
+                ctx.lineTo(p.x + p.w + 3, 13);
+                ctx.lineTo(p.x + p.w + 3, p.y + barH + 3);
+                ctx.lineTo(p.x + 3, p.y + barH + 3);
+            } else {
+                // South Shadow
+                ctx.moveTo(p.x + 3, p.y + 3);
+                ctx.lineTo(p.x + p.w + 3, p.y + 3);
+                ctx.lineTo(p.x + p.w + 3, 233);
+                ctx.lineTo(wingX + 3, 233);
+                ctx.lineTo(wingX + 3, p.y + barH + 3);
+                ctx.lineTo(p.x + 3, p.y + barH + 3);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // 2. Countertop Material: VIP Bar gets Black Obsidian Gold-Vein Marble, Dining Bar gets Mahogany Wood
+            if (isVipBar) {
+                // High-End VIP Black Calacatta Gold Marble Countertop
+                const barGrad = ctx.createLinearGradient(p.x, p.y, p.x, p.y + barH);
+                barGrad.addColorStop(0, '#1e293b');
+                barGrad.addColorStop(0.5, '#0f172a');
+                barGrad.addColorStop(1, '#020617');
+                ctx.fillStyle = barGrad;
+                ctx.strokeStyle = '#fbbf24'; // Solid gold brass edging trim
+                ctx.lineWidth = 1.6;
+            } else {
+                // Dining Car Mahogany Wood Countertop
+                const barGrad = ctx.createLinearGradient(p.x, p.y, p.x, p.y + barH);
+                barGrad.addColorStop(0, '#581c0c');
+                barGrad.addColorStop(0.5, '#451a03');
+                barGrad.addColorStop(1, '#2c0e06');
+                ctx.fillStyle = barGrad;
+                ctx.strokeStyle = '#f59e0b'; // Brass edging trim
+                ctx.lineWidth = 1.4;
+            }
+
+            // Draw Unified L-Shape Polygon Path per IMG_6915 Sketch
+            ctx.beginPath();
+            if (isNorth) {
+                // North L-Bar: ━━━━━━┚ (vertical wing at RIGHT end goes UP to top wall y=10)
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(wingX, p.y);
+                ctx.lineTo(wingX, 10);
+                ctx.lineTo(p.x + p.w, 10);
+                ctx.lineTo(p.x + p.w, p.y + barH);
+                ctx.lineTo(p.x, p.y + barH);
+            } else {
+                // South L-Bar: ━━━━━━┓ (vertical wing at RIGHT end goes DOWN to bottom wall y=230)
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(p.x + p.w, p.y);
+                ctx.lineTo(p.x + p.w, 230);
+                ctx.lineTo(wingX, 230);
+                ctx.lineTo(wingX, p.y + barH);
+                ctx.lineTo(p.x, p.y + barH);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            // Gold veins for VIP Marble Countertop (Kept strictly inside the bar countertop)
+            if (isVipBar) {
+                ctx.strokeStyle = 'rgba(251, 191, 36, 0.35)'; ctx.lineWidth = 0.8;
+                ctx.beginPath();
+                ctx.moveTo(p.x + 10, p.y + 3); ctx.lineTo(p.x + 45, p.y + barH - 3);
+                ctx.moveTo(p.x + 60, p.y + 2); ctx.lineTo(p.x + 110, p.y + barH - 4);
+                ctx.stroke();
+            }
+
+            // Warm Ambient Under-lip LED Glow Strip (吧台下沿暖色氛围灯)
+            ctx.strokeStyle = isVipBar ? 'rgba(251, 191, 36, 0.65)' : 'rgba(251, 191, 36, 0.4)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            const glowY = isNorth ? (p.y + barH) : p.y;
+            ctx.moveTo(p.x + 2, glowY);
+            ctx.lineTo(wingX + (isNorth ? 0 : wingW), glowY);
+            ctx.stroke();
+
+            if (isVipBar) {
+                // ==================== VIP BAR EXCLUSIVE AMENITIES ====================
+                // A. Silver Ice Bucket & Dom Pérignon Champagne (左侧银质冰桶与香槟)
+                const champX = p.x + 18;
+                const champY = isNorth ? (p.y + 4) : (p.y + barH - 12);
+                // Silver Bucket
+                ctx.fillStyle = '#cbd5e1';
+                ctx.fillRect(champX, champY, 10, 8);
+                ctx.strokeStyle = '#f8fafc'; ctx.lineWidth = 0.6;
+                ctx.strokeRect(champX, champY, 10, 8);
+                // Ice Cubes inside bucket
+                ctx.fillStyle = '#e0e7ff';
+                ctx.fillRect(champX + 1, champY + 1, 8, 2.5);
+                // Dark Green Champagne Bottle with Gold Foil Neck
+                ctx.fillStyle = '#14532d';
+                ctx.fillRect(champX + 3.5, champY - 4, 3, 5);
+                ctx.fillStyle = '#fbbf24'; // Gold Foil Top
+                ctx.fillRect(champX + 4, champY - 6, 2, 2);
+
+                // B. Luxury Crystal Cut Whiskey Carafe Decanter & Tumblers (中左侧水晶醒酒器与琥珀干邑)
+                const decantX = p.x + 52;
+                const decantY = isNorth ? (p.y + 3) : (p.y + barH - 11);
+                // Diamond Crystal Stopper & Bottle
+                ctx.fillStyle = 'rgba(251, 191, 36, 0.25)';
+                ctx.fillRect(decantX, decantY, 8, 8);
+                ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 0.8;
+                ctx.strokeRect(decantX, decantY, 8, 8);
+                ctx.fillStyle = '#d97706'; // Rich Cognac liquid inside
+                ctx.fillRect(decantX + 1, decantY + 2.5, 6, 5);
+                ctx.fillStyle = '#fbbf24'; // Crystal Stopper top
+                ctx.beginPath(); ctx.arc(decantX + 4, decantY - 1, 2, 0, Math.PI * 2); ctx.fill();
+
+                // Two Crystal Tumbler Glasses
+                ctx.fillStyle = '#d97706';
+                ctx.beginPath(); ctx.arc(decantX + 13, decantY + 4, 2, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.5; ctx.stroke();
+                ctx.beginPath(); ctx.arc(decantX + 19, decantY + 4, 2, 0, Math.PI * 2); ctx.fill();
+                ctx.stroke();
+
+                // C. Gold Cocktail Shaker & Ruby Martini Glass (中右侧黄金调酒器与红宝石鸡尾酒)
+                const vipShakerX = p.x + p.w * 0.52;
+                const shakerItemY = isNorth ? (p.y + 3) : (p.y + barH - 9);
+                // Gold Shaker
+                ctx.fillStyle = '#fbbf24';
+                ctx.fillRect(vipShakerX, shakerItemY, 6, 7);
+                ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.6; ctx.strokeRect(vipShakerX, shakerItemY, 6, 7);
+                // Ruby Cocktail in Crystal Glass
+                ctx.fillStyle = 'rgba(190, 18, 60, 0.9)';
+                ctx.beginPath(); ctx.arc(vipShakerX + 12, shakerItemY + 3.5, 3, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.6; ctx.stroke();
+
+            } else {
+                // ==================== STANDARD DINING CAR BAR AMENITIES ====================
+                // 3. Brass & Chrome Triple Draft Beer Tap Tower
+                const tapX = p.x + 18;
+                const tapTrayY = isNorth ? (p.y + 1) : (p.y + barH - 5);
+                const tapBodyY = isNorth ? (p.y + 5) : (p.y + 1);
+
+                ctx.fillStyle = '#475569';
+                ctx.fillRect(tapX - 2, tapTrayY, 18, 4);
+                ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 0.5;
+                ctx.strokeRect(tapX - 2, tapTrayY, 18, 4);
+
+                ctx.fillStyle = '#cbd5e1';
+                ctx.fillRect(tapX + 4, tapBodyY, 6, barH - 7);
+                ctx.strokeStyle = '#f8fafc'; ctx.lineWidth = 0.6;
+                ctx.strokeRect(tapX + 4, tapBodyY, 6, barH - 7);
+
+                ctx.fillStyle = '#fbbf24';
+                for (let t = 0; t < 3; t++) {
+                    const handleY = isNorth ? (tapTrayY + 1) : (tapBodyY + 1);
+                    const knobY = isNorth ? (tapTrayY - 1) : (tapBodyY + 5);
+                    ctx.fillRect(tapX + 1 + t * 5, handleY, 2.5, 4);
+                    ctx.fillStyle = '#0f172a';
+                    ctx.beginPath(); ctx.arc(tapX + 2.25 + t * 5, knobY, 1.2, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = '#fbbf24';
+                }
+
+                // 4. Stainless Steel Cocktail Shaker, Jigger & Black Rubber Bar Spill Mat
+                const shakerX = p.x + 46;
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(shakerX - 2, p.y + 2, 28, barH - 4);
+                ctx.strokeStyle = '#334155'; ctx.lineWidth = 0.5;
+                ctx.strokeRect(shakerX - 2, p.y + 2, 28, barH - 4);
+
+                const bartenderItemY = isNorth ? (p.y + 3) : (p.y + barH - 7);
+                const customerDrinkY = isNorth ? (p.y + barH - 6) : (p.y + 3);
+
+                ctx.fillStyle = '#f8fafc';
+                ctx.fillRect(shakerX + 2, bartenderItemY, 5.5, 5);
+                ctx.fillStyle = '#94a3b8';
+                const capY = isNorth ? (bartenderItemY - 1.5) : (bartenderItemY + 4.5);
+                ctx.fillRect(shakerX + 2.75, capY, 4, 2);
+
+                ctx.fillStyle = '#cbd5e1';
+                ctx.beginPath();
+                ctx.moveTo(shakerX + 11, bartenderItemY);
+                ctx.lineTo(shakerX + 14, bartenderItemY + 2.5);
+                ctx.lineTo(shakerX + 11, bartenderItemY + 5);
+                ctx.lineTo(shakerX + 15, bartenderItemY + 5);
+                ctx.lineTo(shakerX + 12, bartenderItemY + 2.5);
+                ctx.lineTo(shakerX + 15, bartenderItemY);
+                ctx.closePath();
+                ctx.fill();
+
+                ctx.fillStyle = 'rgba(244, 63, 94, 0.85)';
+                ctx.beginPath(); ctx.arc(shakerX + 20, customerDrinkY + 2, 2.5, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.6; ctx.stroke();
+                ctx.fillStyle = '#84cc16';
+                ctx.beginPath(); ctx.arc(shakerX + 19, customerDrinkY + 1.5, 1, 0, Math.PI * 2); ctx.fill();
+
+                ctx.fillStyle = '#d97706';
+                ctx.fillRect(shakerX + 24, customerDrinkY + 1, 3.5, 4.5);
+                ctx.fillStyle = '#f8fafc';
+                const foamY = isNorth ? (customerDrinkY + 4) : customerDrinkY;
+                ctx.fillRect(shakerX + 23.5, foamY, 4.5, 2);
+
+                // 5. Touch POS Cash Register System & Thermal Receipt Printer (二者皆向内朝向酒保)
+                const posX = p.x + p.w * 0.52;
+                const posW = 14;
+                const posH = 8.5;
+                const posY = isNorth ? (p.y + 4) : (p.y + barH - 12.5);
+
+                // --- POS Cash Register Chassis ---
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(posX, posY, posW, posH);
+
+                if (isNorth) {
+                    // NORTH BAR (酒保在北侧，向内朝向北侧酒保):
+                    // Stand / Rear casing on SOUTH side (朝外，面向顾客侧)
+                    ctx.fillStyle = '#334155';
+                    ctx.fillRect(posX + 2.5, posY + 6.5, 9, 2); // Rear stand / hinge
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(posX + 3.5, posY + 6.8, 7, 1); // Customer-facing price display bezel
+                    ctx.fillStyle = '#0284c7';
+                    ctx.fillRect(posX + 4.5, posY + 7.0, 5, 0.6); // Customer price LED
+                    
+                    // Touch LCD screen on NORTH side (朝内，正对北侧酒保眼睛)
+                    ctx.fillStyle = '#1e293b'; // Screen frame
+                    ctx.fillRect(posX + 1, posY + 1.2, 12, 5.0);
+                    ctx.fillStyle = '#38bdf8'; // Glowing backlit touch display
+                    ctx.fillRect(posX + 1.6, posY + 1.6, 10.8, 4.2);
+                    ctx.fillStyle = '#0284c7'; // Order grid header
+                    ctx.fillRect(posX + 2.2, posY + 2.0, 9.6, 1.0);
+                    ctx.fillStyle = '#0369a1'; // Menu items / touch keys
+                    ctx.fillRect(posX + 2.2, posY + 3.4, 4.5, 0.8);
+                    ctx.fillRect(posX + 7.3, posY + 3.4, 4.5, 0.8);
+                    ctx.fillRect(posX + 2.2, posY + 4.5, 4.5, 0.8);
+                    ctx.fillRect(posX + 7.3, posY + 4.5, 4.5, 0.8);
+                } else {
+                    // SOUTH BAR (酒保在南侧，向内朝向南侧酒保):
+                    // Stand / Rear casing on NORTH side (朝外，面向顾客侧)
+                    ctx.fillStyle = '#334155';
+                    ctx.fillRect(posX + 2.5, posY, 9, 2); // Rear stand / hinge
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(posX + 3.5, posY + 0.7, 7, 1); // Customer-facing price display bezel
+                    ctx.fillStyle = '#0284c7';
+                    ctx.fillRect(posX + 4.5, posY + 0.9, 5, 0.6); // Customer price LED
+
+                    // Touch LCD screen on SOUTH side (朝内，正对南侧酒保眼睛)
+                    ctx.fillStyle = '#1e293b'; // Screen frame
+                    ctx.fillRect(posX + 1, posY + 2.3, 12, 5.0);
+                    ctx.fillStyle = '#38bdf8'; // Glowing backlit touch display
+                    ctx.fillRect(posX + 1.6, posY + 2.7, 10.8, 4.2);
+                    ctx.fillStyle = '#0284c7'; // Order grid header
+                    ctx.fillRect(posX + 2.2, posY + 3.1, 9.6, 1.0);
+                    ctx.fillStyle = '#0369a1'; // Menu items / touch keys
+                    ctx.fillRect(posX + 2.2, posY + 4.5, 4.5, 0.8);
+                    ctx.fillRect(posX + 7.3, posY + 4.5, 4.5, 0.8);
+                    ctx.fillRect(posX + 2.2, posY + 5.6, 4.5, 0.8);
+                    ctx.fillRect(posX + 7.3, posY + 5.6, 4.5, 0.8);
+                }
+
+                // --- Thermal Receipt Printer (热敏小票机，紧贴POS右侧，朝内向着酒保出纸) ---
+                const prX = posX + 16.5;
+                const prW = 8;
+                const prH = 8.5;
+                const prY = posY;
+
+                // Printer dark charcoal body
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(prX, prY, prW, prH);
+                ctx.strokeStyle = '#334155';
+                ctx.lineWidth = 0.6;
+                ctx.strokeRect(prX, prY, prW, prH);
+
+                if (isNorth) {
+                    // NORTH BAR: 出纸口与小票朝向北侧(内侧酒保手边)
+                    // Tear-bar slit at NORTH edge
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(prX + 1.5, prY + 1.5, 5, 1.2);
+                    // Green status LED near front
+                    ctx.fillStyle = '#22c55e';
+                    ctx.fillRect(prX + 6.8, prY + 1.5, 0.8, 1);
+                    // Freshly printed white thermal receipt paper feeding NORTH into bartender's reach
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(prX + 2, prY - 2.5, 4, 4);
+                    ctx.fillStyle = '#64748b'; // Printed text micro-lines on paper
+                    ctx.fillRect(prX + 2.4, prY - 1.8, 3.2, 0.5);
+                    ctx.fillRect(prX + 2.4, prY - 0.8, 3.2, 0.5);
+                } else {
+                    // SOUTH BAR: 出纸口与小票朝向南侧(内侧酒保手边)
+                    // Tear-bar slit at SOUTH edge
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(prX + 1.5, prY + prH - 2.7, 5, 1.2);
+                    // Green status LED near front
+                    ctx.fillStyle = '#22c55e';
+                    ctx.fillRect(prX + 6.8, prY + prH - 2.5, 0.8, 1);
+                    // Freshly printed white thermal receipt paper feeding SOUTH into bartender's reach
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(prX + 2, prY + prH - 1.5, 4, 4);
+                    ctx.fillStyle = '#64748b'; // Printed text micro-lines on paper
+                    ctx.fillRect(prX + 2.4, prY + prH + 0.3, 3.2, 0.5);
+                    ctx.fillRect(prX + 2.4, prY + prH + 1.3, 3.2, 0.5);
+                }
+            }
+
+            // 6. Tiered Liquor Bottle Shelf on RIGHT L-Wing
+            const botColors = isVipBar ? 
+                ['#d97706', '#991b1b', '#1e3a8a', '#854d0e', '#7f1d1d', '#14532d'] : 
+                ['#b45309', '#15803d', '#0369a1', '#991b1b', '#d97706', '#166534'];
+            for (let b = 0; b < 6; b++) {
+                const bx = wingX + 4 + (b % 2) * 9;
+                const by = isNorth ? (14 + Math.floor(b / 2) * 9) : (p.y + barH + 5 + Math.floor(b / 2) * 9);
+                ctx.fillStyle = botColors[b % botColors.length];
+                ctx.beginPath(); ctx.arc(bx, by, 2.5, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = '#fbbf24';
+                ctx.fillRect(bx - 0.8, by - 3.2, 1.6, 1.2);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+                ctx.fillRect(bx - 1, by - 1, 1, 1);
+            }
+
+            // 7. Rotating Bar Stools lined along outer service edge (VIP gets Royal Crimson Velvet & Gold)
+            const stoolY = isNorth ? (p.y + barH + 6) : (p.y - 6);
+            const stoolCount = Math.max(2, Math.floor((p.w - 30) / 28));
+            const stoolStep = (p.w - 30) / (stoolCount + 1);
+            for (let i = 1; i <= stoolCount; i++) {
+                const stoolX = p.x + 18 + i * stoolStep;
+                // Pedestal Stand shadow & bar
+                ctx.strokeStyle = isVipBar ? '#d97706' : '#64748b';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(stoolX, p.y + barH / 2);
+                ctx.lineTo(stoolX, stoolY);
+                ctx.stroke();
+
+                // Leather/Velvet Cushion Top (VIP Bar gets Deep Royal Crimson Velvet Cushion `#881337`)
+                ctx.fillStyle = isVipBar ? '#881337' : '#78350f';
+                ctx.beginPath(); ctx.arc(stoolX, stoolY, 4.5, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#fbbf24'; // Brass Trim Ring
+                ctx.lineWidth = 1.0;
+                ctx.stroke();
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'baggage_cart' || (isHotelLevel && (lbl.includes('BAGGAGE CART') || lbl.includes('LUGGAGE CART') || lbl.includes('行李车')))) {
+            // Executive Grand Hotel Bellman Trolley (Birdcage Brass Baggage Cart)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 1. Rubber-tired brass castor wheels at 4 corners
+            const wheelSize = Math.max(4, Math.min(6, Math.min(p.w, p.h) * 0.22));
+            ctx.fillStyle = '#0f172a'; // rubber tire
+            ctx.fillRect(p.x, p.y, wheelSize, wheelSize);
+            ctx.fillRect(p.x + p.w - wheelSize, p.y, wheelSize, wheelSize);
+            ctx.fillRect(p.x, p.y + p.h - wheelSize, wheelSize, wheelSize);
+            ctx.fillRect(p.x + p.w - wheelSize, p.y + p.h - wheelSize, wheelSize, wheelSize);
+            ctx.fillStyle = '#f59e0b'; // brass hub
+            ctx.fillRect(p.x + 1, p.y + 1, wheelSize - 2, wheelSize - 2);
+            ctx.fillRect(p.x + p.w - wheelSize + 1, p.y + 1, wheelSize - 2, wheelSize - 2);
+            ctx.fillRect(p.x + 1, p.y + p.h - wheelSize + 1, wheelSize - 2, wheelSize - 2);
+            ctx.fillRect(p.x + p.w - wheelSize + 1, p.y + p.h - wheelSize + 1, wheelSize - 2, wheelSize - 2);
+
+            // 2. Base platform deck: Rich Crimson Velvet Carpet
+            const deckPad = 2;
+            ctx.fillStyle = '#881337'; // Deep hotel velvet crimson
+            ctx.fillRect(p.x + deckPad, p.y + deckPad, p.w - deckPad * 2, p.h - deckPad * 2);
+
+            // 3. Heavy Polished Brass Bumper Rail
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 2.0;
+            ctx.strokeRect(p.x + deckPad, p.y + deckPad, p.w - deckPad * 2, p.h - deckPad * 2);
+
+            // Inner gold trim thread
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + deckPad + 2, p.y + deckPad + 2, p.w - deckPad * 2 - 4, p.h - deckPad * 2 - 4);
+
+            // 4. Stacked Vintage Luxury Suitcases on the platform deck
+            // Trunk 1 (Rich Mahogany Leather)
+            ctx.fillStyle = '#78350f';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w * 0.44, p.h - 8);
+            ctx.strokeStyle = '#b45309';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x + 4, p.y + 4, p.w * 0.44, p.h - 8);
+            ctx.fillStyle = '#d97706';
+            ctx.fillRect(p.x + 4 + p.w * 0.18, p.y + 4, p.w * 0.08, p.h - 8);
+
+            // Suitcase 2 (Deep Navy Blue)
+            ctx.fillStyle = '#1e3a8a';
+            ctx.fillRect(p.x + p.w * 0.51, p.y + 5, p.w * 0.42, p.h - 10);
+            ctx.strokeStyle = '#3b82f6';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x + p.w * 0.51, p.y + 5, p.w * 0.42, p.h - 10);
+
+            // 5. Birdcage Canopy Tubular Brass Frame (Top-down view)
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 2.0;
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w / 2, p.y + 2);
+            ctx.lineTo(p.x + p.w / 2, p.y + p.h - 2);
+            ctx.moveTo(p.x + 2, p.y + p.h / 2);
+            ctx.lineTo(p.x + p.w - 2, p.y + p.h / 2);
+            ctx.stroke();
+
+            // Corner vertical brass support posts
+            ctx.fillStyle = '#fde047';
+            ctx.beginPath(); ctx.arc(p.x + 3, p.y + 3, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(p.x + p.w - 3, p.y + 3, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(p.x + 3, p.y + p.h - 3, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(p.x + p.w - 3, p.y + p.h - 3, 2, 0, Math.PI * 2); ctx.fill();
+
+            // Center Top Ring / Finial Knob
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath(); ctx.arc(p.x + p.w / 2, p.y + p.h / 2, 3, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#fef08a';
+            ctx.beginPath(); ctx.arc(p.x + p.w / 2, p.y + p.h / 2, 1.2, 0, Math.PI * 2); ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'holo_screen' || lbl.includes('HOLO SCREEN') || lbl.includes('HOLO_SCREEN') || (p.type === 'display_cabinet' && lbl.includes('HOLO')))) {
+            // High-Tech Futuristic Holographic Command & Telemetry Display Screen (全息战术/列车监控大屏)
+            ctx.save();
+            const isFacingUp = p.facing === 'up' || (!p.facing && p.y > 100);
+
+            // 1. Drop shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. Carbon-fiber / dark titanium alloy outer chassis
+            ctx.fillStyle = '#0b1329';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Solid Wall Backing Frame
+            ctx.fillStyle = '#020617';
+            if (isFacingUp) {
+                // Back frame attached to South wall (BOTTOM)
+                ctx.fillRect(p.x, p.y + p.h - 4, p.w, 4);
+                ctx.fillStyle = '#334155'; ctx.fillRect(p.x + 1, p.y + p.h - 4, p.w - 2, 1);
+            } else {
+                // Back frame attached to North wall (TOP)
+                ctx.fillRect(p.x, p.y, p.w, 4);
+                ctx.fillStyle = '#334155'; ctx.fillRect(p.x + 1, p.y + 3, p.w - 2, 1);
+            }
+
+            // 3. Screen Glass Surface & Bezel
+            const scrX = p.x + 3;
+            const scrY = isFacingUp ? (p.y + 1) : (p.y + 4);
+            const scrW = p.w - 6;
+            const scrH = p.h - 5;
+
+            // Deep cyan-black screen glass backdrop
+            ctx.fillStyle = '#041d2d';
+            ctx.fillRect(scrX, scrY, scrW, scrH);
+
+            // Glowing cyan screen grid background
+            ctx.strokeStyle = 'rgba(6, 182, 212, 0.22)';
+            ctx.lineWidth = 0.5;
+            for (let gx = scrX + 4; gx < scrX + scrW; gx += 8) {
+                ctx.beginPath(); ctx.moveTo(gx, scrY); ctx.lineTo(gx, scrY + scrH); ctx.stroke();
+            }
+            for (let gy = scrY + 3; gy < scrY + scrH; gy += 5) {
+                ctx.beginPath(); ctx.moveTo(scrX, gy); ctx.lineTo(scrX + scrW, gy); ctx.stroke();
+            }
+
+            // 4. Dynamic Holographic Telemetry & Waveform Visuals
+            // Real-time train speed sine-wave waveform
+            ctx.strokeStyle = '#22d3ee'; // Bright neon cyan wave
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            const waveY = scrY + scrH * 0.5;
+            for (let wx = 0; wx <= scrW - 8; wx += 2) {
+                const wy = waveY + Math.sin(wx * 0.35) * (scrH * 0.24);
+                if (wx === 0) ctx.moveTo(scrX + 4 + wx, wy);
+                else ctx.lineTo(scrX + 4 + wx, wy);
+            }
+            ctx.stroke();
+
+            // Status indicator blocks (Green OK, Amber Warning dots)
+            ctx.fillStyle = '#10b981'; // Green status block
+            ctx.fillRect(scrX + 4, isFacingUp ? (scrY + scrH - 5) : (scrY + 2), 6, 3);
+            ctx.fillStyle = '#f59e0b'; // Amber warning block
+            ctx.fillRect(scrX + 12, isFacingUp ? (scrY + scrH - 5) : (scrY + 2), 4, 3);
+            ctx.fillStyle = '#38bdf8'; // Cyan data block
+            ctx.fillRect(scrX + 18, isFacingUp ? (scrY + scrH - 5) : (scrY + 2), 8, 3);
+
+            // Holographic data bars on right side
+            ctx.fillStyle = '#06b6d4';
+            ctx.fillRect(scrX + scrW - 12, scrY + 3, 8, 2);
+            ctx.fillRect(scrX + scrW - 14, scrY + 7, 10, 2);
+            ctx.fillRect(scrX + scrW - 10, scrY + 11, 6, 2);
+
+            // 5. Laser Holographic Emitter Array Strip facing corridor
+            ctx.fillStyle = '#06b6d4'; // Glowing cyan laser projector bar
+            const projY = isFacingUp ? scrY : (scrY + scrH - 2);
+            ctx.fillRect(scrX + 2, projY, scrW - 4, 1.8);
+
+            // Projector Lens Dots (3 LED lenses)
+            ctx.fillStyle = '#a5f3fc';
+            ctx.fillRect(scrX + scrW * 0.2, projY, 3, 1.8);
+            ctx.fillRect(scrX + scrW * 0.5, projY, 3, 1.8);
+            ctx.fillRect(scrX + scrW * 0.8, projY, 3, 1.8);
+
+            // Glass Surface Glare / Reflection Line
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
+            ctx.beginPath();
+            ctx.moveTo(scrX, scrY);
+            ctx.lineTo(scrX + scrW * 0.35, scrY);
+            ctx.lineTo(scrX, scrY + scrH);
+            ctx.closePath();
+            ctx.fill();
+
+            // Outer Metallic Bezel Trim
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(scrX, scrY, scrW, scrH);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'display_cabinet' || lbl.includes('DISPLAY CABINET') || lbl.includes('SHOWCASE') || lbl.includes('VIP DISPLAY')) {
+            // Luxury Executive Glass Display Showcase for VIP Salon / Hotel (顶级高透玻璃珍品展柜)
+            ctx.save();
+            // 1. Soft Realistic Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. Rich Polished Mahogany Wooden Casing Base
+            ctx.fillStyle = '#241202'; // Deep mahogany
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#d97706'; // Polished gold brass trim
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. Midnight Royal Navy Velvet Display Lining
+            const pad = 2.5;
+            const vx = p.x + pad;
+            const vy = p.y + pad;
+            const vw = p.w - pad * 2;
+            const vh = p.h - pad * 2;
+            ctx.fillStyle = '#0a1426'; // Deep midnight velvet
+            ctx.fillRect(vx, vy, vw, vh);
+
+            // 4. Concealed Warm LED Showcase Spotlights (Glowing from top inner edge)
+            const ledGrad = ctx.createLinearGradient(vx, vy, vx, vy + vh);
+            ledGrad.addColorStop(0, 'rgba(254, 240, 138, 0.45)');
+            ledGrad.addColorStop(0.5, 'rgba(254, 240, 138, 0.18)');
+            ledGrad.addColorStop(1, 'rgba(254, 240, 138, 0.03)');
+            ctx.fillStyle = ledGrad;
+            ctx.fillRect(vx, vy, vw, vh);
+
+            // 5. Curated Luxury Treasures on the Velvet Display Bed:
+            // Item A: Left - Vintage Grand Cru Champagne in Brass Presentation Cradle
+            const botW = Math.max(3, vw * 0.16);
+            const botX = vx + vw * 0.14;
+            const botY = vy + vh * 0.5;
+            // Brass presentation cradle
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 1;
+            ctx.strokeRect(botX - 1, botY - 3.5, botW + 2, 7);
+            // Emerald green glass bottle
+            ctx.fillStyle = '#064e3b';
+            ctx.fillRect(botX, botY - 2.5, botW, 5);
+            // Golden foil neck
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(botX + botW - 2.5, botY - 1.5, 2.5, 3);
+            // Vintage label
+            ctx.fillStyle = '#fef08a';
+            ctx.fillRect(botX + 1, botY - 1.5, Math.max(1, botW - 4), 3);
+
+            // Item B: Center - Open Jeweler's Velvet Presentation Box with Luxury Gold Watch
+            const boxW = Math.max(7, vw * 0.26);
+            const boxH = Math.max(5, vh * 0.65);
+            const boxX = vx + vw * 0.5 - boxW / 2;
+            const boxY = vy + vh * 0.5 - boxH / 2;
+            // Burgundy velvet box
+            ctx.fillStyle = '#450a0a';
+            ctx.fillRect(boxX, boxY, boxW, boxH);
+            ctx.strokeStyle = '#991b1b'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(boxX, boxY, boxW, boxH);
+            // Gleaming gold chronograph watch dial
+            ctx.fillStyle = '#fbbf24';
+            ctx.beginPath();
+            ctx.arc(boxX + boxW / 2, boxY + boxH / 2, Math.min(3, boxH * 0.35), 0, Math.PI * 2);
+            ctx.fill();
+            // Diamond glint sparkle in center
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(boxX + boxW / 2 - 0.5, boxY + boxH / 2 - 0.5, 1.2, 1.2);
+
+            // Item C: Right - Crystal Decanter / Faceted Trophy catching the light
+            const tropX = vx + vw * 0.82;
+            const tropY = vy + vh * 0.5;
+            ctx.fillStyle = '#fbbf24'; // Solid gold award trophy
+            ctx.beginPath();
+            ctx.arc(tropX, tropY, Math.min(3.2, vh * 0.32), 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#fef08a'; ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // 6. Ultra-Clear Tempered Crystal Glass Cover with Crystalline Edge
+            ctx.fillStyle = 'rgba(224, 242, 254, 0.16)';
+            ctx.fillRect(vx, vy, vw, vh);
+            ctx.strokeStyle = 'rgba(186, 230, 253, 0.7)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(vx, vy, vw, vh);
+
+            // 7. Dynamic Diagonal Glass Reflections across Showcase Top
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.42)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(vx + 2, vy + 2);
+            ctx.lineTo(vx + vw * 0.45, vy + vh - 2);
+            ctx.stroke();
+
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(vx + 6, vy + 2);
+            ctx.lineTo(vx + vw * 0.55, vy + vh - 2);
+            ctx.stroke();
+
+            // 8. Polished Brass Retention Corner Brackets
+            ctx.fillStyle = '#fbbf24';
+            const clipSz = 2;
+            ctx.fillRect(p.x + 1, p.y + 1, clipSz, clipSz);
+            ctx.fillRect(p.x + p.w - 1 - clipSz, p.y + 1, clipSz, clipSz);
+            ctx.fillRect(p.x + 1, p.y + p.h - 1 - clipSz, clipSz, clipSz);
+            ctx.fillRect(p.x + p.w - 1 - clipSz, p.y + p.h - 1 - clipSz, clipSz, clipSz);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'key_rack' || lbl.includes('KEY RACK') || lbl.includes('KEY CABINET') || lbl.includes('CONCIERGE KEY')) {
+            // Grand Hotel Front Desk Concierge Room Key & Mail Cabinet
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Rich mahogany cabinet backing
+            ctx.fillStyle = '#2c1a04';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#d97706'; 
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Top Header: Engraved Brass Plate "KEYS"
+            const headerH = Math.min(6, p.h * 0.25);
+            ctx.fillStyle = '#b45309';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, headerH);
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + 2, p.y + 2, p.w - 4, headerH);
+
+            // Pigeonhole grid for Room Keys
+            const gridY = p.y + 2 + headerH + 1;
+            const gridH = p.h - headerH - 5;
+            const cols = Math.max(2, Math.floor((p.w - 4) / 5));
+            const rows = Math.max(2, Math.floor(gridH / 5));
+            const cellW = (p.w - 4) / cols;
+            const cellH = gridH / rows;
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const cx = p.x + 2 + c * cellW;
+                    const cy = gridY + r * cellH;
+                    
+                    ctx.fillStyle = '#1c0f03';
+                    ctx.fillRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
+                    ctx.strokeStyle = '#543f33';
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
+
+                    if ((r + c * 2) % 3 !== 0) {
+                        ctx.fillStyle = '#fbbf24';
+                        ctx.fillRect(cx + cellW * 0.3, cy + cellH * 0.2, 1.5, Math.max(2, cellH * 0.5));
+                        ctx.fillStyle = '#dc2626';
+                        ctx.fillRect(cx + cellW * 0.5, cy + cellH * 0.3, 2, Math.max(2, cellH * 0.4));
+                    }
+                }
+            }
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'luggage_stack' || lbl.includes('LUGGAGE STACK') || lbl.includes('行李堆叠') || lbl.includes('LUGGAGE RACK') || lbl.includes('行李架')) {
+            // High-fidelity Tiered Luggage Rack & Travel Bags (酒店行李架/列车行李架与高级旅行拉杆箱)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Frame Base Structure: Rich mahogany with polished brass for hotel, slate steel for train
+            ctx.fillStyle = isHotelLevel ? '#3b1d0c' : '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = isHotelLevel ? '#d97706' : '#64748b';
+            ctx.lineWidth = 1.3;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Metallic / Brass rack slats
+            ctx.strokeStyle = isHotelLevel ? '#b45309' : '#94a3b8';
+            ctx.lineWidth = 0.8;
+            for (let sy = p.y + 3; sy < p.y + p.h - 2; sy += 4) {
+                ctx.beginPath();
+                ctx.moveTo(p.x + 2, sy);
+                ctx.lineTo(p.x + p.w - 2, sy);
+                ctx.stroke();
+            }
+
+            // Multiple Stored Luggage Suitcases & Travel Bags
+            // Suitcase 1: Rich Crimson/Burgundy Hard-shell Spinner (Left)
+            ctx.fillStyle = '#991b1b'; // Crimson / Burgundy Red
+            ctx.beginPath();
+            ctx.roundRect(p.x + 3, p.y + 2, Math.max(4, p.w * 0.42), p.h - 4, 3);
+            ctx.fill();
+            ctx.strokeStyle = '#f87171';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // Corner protectors & Handle for Suitcase 1
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 2, p.y + p.h / 2 - 3, 2, 6); // Handle
+            ctx.fillStyle = isHotelLevel ? '#fbbf24' : '#cbd5e1'; // Brass / Silver corner caps
+            ctx.fillRect(p.x + 4, p.y + 3, 2.5, 2.5);
+            ctx.fillRect(p.x + 4, p.y + p.h - 5.5, 2.5, 2.5);
+
+            // Suitcase 2: Navy Tactical Duffel / Luxury Leather Bag (Right)
+            const s2x = p.x + p.w * 0.48;
+            const s2w = p.w * 0.48;
+            if (s2w > 6) {
+                ctx.fillStyle = isHotelLevel ? '#78350f' : '#1e3a8a'; // Rich saddle leather for hotel, navy for train
+                ctx.beginPath();
+                ctx.roundRect(s2x, p.y + 2, s2w, p.h - 4, 3);
+                ctx.fill();
+                ctx.strokeStyle = isHotelLevel ? '#d97706' : '#60a5fa';
+                ctx.lineWidth = 0.8;
+                ctx.stroke();
+
+                // Leather straps across duffel
+                ctx.strokeStyle = isHotelLevel ? '#451a03' : '#b45309'; // Tan / dark leather straps
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.moveTo(s2x + s2w * 0.3, p.y + 2);
+                ctx.lineTo(s2x + s2w * 0.3, p.y + p.h - 2);
+                ctx.moveTo(s2x + s2w * 0.7, p.y + 2);
+                ctx.lineTo(s2x + s2w * 0.7, p.y + p.h - 2);
+                ctx.stroke();
+
+                // Buckle accents
+                ctx.fillStyle = '#fbbf24';
+                ctx.fillRect(s2x + s2w * 0.3 - 1, p.y + p.h / 2 - 1, 2, 2);
+                ctx.fillRect(s2x + s2w * 0.7 - 1, p.y + p.h / 2 - 1, 2, 2);
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && (p.type === 'conveyor' || lbl.includes('TRAIN') || p.type === 'train')) {
+            // === 关卡 2 地铁列车：高辨识度现代不锈钢客运地铁 (Clean & Recognizable Subway Train) ===
+            ctx.save();
+            const isNorthbound = (p.y < ((typeof height !== 'undefined' ? height : 700) * 0.5) || lbl.includes('NORTHBOUND'));
+
+            // 1. 轨道与枕木道床 (Clean Steel Rails & Sleepers Track Bed)
+            const trackX = p.x - 12;
+            const trackW = p.w + 24;
+            const trackY = p.y;
+            const trackH = p.h;
+
+            // 深色道床底座
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(trackX, trackY + 2, trackW, trackH - 4);
+
+            // 轨枕 (Sleepers)
+            ctx.fillStyle = '#334155';
+            for (let sx = trackX + 2; sx < trackX + trackW - 2; sx += 12) {
+                ctx.fillRect(sx, trackY + 2, 4, trackH - 4);
+            }
+
+            // 两根平行的明亮钢轨 (Parallel Silver Steel Rails)
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(trackX, trackY + 4, trackW, 2);
+            ctx.fillRect(trackX, trackY + trackH - 6, trackW, 2);
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(trackX, trackY + 4.5, trackW, 0.8);
+            ctx.fillRect(trackX, trackY + trackH - 5.5, trackW, 0.8);
+
+            // 站台侧黄色安全警示盲道线
+            const platEdgeY = isNorthbound ? (p.y + p.h + 1) : (p.y - 3);
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(p.x - 6, platEdgeY, p.w + 12, 2);
+
+            // 2. 双节编组车体结构 (2-Car Articulated Train Body)
+            const midX = p.x + p.w / 2;
+            const gangwayW = 12;
+            const carW = (p.w - gangwayW - 8) / 2;
+            const car1X = p.x + 4;
+            const car2X = midX + gangwayW / 2;
+            const carY = p.y + 3;
+            const carH = p.h - 6;
+
+            // 车底深色投影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(car1X + 2, carY + 2, carW, carH);
+            ctx.fillRect(car2X + 2, carY + 2, carW, carH);
+
+            // 中央黑色铰接折棚风挡 (Gangway Connection)
+            ctx.fillStyle = '#111827';
+            ctx.fillRect(midX - gangwayW / 2, carY + 2, gangwayW, carH - 4);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1;
+            for (let gx = midX - gangwayW / 2 + 2; gx < midX + gangwayW / 2; gx += 3) {
+                ctx.beginPath();
+                ctx.moveTo(gx, carY + 2);
+                ctx.lineTo(gx, carY + carH - 2);
+                ctx.stroke();
+            }
+
+            // 3. 绘制两节高辨识度车厢 (Car 1 and Car 2)
+            const cars = [
+                {
+                    x: car1X, w: carW,
+                    isLeading: !isNorthbound, // 南行车西端为车头
+                    isTrailing: isNorthbound
+                },
+                {
+                    x: car2X, w: carW,
+                    isLeading: isNorthbound,  // 北行车东端为车头
+                    isTrailing: !isNorthbound
+                }
+            ];
+
+            cars.forEach((car) => {
+                // 车体亮银/拉丝不锈钢底色 (Bright Silver-Grey Metro Car Body)
+                const bodyGrad = ctx.createLinearGradient(car.x, carY, car.x, carY + carH);
+                bodyGrad.addColorStop(0.0, '#cbd5e1');
+                bodyGrad.addColorStop(0.2, '#f1f5f9');
+                bodyGrad.addColorStop(0.5, '#e2e8f0');
+                bodyGrad.addColorStop(0.8, '#f1f5f9');
+                bodyGrad.addColorStop(1.0, '#94a3b8');
+                ctx.fillStyle = bodyGrad;
+
+                // 车头车尾圆角区分
+                let noseRadius = 3;
+                if (car.isLeading) {
+                    const isFacingRight = isNorthbound;
+                    ctx.beginPath();
+                    ctx.roundRect(car.x, carY, car.w, carH, isFacingRight ? [3, 8, 8, 3] : [8, 3, 3, 8]);
+                    ctx.fill();
+                } else if (car.isTrailing) {
+                    const isFacingRight = !isNorthbound;
+                    ctx.beginPath();
+                    ctx.roundRect(car.x, carY, car.w, carH, isFacingRight ? [3, 6, 6, 3] : [6, 3, 3, 6]);
+                    ctx.fill();
+                } else {
+                    ctx.beginPath();
+                    ctx.roundRect(car.x, carY, car.w, carH, 3);
+                    ctx.fill();
+                }
+
+                // 车身边框 (Clean Outline)
+                ctx.strokeStyle = '#334155';
+                ctx.lineWidth = 1.2;
+                ctx.stroke();
+
+                // 标志性 2 号线亮蓝涂装腰线 (Iconic Blue Metro Livery Stripe)
+                const stripeH = 3.5;
+                const stripeY = carY + (carH - stripeH) / 2;
+                ctx.fillStyle = '#0284c7';
+                ctx.fillRect(car.x + (car.isLeading && !isNorthbound ? 6 : 2), stripeY, car.w - 8, stripeH);
+                ctx.fillStyle = '#38bdf8';
+                ctx.fillRect(car.x + (car.isLeading && !isNorthbound ? 6 : 2), stripeY + 1, car.w - 8, 1.2);
+
+                // 车顶空调散热机组 (Rooftop AC Units)
+                const acW = car.w * 0.35;
+                const acX = car.x + (car.w - acW) / 2;
+                ctx.fillStyle = '#94a3b8';
+                ctx.fillRect(acX, carY + 3, acW, carH - 6);
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(acX, carY + 3, acW, carH - 6);
+                // 散热格栅
+                ctx.fillStyle = '#475569';
+                for (let ax = acX + 3; ax < acX + acW - 3; ax += 4) {
+                    ctx.fillRect(ax, carY + 4.5, 2, carH - 9);
+                }
+
+                // 车窗排布：清晰易认的深色客室侧窗 (Clear Rhythmic Passenger Windows)
+                const numWins = 6;
+                const winW = 10;
+                const winH = 3.2;
+                const winSpacing = (car.w - 24) / (numWins - 1);
+
+                for (let wi = 0; wi < numWins; wi++) {
+                    const wx = car.x + 12 + wi * winSpacing - winW / 2;
+                    // 上排窗 (North Windows)
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(wx, carY + 1.2, winW, winH);
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillRect(wx + 1, carY + 1.5, winW - 2, 0.8);
+
+                    // 下排窗 (South Windows)
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(wx, carY + carH - winH - 1.2, winW, winH);
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillRect(wx + 1, carY + carH - 2.3, winW - 2, 0.8);
+                }
+
+                // 客室双开车门 (Passenger Sliding Doors with Yellow Safety Edge)
+                const doorPositions = [car.x + car.w * 0.28, car.x + car.w * 0.72];
+                doorPositions.forEach((dx) => {
+                    const doorY = isNorthbound ? (carY + carH - 3.5) : carY;
+                    ctx.fillStyle = '#f59e0b';
+                    ctx.fillRect(dx - 6, doorY, 12, 3.5);
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(dx - 5, isNorthbound ? doorY + 0.8 : doorY, 10, 2.7);
+                    // 门缝
+                    ctx.fillStyle = '#f1f5f9';
+                    ctx.fillRect(dx - 0.5, doorY, 1, 3.5);
+                });
+
+                // 车头驾驶室与车灯 (Cab Windshield & Headlights / Taillights)
+                if (car.isLeading) {
+                    const isFacingRight = isNorthbound;
+                    const noseX = isFacingRight ? (car.x + car.w - 9) : car.x;
+                    
+                    // 挡风玻璃 (Windshield)
+                    ctx.fillStyle = '#0f172a';
+                    ctx.beginPath();
+                    ctx.roundRect(isFacingRight ? noseX + 1 : noseX + 3, carY + 3, 5, carH - 6, [2, 2, 2, 2]);
+                    ctx.fill();
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillRect(isFacingRight ? noseX + 2 : noseX + 4, carY + 4, 3, carH - 8);
+
+                    // 前照大灯 (Bright White/Cyan Headlights)
+                    const hlX = isFacingRight ? (car.x + car.w - 3) : car.x + 0.5;
+                    ctx.fillStyle = '#ffffff';
+                    ctx.shadowColor = '#38bdf8';
+                    ctx.shadowBlur = 6;
+                    ctx.fillRect(hlX, carY + 3.5, 2.5, 3.5);
+                    ctx.fillRect(hlX, carY + carH - 7, 2.5, 3.5);
+                    ctx.shadowBlur = 0;
+
+                } else if (car.isTrailing) {
+                    const isFacingRight = !isNorthbound;
+                    const tlX = isFacingRight ? (car.x + car.w - 3) : car.x + 0.5;
+                    // 红色车尾灯 (Ruby Red Taillights)
+                    ctx.fillStyle = '#ef4444';
+                    ctx.shadowColor = '#ef4444';
+                    ctx.shadowBlur = 5;
+                    ctx.fillRect(tlX, carY + 3.5, 2.5, 3.5);
+                    ctx.fillRect(tlX, carY + carH - 7, 2.5, 3.5);
+                    ctx.shadowBlur = 0;
+                }
+            });
+
+            // 4. 清晰的车身路线编号标识 (Clean Train Livery Text)
+            const routeText = isNorthbound ? "METRO LINE 2 ➔ NORTHBOUND" : "METRO LINE 2 ➔ SOUTHBOUND";
+            ctx.font = 'bold 8px monospace';
+            ctx.fillStyle = '#0369a1';
+            ctx.textAlign = 'center';
+            ctx.fillText(routeText, p.x + p.w / 2, carY + carH / 2 + 2.8);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (lbl.includes('TV') || lbl.includes('TELEVISION')) {
+            // High-fidelity wall-mounted TV
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            ctx.fillStyle = '#0f172a'; // Matte black bezel
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#475569'; // Charcoal border
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Glowing blue screen
+            ctx.fillStyle = '#0f172a'; // Screen glass
+            ctx.fillRect(p.x + 3, p.y + 3, p.w - 6, p.h - 6);
+            
+            const tvGrad = ctx.createLinearGradient(p.x + 3, p.y + 3, p.x + 3, p.y + p.h - 3);
+            tvGrad.addColorStop(0, '#0284c7');
+            tvGrad.addColorStop(0.5, '#06b6d4');
+            tvGrad.addColorStop(1, '#0284c7');
+            ctx.fillStyle = tvGrad;
+            ctx.fillRect(p.x + 4, p.y + 4, p.w - 8, p.h - 8);
+
+            // Reflection line
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 4, p.y + 4);
+            ctx.lineTo(p.x + p.w - 4, p.y + p.h - 4);
+            ctx.stroke();
+
+            // Status LED
+            ctx.fillStyle = '#00FF66';
+            ctx.beginPath();
+            ctx.arc(p.x + p.w - 8, p.y + p.h - 6, 1.2, 0, Math.PI * 2);
+            ctx.fill();
+
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'conveyor' || lbl.includes('CAROUSEL') || lbl.includes('BELT')) {
+            // 传送带 / 行李提取转盘细节 (Baggage Claim Carousel) - 精细化设计，参考安检 X-Ray 机高科技质感
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h); // 阴影
+
+            // 1. 外部大框 (Dark Blue-Grey casing)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 2. 两端驱动/控制金属端盖 (Control/Drive Housing at both ends, like X-Ray machine sides)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, 8, p.h);
+            ctx.fillRect(p.x + p.w - 8, p.y, 8, p.h);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x, p.y, 8, p.h);
+            ctx.strokeRect(p.x + p.w - 8, p.y, 8, p.h);
+
+            // 3. 内部主皮带运行床 (Dark Core)
+            ctx.fillStyle = '#09131a';
+            ctx.fillRect(p.x + 10, p.y + 4, p.w - 20, p.h - 8);
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.5)';
+            ctx.strokeRect(p.x + 10, p.y + 4, p.w - 20, p.h - 8);
+
+            // 4. 重复的细皮带缝隙/叶片纹理 (Finer conveyor slats, directly mirroring X-Ray scanning line pattern)
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.4)';
+            ctx.lineWidth = 1;
+            for (let lx = p.x + 14; lx < p.x + p.w - 14; lx += 5) {
+                ctx.beginPath();
+                ctx.moveTo(lx, p.y + 4);
+                ctx.lineTo(lx, p.y + p.h - 4);
+                ctx.stroke();
+            }
+
+            // 5. 传送带中央金属隔离岛 (Central Metal Island inside the claim loop)
+            const islandW = p.w * 0.55;
+            const islandH = p.h * 0.35;
+            const islandX = p.x + (p.w - islandW) / 2;
+            const islandY = p.y + (p.h - islandH) / 2;
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(islandX, islandY, islandW, islandH);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(islandX, islandY, islandW, islandH);
+
+            // 隔离岛内部细节
+            ctx.fillStyle = '#07111a';
+            ctx.fillRect(islandX + 3, islandY + 3, islandW - 6, islandH - 6);
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.3)';
+            ctx.strokeRect(islandX + 3, islandY + 3, islandW - 6, islandH - 6);
+
+            // 6. 状态指示灯 (LED lights on side panels - Green & Red status)
+            // 动力就绪指示
+            ctx.fillStyle = '#00FF66';
+            ctx.beginPath(); ctx.arc(p.x + 4, p.y + 6, 1.8, 0, Math.PI * 2); ctx.fill();
+            // 载荷警示指示
+            ctx.fillStyle = '#FF3344';
+            ctx.beginPath(); ctx.arc(p.x + 4, p.y + p.h - 6, 1.8, 0, Math.PI * 2); ctx.fill();
+
+            // 右侧端盖指示
+            const pulseLight = (Date.now() % 800 < 400);
+            ctx.fillStyle = pulseLight ? '#00CCFF' : 'rgba(0, 204, 255, 0.3)';
+            ctx.beginPath(); ctx.arc(p.x + p.w - 4, p.y + p.h / 2, 2, 0, Math.PI * 2); ctx.fill();
+
+            // 7. 转盘上的行李箱 (Suitcases) - 绘制极其精细的拉杆行李箱和背包
+            if (p.w >= 80) {
+                // 行李 A: 经典蓝皮箱 (含把手、拉杆与绑带)
+                const bagAX = p.x + p.w * 0.18;
+                const bagAY = p.y + p.h * 0.12;
+                ctx.fillStyle = '#1e3a8a'; // 宝蓝色
+                ctx.fillRect(bagAX, bagAY, 18, 11);
+                ctx.strokeStyle = '#60a5fa';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(bagAX, bagAY, 18, 11);
+                // 行李箱把手 & 金属边角
+                ctx.strokeStyle = '#94a3b8';
+                ctx.beginPath(); ctx.moveTo(bagAX + 4, bagAY); ctx.lineTo(bagAX + 4, bagAY - 2); ctx.lineTo(bagAX + 14, bagAY - 2); ctx.lineTo(bagAX + 14, bagAY); ctx.stroke();
+                ctx.fillStyle = '#60a5fa';
+                ctx.fillRect(bagAX + 1, bagAY + 1, 2, 2);
+                ctx.fillRect(bagAX + 15, bagAY + 1, 2, 2);
+                // 箱体固定捆带 (Yellow luggage strap)
+                ctx.fillStyle = '#FFCC00';
+                ctx.fillRect(bagAX + 8, bagAY, 2.5, 11);
+
+                // 行李 B: 艳丽紫皮箱
+                const bagBX = p.x + p.w - 44;
+                const bagBY = p.y + p.h - 22;
+                ctx.fillStyle = '#701a75'; // 紫色
+                ctx.fillRect(bagBX, bagBY, 18, 11);
+                ctx.strokeStyle = '#f472b6';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(bagBX, bagBY, 18, 11);
+                // 行李箱拉杆
+                ctx.strokeStyle = '#94a3b8';
+                ctx.beginPath(); ctx.moveTo(bagBX + 4, bagBY + 11); ctx.lineTo(bagBX + 4, bagBY + 13); ctx.lineTo(bagBX + 14, bagBY + 13); ctx.lineTo(bagBX + 14, bagBY + 11); ctx.stroke();
+                // 捆带
+                ctx.fillStyle = '#00FF66';
+                ctx.fillRect(bagBX + 9, bagBY, 2, 11);
+
+                // 行理 C: 极具质感的军绿旅行袋 (Duffel Bag) (放在中间空白偏右处)
+                const bagCX = p.x + p.w * 0.32;
+                const bagCY = p.y + p.h * 0.58;
+                ctx.fillStyle = '#14532d'; // 深绿色
+                ctx.beginPath();
+                ctx.roundRect(bagCX, bagCY, 16, 9, 3);
+                ctx.fill();
+                ctx.strokeStyle = '#4ade80';
+                ctx.stroke();
+                // 手提带
+                ctx.strokeStyle = '#4ade80';
+                ctx.beginPath();
+                ctx.arc(bagCX + 8, bagCY, 4, Math.PI, 0);
+                ctx.stroke();
+            }
+
+            // 8. 文字标识
+            ctx.fillStyle = '#00CCFF';
+            ctx.font = 'bold 9px monospace';
+            ctx.fillText(p.label || "CAROUSEL", p.x + 12, p.y + p.h - 6, Math.max(10, p.w - 24));
+
+        } else if (isAirportLevel && lbl.includes('FLIGHT BOARD')) {
+            // === 关卡 1 机场大型中央航班信息告示大屏 (FIDS - Flight Information Display System) ===
+            ctx.save();
+            // 1. 地面安全清空边界虚线
+            ctx.strokeStyle = 'rgba(234, 179, 8, 0.35)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 2]);
+            ctx.strokeRect(p.x - 3, p.y - 3, p.w + 6, p.h + 6);
+            ctx.setLineDash([]);
+
+            // 2. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+
+            // 3. 巨幅机箱大外框 (黑灰主体配青蓝高光)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 左右两侧结构承重支柱
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, 5, p.h);
+            ctx.fillRect(p.x + p.w - 5, p.y, 5, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x, p.y, 5, p.h);
+            ctx.strokeRect(p.x + p.w - 5, p.y, 5, p.h);
+
+            // 4. 内部高分点阵大屏幕 (充分利用扩展尺寸，空间开阔)
+            const scrX = p.x + 6;
+            const scrY = p.y + 3;
+            const scrW = p.w - 12;
+            const scrH = p.h - 6;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(scrX, scrY, scrW, scrH);
+
+            // 屏幕顶部蓝色标题栏 (DEPARTURES // 航班起飞)
+            ctx.fillStyle = '#0369a1';
+            ctx.fillRect(scrX, scrY, scrW, 11);
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(scrX, scrY + 10.4, scrW, 0.6);
+
+            ctx.font = 'bold 6.5px monospace';
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText("DEPARTURES 航班信息", scrX + 4, scrY + 8);
+
+            // 实时时间与信号绿灯
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillText("14:35", scrX + scrW - 28, scrY + 8);
+            const blinkOn = (Math.floor(Date.now() / 600) % 2 === 0);
+            ctx.fillStyle = blinkOn ? '#00FF66' : 'rgba(0, 255, 102, 0.3)';
+            ctx.beginPath(); ctx.arc(scrX + scrW - 6, scrY + 5.5, 1.8, 0, Math.PI * 2); ctx.fill();
+
+            // 航讯分列表头 (横向大幅排开，留足列间距)
+            const colFlt = scrX + 4;
+            const colTo = scrX + 38;
+            const colGate = scrX + 68;
+            const colStatus = scrX + 94;
+            const headerY = scrY + 19;
+
+            ctx.font = 'bold 6px monospace';
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillText("FLIGHT", colFlt, headerY);
+            ctx.fillText("TO", colTo, headerY);
+            ctx.fillText("GATE", colGate, headerY);
+            ctx.fillText("STATUS", colStatus, headerY);
+
+            // 分割细线
+            ctx.strokeStyle = 'rgba(71, 85, 105, 0.45)';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(scrX + 3, scrY + 22.5);
+            ctx.lineTo(scrX + scrW - 3, scrY + 22.5);
+            ctx.stroke();
+
+            // 多行真实感航班数据排版 (行高充裕，字母与字间距整齐疏朗，不拥挤)
+            const flightRows = [
+                { flt: 'CA981', to: 'JFK', gate: 'A12', st: 'BOARDING', col: '#00FF66' },
+                { flt: 'JL086', to: 'HND', gate: 'B04', st: 'ON TIME', col: '#00FF66' },
+                { flt: 'AF112', to: 'CDG', gate: 'A08', st: 'DELAYED', col: '#f87171' }
+            ];
+
+            // 隔行微弱底色斑马纹
+            ctx.fillStyle = 'rgba(30, 41, 59, 0.35)';
+            ctx.fillRect(scrX + 2, scrY + 32, scrW - 4, 8);
+
+            ctx.font = 'bold 6.2px monospace';
+            const rowYs = [scrY + 29.5, scrY + 38, scrY + 46.5];
+            flightRows.forEach((row, idx) => {
+                const ry = rowYs[idx];
+                if (ry < scrY + scrH - 1) {
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillText(row.flt, colFlt, ry);
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillText(row.to, colTo, ry);
+                    ctx.fillStyle = '#facc15';
+                    ctx.fillText(row.gate, colGate, ry);
+                    ctx.fillStyle = row.col;
+                    ctx.fillText(row.st, colStatus, ry);
+                }
+            });
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && lbl.includes('CHECK-IN')) {
+            // 值机打票与登机柜台 (Check-in & Boarding Desk with equipment facing NORTH towards ground staff)
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Counter body
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 1. 值机电脑终端 (Check-in Computer Terminal facing NORTH towards staff)
+            // Keyboard on North side
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 5, p.y + 2.5, 11, 3.2);
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 6, p.y + 3.0, 9, 1.2);
+            // Screen on South side facing North towards staff
+            ctx.fillStyle = '#09131a';
+            ctx.fillRect(p.x + 4.5, p.y + 6.8, 12, 4.2);
+            ctx.strokeStyle = '#00FF66'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + 4.5, p.y + 6.8, 12, 4.2);
+            ctx.fillStyle = '#00FF66';
+            ctx.fillRect(p.x + 5.5, p.y + 7.2, 10, 1.4); // Green flight system data feed
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x + 8.5, p.y + 11.2, 4, 1.5); // Stand neck and foot behind screen
+
+            // 2. 行李称重托盘 (Baggage Scale)
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 22, p.y + 4, 28, p.h - 8);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.strokeRect(p.x + 22, p.y + 4, 28, p.h - 8);
+            ctx.fillStyle = '#0284c7';
+            ctx.fillRect(p.x + 25, p.y + 6, 22, 1.5); // Scale conveyor roller strip
+            ctx.fillRect(p.x + 25, p.y + 11, 22, 1.5);
+            ctx.fillRect(p.x + 25, p.y + 16, 22, 1.5);
+
+            // 3. 登机核验/文件夹板（签约板）- 夹子部分朝外(南侧)，文件部分朝内(北侧，面向地勤工作人员)
+            const apClipX = p.x + 53;
+            // Dark navy binder board
+            ctx.fillStyle = '#1e3a8a';
+            ctx.fillRect(apClipX, p.y + 3, 10, 14);
+            // White boarding manifest paperwork sheet
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(apClipX + 1, p.y + 3.5, 8, 13);
+            // Metallic chrome spring clip at the SOUTH edge (朝外 - 柜台外侧)
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(apClipX + 2, p.y + 14.5, 6, 1.8);
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(apClipX + 4, p.y + 14.8, 2, 0.8);
+            // Flight header banner at outer side
+            ctx.fillStyle = '#0284c7';
+            ctx.fillRect(apClipX + 2, p.y + 13.0, 6, 0.8);
+            // Passenger list lines (文件部分朝内，面向地勤人员阅读)
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(apClipX + 2, p.y + 11.2, 6, 0.6);
+            ctx.fillRect(apClipX + 2, p.y + 9.5, 6, 0.6);
+            ctx.fillRect(apClipX + 2, p.y + 7.8, 5, 0.6);
+            // Gate clearance stamp & staff signature line at NORTH edge (朝内，工作人员执笔处)
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath();
+            ctx.arc(apClipX + 3.5, p.y + 5.2, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#2563eb';
+            ctx.fillRect(apClipX + 5.5, p.y + 5.2, 2.5, 0.8);
+            // Pen on right of clipboard, grip at North for staff
+            ctx.fillStyle = '#2563eb';
+            ctx.fillRect(apClipX + 10.5, p.y + 3.5, 1.2, 3.5);
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(apClipX + 10.5, p.y + 7.0, 1.2, 7);
+
+            // 4. 登机广播与呼叫叫号终端 - 屏幕对着工作人员(北侧)
+            const apTermX = p.x + 66.5;
+            ctx.fillStyle = '#09101f';
+            ctx.fillRect(apTermX, p.y + 3, 11.5, 14);
+
+            // Call buttons & Numpad on NORTH side (朝内，地勤直接按压)
+            ctx.fillStyle = '#10b981'; // Green "BOARDING CALL"
+            ctx.fillRect(apTermX + 1.2, p.y + 3.8, 4, 2.4);
+            ctx.fillStyle = '#f59e0b'; // Amber "PRIORITY CALL"
+            ctx.fillRect(apTermX + 6.2, p.y + 3.8, 4, 2.4);
+            ctx.fillStyle = '#334155'; // Keypad grid
+            ctx.fillRect(apTermX + 1.2, p.y + 6.8, 9, 1.8);
+
+            // Backlit digital queue / gate LCD display on SOUTH side (斜仰式屏幕，朝向北侧地勤人员眼睛)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(apTermX + 1, p.y + 9.4, 9.5, 4.4);
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(apTermX + 1.5, p.y + 9.8, 8.5, 3.6);
+            ctx.fillStyle = '#047857';
+            ctx.fillRect(apTermX + 2, p.y + 10.3, 7.5, 2.6);
+            ctx.fillStyle = '#34d399'; // Digital green gate queue indicator
+            ctx.fillRect(apTermX + 2.5, p.y + 10.8, 4.5, 1.6);
+
+            // Gooseneck announcement microphone curving NORTH towards ground agent
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(apTermX + 1, p.y + 9.0);
+            ctx.quadraticCurveTo(apTermX - 3, p.y + 3, apTermX - 1.5, p.y - 2);
+            ctx.stroke();
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(apTermX - 3, p.y - 4, 3, 2.2);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(apTermX - 3, p.y - 4, 3, 0.8);
+
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && (lbl.includes('VIP BAR') || (lbl.includes('BAR') && !lbl.includes('DUTY FREE')))) {
+            // === 关卡 1 机场 VIP 休息室特等酒吧台 (Airport VIP Lounge Bar Counter - 半写实风，呼应值机柜台与行李转盘) ===
+            ctx.save();
+            // 1. 基础阴影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 柜体主体 (深板岩蓝黑基底 + 航空青蓝高光包边，与 CHECK-IN / CAROUSEL 统一)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 咖啡与热饮机模块 (西侧，类似值机柜台上的终端设备)
+            const coffeeX = p.x + 5;
+            const coffeeY = p.y + 3;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(coffeeX, coffeeY, 16, p.h - 6);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(coffeeX, coffeeY, 16, p.h - 6);
+            // 滴滤托盘与双指示灯
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(coffeeX + 2, coffeeY + p.h - 11, 12, 3);
+            ctx.fillStyle = '#00FF66';
+            ctx.beginPath(); ctx.arc(coffeeX + 4, coffeeY + 4, 1.2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath(); ctx.arc(coffeeX + 8, coffeeY + 4, 1.2, 0, Math.PI * 2); ctx.fill();
+            // 2 只白瓷咖啡杯
+            ctx.fillStyle = '#f8fafc';
+            ctx.beginPath(); ctx.arc(coffeeX + 5, coffeeY + 11, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(coffeeX + 11, coffeeY + 11, 2, 0, Math.PI * 2); ctx.fill();
+
+            // 4. 中央酒轨凹槽与精品名酒 (类似转盘上的行李块，色彩分明半写实)
+            const railX = p.x + 26;
+            const railY = p.y + 4;
+            const railW = 32;
+            const railH = p.h - 8;
+            ctx.fillStyle = '#09131a';
+            ctx.fillRect(railX, railY, railW, railH);
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.4)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(railX, railY, railW, railH);
+
+            // 四款高辨识度方形/矩形酒瓶 (香槟绿、威士忌金、杜松子蓝、力娇红)
+            const bottles = [
+                { color: '#14532d', cap: '#f59e0b', x: railX + 3 },
+                { color: '#d97706', cap: '#78350f', x: railX + 9 },
+                { color: '#0284c7', cap: '#cbd5e1', x: railX + 15 },
+                { color: '#dc2626', cap: '#f59e0b', x: railX + 21 }
+            ];
+            bottles.forEach(b => {
+                ctx.fillStyle = b.color;
+                ctx.fillRect(b.x, railY + 4, 4.5, 9);
+                ctx.fillStyle = b.cap;
+                ctx.fillRect(b.x + 1.2, railY + 1.5, 2, 2.5);
+            });
+            // 调酒杯与冰块
+            ctx.fillStyle = '#38bdf8';
+            ctx.beginPath(); ctx.arc(railX + 28, railY + 8, 2.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(railX + 27.2, railY + 7.2, 1.4, 1.4);
+
+            // 5. VIP 点单电脑屏幕 (东侧，造型呼应值机柜台屏幕)
+            const posTermX = p.x + 63;
+            const posTermY = p.y + 3.5;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(posTermX, posTermY, 16, p.h - 7);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(posTermX, posTermY, 16, p.h - 7);
+            // 屏幕绿字数据流
+            ctx.fillStyle = '#00FF66';
+            ctx.fillRect(posTermX + 2.5, posTermY + 3, 11, 2);
+            ctx.fillRect(posTermX + 2.5, posTermY + 7, 8, 1.5);
+            ctx.fillRect(posTermX + 2.5, posTermY + 11, 6, 1.5);
+
+            // 6. 客人侧吧椅 (北侧/上方 3 把圆形吧椅，深海军蓝配银边，与机场主色调契合)
+            const stoolY = p.y - 8;
+            const stoolStep = (p.w - 24) / 2;
+            for (let i = 0; i < 3; i++) {
+                const sx = p.x + 12 + i * stoolStep;
+                ctx.strokeStyle = '#64748b';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(sx, p.y);
+                ctx.lineTo(sx, stoolY);
+                ctx.stroke();
+
+                ctx.fillStyle = '#1e3a8a';
+                ctx.beginPath();
+                ctx.arc(sx, stoolY, 4.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#38bdf8';
+                ctx.stroke();
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && (lbl.includes('DUTY FREE') || (lbl.includes('KIOSK') && lbl.includes('DUTY')))) {
+            // === 关卡 1 机场免税店展柜 (Duty Free Kiosk - 半写实风格，呼应值机柜台与转盘) ===
+            ctx.save();
+            // 1. 基础阴影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 柜体主体
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 双侧玻璃展橱 (左侧香水、右侧名表)
+            const vitW = 16;
+            const vitH = p.h - 8;
+            // 左橱窗 (香氛展示)
+            ctx.fillStyle = '#09131a';
+            ctx.fillRect(p.x + 3, p.y + 4, vitW, vitH);
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.4)';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + 3, p.y + 4, vitW, vitH);
+
+            // 三瓶几何香水 (金色、青色、玫红)
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(p.x + 5, p.y + 10, 3.5, 6);
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(p.x + 6, p.y + 8, 1.5, 2);
+
+            ctx.fillStyle = '#0284c7';
+            ctx.fillRect(p.x + 10, p.y + 9, 3.5, 7);
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(p.x + 11, p.y + 7, 1.5, 2);
+
+            ctx.fillStyle = '#ec4899';
+            ctx.fillRect(p.x + 15, p.y + 11, 3, 5);
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(p.x + 15.5, p.y + 9.5, 2, 1.5);
+
+            // 右橱窗 (腕表首饰展示)
+            const rVitX = p.x + p.w - 3 - vitW;
+            ctx.fillStyle = '#09131a';
+            ctx.fillRect(rVitX, p.y + 4, vitW, vitH);
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.4)';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(rVitX, p.y + 4, vitW, vitH);
+
+            // 红色丝绒表盘底托
+            ctx.fillStyle = '#7f1d1d';
+            ctx.fillRect(rVitX + 2, p.y + 7, vitW - 4, vitH - 6);
+            // 2 只精致圆形腕表 (金、银)
+            ctx.fillStyle = '#fbbf24';
+            ctx.beginPath(); ctx.arc(rVitX + 5.5, p.y + 13, 2.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath(); ctx.arc(rVitX + 5.5, p.y + 13, 1.5, 0, Math.PI * 2); ctx.fill();
+
+            ctx.fillStyle = '#cbd5e1';
+            ctx.beginPath(); ctx.arc(rVitX + 11.5, p.y + 13, 2.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#0284c7';
+            ctx.beginPath(); ctx.arc(rVitX + 11.5, p.y + 13, 1.5, 0, Math.PI * 2); ctx.fill();
+
+            // 玻璃对角高光斜线 (呼应转盘和值机柜台风格)
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 5, p.y + vitH + 2); ctx.lineTo(p.x + 15, p.y + 5);
+            ctx.moveTo(rVitX + 3, p.y + vitH + 2); ctx.lineTo(rVitX + 13, p.y + 5);
+            ctx.stroke();
+
+            // 4. 中间收银扫码小立柱
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 20, p.y + 5, 2, p.h - 10);
+            ctx.fillStyle = '#00FF66';
+            ctx.beginPath(); ctx.arc(p.x + 21, p.y + 9, 1.2, 0, Math.PI * 2); ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isYachtLevel && (lbl.includes('BAR') || lbl.includes('DUTY FREE'))) {
+            // 保留原有游艇酒吧台逻辑不变
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Luxury Yacht Bar Counter with Teak Wood, cocktails, and stools!
+            ctx.fillStyle = '#7c2d12'; // Warm mahogany wood base
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#a16207'; // Polished gold/wood edge
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Shiny polished countertop overlay
+            ctx.fillStyle = 'rgba(251, 191, 36, 0.15)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, p.h - 4);
+
+            // Cocktail glasses / bottles on the counter
+            // Cocktail A (Teal drink with lemon)
+            ctx.fillStyle = '#06b6d4';
+            ctx.beginPath(); ctx.arc(p.x + 12, p.y + p.h/2, 2.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#fef08a'; // lemon wedge
+            ctx.fillRect(p.x + 14, p.y + p.h/2 - 2, 1.5, 1.5);
+
+            // Cocktail B (Cherry red drink)
+            ctx.fillStyle = '#f43f5e';
+            ctx.beginPath(); ctx.arc(p.x + p.w - 12, p.y + p.h/2, 2.5, 0, Math.PI * 2); ctx.fill();
+
+            // 3 Bar Stools aligned (either above or below the counter depending on Y coordinate!)
+            const stoolsBelow = (p.y < 350);
+            const stoolY = stoolsBelow ? (p.y + p.h + 8) : (p.y - 8);
+
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1;
+            const stoolCount = 3;
+            const stoolStep = p.w / (stoolCount + 1);
+            for (let i = 1; i <= stoolCount; i++) {
+                const stoolX = p.x + i * stoolStep;
+                // Draw stool leg line
+                ctx.beginPath();
+                ctx.moveTo(stoolX, p.y + p.h / 2);
+                ctx.lineTo(stoolX, stoolY);
+                ctx.stroke();
+
+                // Draw circular stool seat (luxury red leather)
+                ctx.fillStyle = '#991b1b'; // Red leather seat
+                ctx.beginPath();
+                ctx.arc(stoolX, stoolY, 4.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#cbd5e1';
+                ctx.stroke();
+            }
+
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && (lbl.includes('CARGO') || lbl.includes('CONTAINER'))) {
+            // === 关卡 1 航空集装箱 (Aviation Cargo Container - 半写实风格，与转盘和值机台统一) ===
+            ctx.save();
+            // 1. 结构落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 主体外壳 (下侧右下角具标志性 45° 异形切角)
+            const chamfer = 8;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+            ctx.lineTo(p.x + p.w, p.y);
+            ctx.lineTo(p.x + p.w, p.y + p.h - chamfer);
+            ctx.lineTo(p.x + p.w - chamfer, p.y + p.h);
+            ctx.lineTo(p.x, p.y + p.h);
+            ctx.closePath();
+
+            // 纯粹的深板岩箱体 fill 与青蓝包边，与地图主体和谐统一
+            ctx.fillStyle = '#1e293b';
+            ctx.fill();
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // 3. 内部加强肋骨与格栅条纹 (直接呼应 CAROUSEL 传送带叶片线风格)
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.35)';
+            ctx.lineWidth = 1;
+            for (let lx = p.x + 8; lx < p.x + p.w - 8; lx += 6) {
+                ctx.beginPath();
+                ctx.moveTo(lx, p.y + 3);
+                ctx.lineTo(lx, p.y + p.h - (lx > p.x + p.w - chamfer - 2 ? chamfer : 3));
+                ctx.stroke();
+            }
+
+            // 4. 货舱门加固横梁与黄色固定绑带 (黄色织带 + 黑色卡扣，与行李箱捆带材质同调)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 3, p.y + p.h / 2 - 2, p.w - 6, 4);
+            ctx.fillStyle = '#FFCC00';
+            ctx.fillRect(p.x + 8, p.y + p.h / 2 - 1, 14, 2);
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 14, p.y + p.h / 2 - 2, 2.5, 4);
+
+            // 5. 醒目航空喷码与状态铭牌 (类似转盘上的字样)
+            ctx.fillStyle = '#00CCFF';
+            ctx.font = 'bold 8px monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText('AKE', p.x + 5, p.y + 11);
+
+            // 琥珀色危险品菱形小标
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath();
+            const hx = p.x + p.w - 11;
+            const hy = p.y + 10;
+            ctx.moveTo(hx, hy - 3); ctx.lineTo(hx + 3, hy); ctx.lineTo(hx, hy + 3); ctx.lineTo(hx - 3, hy);
+            ctx.closePath();
+            ctx.fill();
+
+            // 四角金属加固块
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 1, p.y + 1, 3, 3);
+            ctx.fillRect(p.x + p.w - 4, p.y + 1, 3, 3);
+            ctx.fillRect(p.x + 1, p.y + p.h - 4, 3, 3);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && lbl.includes('X-RAY')) {
+            // === 关卡 1 机场安检行李 X 光扫描机 (Airport Luggage X-Ray Inspection Scanner) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 主体外壳框架 (深灰金属机身 + 护框高光)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 贯通式传送滚轮导轨 (Pass-through Conveyor Roller Bed)
+            const bedY = p.y + 5;
+            const bedH = p.h - 10;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 2, bedY, p.w - 4, bedH);
+
+            // 滚轴细纹
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1;
+            for (let rx = p.x + 4; rx < p.x + p.w - 4; rx += 5) {
+                ctx.beginPath();
+                ctx.moveTo(rx, bedY + 1);
+                ctx.lineTo(rx, bedY + bedH - 1);
+                ctx.stroke();
+            }
+
+            // 4. 中央重型铅屏蔽检测通道机舱 (Lead-shielded Inspection Chamber Tunnel)
+            const tunW = p.w * 0.46;
+            const tunX = p.x + (p.w - tunW) / 2;
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(tunX, p.y + 2, tunW, p.h - 4);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(tunX, p.y + 2, tunW, p.h - 4);
+
+            // 铅胶防辐射帘 (进出口黑色条状门帘)
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(tunX, bedY, 3.5, bedH);
+            ctx.fillRect(tunX + tunW - 3.5, bedY, 3.5, bedH);
+            // 门帘分缝条纹
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(tunX + 1.8, bedY); ctx.lineTo(tunX + 1.8, bedY + bedH);
+            ctx.moveTo(tunX + tunW - 1.8, bedY); ctx.lineTo(tunX + tunW - 1.8, bedY + bedH);
+            ctx.stroke();
+
+            // 5. 传送带上的行李物品塑料托盘 (Plastic Security Inspection Tray & Carry-on Bag)
+            // 西侧进料塑料托盘 (深灰边框、浅底)
+            const trayW = 12;
+            const trayH = bedH - 4;
+            const trayX = p.x + 3;
+            const trayY = bedY + 2;
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(trayX, trayY, trayW, trayH);
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(trayX, trayY, trayW, trayH);
+            // 托盘内待检随身物品 (笔记本电脑与护照小件)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(trayX + 2, trayY + 2, 7, trayH - 4);
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(trayX + 9.5, trayY + 3, 1.8, 3.5);
+
+            // 6. 安检员双能 X 射线伪彩判图监视器工作台 (Operator LCD Monitor Display Console)
+            // 位于机身北侧突出悬臂操作台
+            const monW = 11;
+            const monH = 6;
+            const monX = tunX + tunW / 2 - monW / 2;
+            const monY = p.y - 2;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(monX, monY, monW, monH);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(monX, monY, monW, monH);
+            // 监视器屏幕上的橙色/青色双能 X 光成像 (有机物橙色 / 金属青蓝)
+            ctx.fillStyle = '#ea580c';
+            ctx.fillRect(monX + 1.5, monY + 1.5, 3.5, 3);
+            ctx.fillStyle = '#00CCFF';
+            ctx.fillRect(monX + 5.5, monY + 1.5, 4, 3);
+
+            // 7. 机身指示灯与红色急停开关 (Indicator LEDs & E-Stop)
+            ctx.fillStyle = '#00FF66'; // 绿色运行灯
+            ctx.beginPath(); ctx.arc(tunX + 3, p.y + 3.5, 1.2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ef4444'; // 红色急停按钮
+            ctx.beginPath(); ctx.arc(tunX + tunW - 3, p.y + 3.5, 1.4, 0, Math.PI * 2); ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && (lbl.includes('BAGGAGE CART') || lbl.includes('LUGGAGE CART') || (lbl.includes('BAGGAGE') && !lbl.includes('SIZER'))) && !lbl.includes('CAROUSEL')) {
+            // === 关卡 1 机场行李手推车 (Baggage Carts - 半写实风格，直接复用转盘上的经典行李箱视觉语言) ===
+            ctx.save();
+            // 1. 停靠车位微弱地线
+            ctx.strokeStyle = 'rgba(234, 179, 8, 0.35)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 2]);
+            ctx.strokeRect(p.x - 2, p.y - 2, p.w + 4, p.h + 4);
+            ctx.setLineDash([]);
+
+            // 2. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 2, p.y + 3, p.w - 4, p.h - 2);
+
+            // 3. 不锈钢手推车架 (与值机台、转盘风格协调)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, p.h - 4);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x + 2, p.y + 2, p.w - 4, p.h - 4);
+
+            // 金属底板栅格线
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
+            ctx.lineWidth = 0.8;
+            for (let lx = p.x + 7; lx < p.x + p.w - 4; lx += 6) {
+                ctx.beginPath();
+                ctx.moveTo(lx, p.y + 4);
+                ctx.lineTo(lx, p.y + p.h - 4);
+                ctx.stroke();
+            }
+
+            // 西侧推车防滑红色握把与支架
+            ctx.fillStyle = '#ef4444';
+            ctx.fillRect(p.x, p.y + 4, 2.5, p.h - 8);
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(p.x + 2.5, p.y + 6, 1.5, 2);
+            ctx.fillRect(p.x + 2.5, p.y + p.h - 8, 1.5, 2);
+
+            // 4. 车载行李箱 (完全采用 CAROUSEL 上经典的半写实行李箱设计，高度统一！)
+            // 行李 1: 经典宝蓝皮箱 (带把手与黄色捆带，与转盘箱子 100% 同款风格)
+            const bag1X = p.x + 8;
+            const bag1Y = p.y + 4;
+            const bag1W = 16;
+            const bag1H = 10;
+            ctx.fillStyle = '#1e3a8a';
+            ctx.fillRect(bag1X, bag1Y, bag1W, bag1H);
+            ctx.strokeStyle = '#60a5fa';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(bag1X, bag1Y, bag1W, bag1H);
+            // 把手
+            ctx.strokeStyle = '#94a3b8';
+            ctx.beginPath();
+            ctx.moveTo(bag1X + 3, bag1Y); ctx.lineTo(bag1X + 3, bag1Y - 1.5);
+            ctx.lineTo(bag1X + 11, bag1Y - 1.5); ctx.lineTo(bag1X + 11, bag1Y);
+            ctx.stroke();
+            // 黄色固定捆带
+            ctx.fillStyle = '#FFCC00';
+            ctx.fillRect(bag1X + 7, bag1Y, 2.5, bag1H);
+
+            // 行李 2: 艳丽紫红皮箱 (带把手与绿色捆带)
+            const bag2X = p.x + 18;
+            const bag2Y = p.y + 11;
+            const bag2W = 14;
+            const bag2H = 9;
+            ctx.fillStyle = '#701a75';
+            ctx.fillRect(bag2X, bag2Y, bag2W, bag2H);
+            ctx.strokeStyle = '#f472b6';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(bag2X, bag2Y, bag2W, bag2H);
+            // 绿色捆带
+            ctx.fillStyle = '#00FF66';
+            ctx.fillRect(bag2X + 6, bag2Y, 2, bag2H);
+
+            // 行李 3: 商务公文包 / 便携旅行袋 (棕色)
+            const bag3X = p.x + 27;
+            const bag3Y = p.y + 4;
+            ctx.fillStyle = '#78350f';
+            ctx.fillRect(bag3X, bag3Y, 10, 6);
+            ctx.strokeStyle = '#d97706';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(bag3X, bag3Y, 10, 6);
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(bag3X + 4, bag3Y - 1, 2, 1);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && (lbl.includes('BOARDING GATE') || lbl.includes('BOARDING'))) {
+            // === 关卡 1 机场登机口电子验票闸机与服务台 (Airport E-Boarding Gate & Counter - Zone D) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 登机柜台主体 (与值机台一致的深灰金属底座 + 亮蓝包边)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 登机牌条码扫描器与人脸识别立柱 (位于西侧)
+            const scanW = 16;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 4, p.y + 3, scanW, p.h - 6);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x + 4, p.y + 3, scanW, p.h - 6);
+            // 扫描窗红色红外线光缝
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.85)';
+            ctx.fillRect(p.x + 7, p.y + 6, scanW - 6, 2);
+            // 通行指示灯
+            ctx.fillStyle = '#00FF66';
+            ctx.beginPath(); ctx.arc(p.x + 12, p.y + p.h - 6, 1.5, 0, Math.PI * 2); ctx.fill();
+
+            // 4. 中央电子自动摆闸玻璃翼门 (Electronic Swing Glass Flaps)
+            const flapX = p.x + 23;
+            const flapW = 16;
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.35)';
+            ctx.fillRect(flapX, p.y + 4, flapW, p.h - 8);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(flapX, p.y + 4, flapW, p.h - 8);
+            // 闸门中间闭合缝与绿色导光带
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(flapX + flapW / 2, p.y + 4);
+            ctx.lineTo(flapX + flapW / 2, p.y + p.h - 4);
+            ctx.stroke();
+
+            // 5. 东侧登机口微缩航班信息屏 (Gate Information Screen)
+            const gScrX = p.x + 42;
+            const gScrW = p.w - 46;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(gScrX, p.y + 3, gScrW, p.h - 6);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(gScrX, p.y + 3, gScrW, p.h - 6);
+            // 微缩文字
+            ctx.font = 'bold 5px monospace';
+            ctx.fillStyle = '#facc15';
+            ctx.fillText("A10", gScrX + 2, p.y + 9);
+            ctx.fillStyle = '#00FF66';
+            ctx.fillText("BOARD", gScrX + 2, p.y + p.h - 5);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && (lbl.includes('BAGGAGE SIZER') || lbl.includes('SIZER'))) {
+            // === 关卡 1 机场手提行李规格/称重测试架 (Cabin Baggage Sizer & Scale - Zone D) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            // 2. 电子地秤底座 (Weighing Scale Base)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 钢管行李尺寸测量框架 (Luggage Sizing Frame Basket)
+            const fX = p.x + 3;
+            const fY = p.y + 3;
+            const fW = p.w - 6;
+            const fH = p.h - 8;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(fX, fY, fW, fH);
+            ctx.strokeStyle = '#0284c7';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(fX, fY, fW, fH);
+
+            // 规格框架分隔隔条 (55 x 40 x 20cm 标准槽位)
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(fX + fW * 0.4, fY);
+            ctx.lineTo(fX + fW * 0.4, fY + fH);
+            ctx.stroke();
+
+            // 4. 数字称重显数仪表盘 (Digital Weight Display)
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(p.x + 4, p.y + p.h - 4.5, p.w - 8, 3.5);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(p.x + 4, p.y + p.h - 4.5, p.w - 8, 3.5);
+            ctx.font = 'bold 3.5px monospace';
+            ctx.fillStyle = '#00FF66';
+            ctx.fillText("10.0KG", p.x + 5.5, p.y + p.h - 1.8);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && lbl.includes('KIOSK')) {
+            // 自助终端
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            ctx.fillStyle = '#042f2e';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w - 8, p.h * 0.45);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x + 4, p.y + 4, p.w - 8, p.h * 0.45);
+
+            ctx.fillStyle = '#00FF66';
+            ctx.fillRect(p.x + 6, p.y + 7, p.w - 12, 2);
+            ctx.fillRect(p.x + 6, p.y + 11, p.w * 0.5, 2);
+
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 5, p.y + p.h * 0.55, p.w - 10, p.h * 0.22);
+            ctx.fillStyle = '#00CCFF';
+            ctx.fillRect(p.x + p.w - 10, p.y + p.h * 0.58, 3, 2);
+
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && (lbl.includes('BOOTH') || lbl.includes('CONSOLE'))) {
+            // 控制台 / 监控台
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            const monW = (p.w - 12) / 2;
+            ctx.fillStyle = '#09131a';
+            ctx.fillRect(p.x + 4, p.y + 4, monW, 12);
+            ctx.fillRect(p.x + 4 + monW + 4, p.y + 4, monW, 12);
+
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x + 4, p.y + 4, monW, 12);
+            ctx.strokeRect(p.x + 4 + monW + 4, p.y + 4, monW, 12);
+
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 5, p.y + 18, p.w - 10, p.h - 22);
+
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && lbl.includes('SERVER')) {
+            // 服务器机架
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.3)';
+            ctx.lineWidth = 1;
+            for (let sy = p.y + 4; sy < p.y + p.h - 10; sy += 5) {
+                ctx.beginPath();
+                ctx.moveTo(p.x + 4, sy); ctx.lineTo(p.x + p.w - 4, sy);
+                ctx.stroke();
+                ctx.fillStyle = (sy % 2 === 0) ? '#00FF66' : '#FF9900';
+                ctx.fillRect(p.x + p.w - 6, sy - 1, 2, 2);
+            }
+
+            drawPropTagLabel(p);
+
+        } else if (isAirportLevel && (lbl.includes('GENERATOR') || lbl.includes('CRATES') || lbl.includes('GEAR'))) {
+            // 物资箱 / 发电机
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#FF9900';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            if (lbl.includes('GENERATOR')) {
+                ctx.strokeStyle = 'rgba(255, 153, 0, 0.45)';
+                ctx.lineWidth = 1;
+                for (let vy = p.y + 6; vy < p.y + p.h - 10; vy += 4) {
+                    ctx.beginPath();
+                    ctx.moveTo(p.x + 5, vy); ctx.lineTo(p.x + p.w - 5, vy);
+                    ctx.stroke();
+                }
+                ctx.fillStyle = '#FF9900';
+                ctx.beginPath(); ctx.arc(p.x + p.w / 2, p.y + 7, 2.5, 0, Math.PI * 2); ctx.fill();
+            } else {
+                ctx.strokeStyle = 'rgba(255, 153, 0, 0.35)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + p.w, p.y + p.h);
+                ctx.moveTo(p.x + p.w, p.y); ctx.lineTo(p.x, p.y + p.h);
+                ctx.stroke();
+            }
+
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && lbl.includes('TICKET BOOTH')) {
+            // === 关卡 2 地铁票务中心工作台 (Subway Realistic Ticket Office Counter) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 办公工作台桌体 (深灰色防火板 + 暖灰木纹台面)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 台面与外沿不锈钢压条
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2);
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, 2);
+
+            // 3. 不锈钢票款/找零小托盘 (Change & Ticket Pass Tray - 靠上贴近售票窗)
+            const trayW = 16;
+            const trayH = 5;
+            const trayX = p.x + (p.w - trayW) / 2;
+            const trayY = p.y + 3;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(trayX, trayY, trayW, trayH);
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(trayX, trayY, trayW, trayH);
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(trayX + 2, trayY + 1.5, trayW - 4, 1.5);
+
+            // 4. 标准票务工作站电脑屏幕与外设 (Ticketing PC & Peripherals)
+            // 电脑显示器 (LCD Monitor)
+            const monW = 14;
+            const monH = 9;
+            const monX = p.x + 4;
+            const monY = p.y + 11;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(monX, monY, monW, monH);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(monX, monY, monW, monH);
+            // 屏幕上的票务系统界面 (蓝/绿色信息条)
+            ctx.fillStyle = '#0284c7';
+            ctx.fillRect(monX + 1.5, monY + 2, monW - 3, 1.8);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(monX + 1.5, monY + 4.5, 6, 1.5);
+
+            // 紧凑型键盘与鼠标 (Keyboard & Mouse)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(monX + 1, monY + monH + 2, 10, 5);
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(monX + 12, monY + monH + 3, 2.5, 3.5);
+
+            // 5. 现金钱箱/抽屉 (Cash Drawer / Register)
+            const cashX = p.x + 22;
+            const cashY = p.y + 11;
+            const cashW = p.w - 26;
+            const cashH = 14;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(cashX, cashY, cashW, cashH);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(cashX, cashY, cashW, cashH);
+            // 钱箱钞票与硬币格 (Currency Slots)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(cashX + 2, cashY + 2, cashW - 4, 3);
+            ctx.fillRect(cashX + 2, cashY + 6, cashW - 4, 3);
+            ctx.fillStyle = '#22c55e'; // 绿色钞票示意
+            ctx.fillRect(cashX + 3, cashY + 2.5, 5, 2);
+            ctx.fillStyle = '#f59e0b'; // 硬币黄色示意
+            ctx.fillRect(cashX + 10, cashY + 6.5, 3, 2);
+
+            // 6. POS刷卡机与小票打印机 (POS Terminal & Receipt Printer)
+            const posPinX = p.x + 5;
+            const posPinY = p.y + p.h - 9;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(posPinX, posPinY, 8, 6);
+            ctx.fillStyle = '#06b6d4'; // 刷卡感应区
+            ctx.fillRect(posPinX + 1.5, posPinY + 1.5, 5, 3);
+
+            // 小票打印机 (Receipt Printer)
+            const prtX = p.x + 16;
+            const prtY = p.y + p.h - 9;
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(prtX, prtY, 9, 6);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(prtX, prtY, 9, 6);
+            ctx.fillStyle = '#ffffff'; // 出纸口白色热敏纸
+            ctx.fillRect(prtX + 2, prtY + 1, 5, 1);
+
+            // 7. 桌面鹅颈式对话麦克风与文件夹 (Gooseneck Intercom Mic & Paperwork)
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w - 8, p.y + 6);
+            ctx.lineTo(p.x + p.w - 5, p.y + 3);
+            ctx.stroke();
+            ctx.fillStyle = '#ef4444';
+            ctx.fillRect(p.x + p.w - 6, p.y + 2, 2, 2);
+
+            // 票夹/文件 (Paperwork File Folder)
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(p.x + p.w - 11, p.y + p.h - 9, 8, 6);
+            ctx.fillStyle = '#fef08a';
+            ctx.fillRect(p.x + p.w - 10, p.y + p.h - 8, 6, 4);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && (lbl.includes('KIOSK 1') || lbl.includes('KIOSK 2') || (lbl.includes('KIOSK') && p.x < 300))) {
+            // === 关卡 2 地铁站厅自动售票机 / 充值终端 (Subway Automatic Ticket Vending Machine - TVM) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 售票机重型冷轧钢防暴机柜 (Dark Slate Cold-Rolled Steel Housing)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 顶部发光指示招牌与中英双语标识 (Top Illuminated Signboard)
+            ctx.fillStyle = '#0284c7';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, 6.5);
+            ctx.fillStyle = '#e0f2fe';
+            ctx.font = 'bold 5.5px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText("TICKETS 售票", p.x + p.w / 2, p.y + 7);
+
+            // 4. 超大高亮交互式触摸地铁线网图显示屏 (Interactive Touch Metro Network Display)
+            const scrW = p.w - 8;
+            const scrH = p.h * 0.44;
+            const scrX = p.x + 4;
+            const scrY = p.y + 10;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(scrX, scrY, scrW, scrH);
+            ctx.strokeStyle = '#06b6d4';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(scrX, scrY, scrW, scrH);
+
+            // 屏幕内地铁线路网络走线图 (Metro Route Lines & Interchange Dots)
+            // 1号线 (Green Line)
+            ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(scrX + 3, scrY + scrH * 0.3);
+            ctx.lineTo(scrX + scrW - 4, scrY + scrH * 0.7);
+            ctx.stroke();
+            // 2号线 (Cyan Line - Current Station highlighted)
+            ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(scrX + 4, scrY + scrH * 0.75);
+            ctx.lineTo(scrX + scrW * 0.5, scrY + scrH * 0.25);
+            ctx.lineTo(scrX + scrW - 3, scrY + scrH * 0.35);
+            ctx.stroke();
+            // 换乘站高亮白色圆点
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath(); ctx.arc(scrX + scrW * 0.5, scrY + scrH * 0.25, 1.8, 0, Math.PI * 2); ctx.fill();
+            // 当前站闪烁红点 (You Are Here)
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath(); ctx.arc(scrX + scrW * 0.32, scrY + scrH * 0.52, 2, 0, Math.PI * 2); ctx.fill();
+
+            // 5. 下半部投币、纸币、扫码与出票硬件区 (Payment & Ticket Hardware Modules)
+            const hwY = scrY + scrH + 2;
+
+            // 纸币投入口 (Banknote Insertion Slot with Flashing Green Light)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x + 4, hwY, 13, 3);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(p.x + 5, hwY + 0.8, 11, 1.4);
+
+            // 硬币投入漏斗口 (Coin Drop Slot)
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 19, hwY, 4, 3);
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(p.x + 20, hwY + 0.8, 2, 1.4);
+
+            // 一卡通/银联/移动支付感应区 (Contactless NFC & QR Tap Area)
+            ctx.fillStyle = '#0369a1';
+            ctx.fillRect(p.x + 25, hwY, 9, 3);
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(p.x + 26.5, hwY + 0.8, 6, 1.4);
+
+            // 车票吐票口 (Ticket Dispenser Slot with Blue Beacon)
+            const tktY = hwY + 4.5;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(p.x + 4, tktY, 14, 2.5);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(p.x + 4, tktY, 14, 2.5);
+
+            // 底部找零出币斗 (Change Return Bin with Stainless Flap)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x + 20, tktY - 0.5, 14, 3.5);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(p.x + 20, tktY - 0.5, 14, 3.5);
+
+            // 底部安全防撞地脚
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 2, p.y + p.h - 2, 6, 2);
+            ctx.fillRect(p.x + p.w - 8, p.y + p.h - 2, 6, 2);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && (lbl === 'KIOSK' || lbl.includes('CONVENIENCE') || (lbl.includes('KIOSK') && p.x >= 300))) {
+            // === 关卡 2 地铁站台便民服务便利店 / 报刊亭 (Subway Platform Newsstand & Convenience Kiosk) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 现代不锈钢与玻璃亭身 (Steel & Glass Kiosk Frame)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 顶部店招与照明檐蓬 (Illuminated Awning)
+            ctx.fillStyle = '#0369a1';
+            ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, 5.5);
+            ctx.fillStyle = '#f59e0b';
+            ctx.font = 'bold 5px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText("METRO EXPRESS", p.x + p.w / 2, p.y + 5.5);
+
+            // 3. 左侧三层阶梯式杂志报刊陈列架 (Tiered Newspaper & Magazine Rack)
+            const magX = p.x + 3;
+            const magY = p.y + 8;
+            const magW = 16;
+            const magH = p.h - 11;
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(magX, magY, magW, magH);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(magX, magY, magW, magH);
+
+            // 陈列架上的彩色报刊杂志与地图 (Magazines in Red, Blue, Amber)
+            for (let mi = 0; mi < 3; mi++) {
+                const rowY = magY + 2 + mi * 8.5;
+                ctx.fillStyle = mi === 0 ? '#ef4444' : (mi === 1 ? '#0284c7' : '#f59e0b');
+                ctx.fillRect(magX + 2, rowY, 5.5, 6.5);
+                ctx.fillStyle = mi === 0 ? '#10b981' : (mi === 1 ? '#8b5cf6' : '#ec4899');
+                ctx.fillRect(magX + 8.5, rowY, 5.5, 6.5);
+                // 封面高光
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.fillRect(magX + 2, rowY, 5.5, 1.5);
+                ctx.fillRect(magX + 8.5, rowY, 5.5, 1.5);
+            }
+
+            // 4. 右侧立式透明冷饮展示柜 (Backlit Beverage Cooler Cabinet)
+            const coolX = p.x + 21;
+            const coolY = p.y + 8;
+            const coolW = p.w - 24;
+            const coolH = p.h - 11;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(coolX, coolY, coolW, coolH);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(coolX, coolY, coolW, coolH);
+
+            // 玻璃冷柜内冷光照明与四排饮品 (Beverage Cans & Bottles)
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
+            ctx.fillRect(coolX + 1, coolY + 1, coolW - 2, coolH - 2);
+
+            for (let bi = 0; bi < 3; bi++) {
+                const by = coolY + 2 + bi * 8.5;
+                // 货架隔板
+                ctx.strokeStyle = '#64748b';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(coolX + 1, by + 6.5);
+                ctx.lineTo(coolX + coolW - 1, by + 6.5);
+                ctx.stroke();
+
+                // 饮料罐 (红可乐、青绿茶、橙果汁)
+                ctx.fillStyle = '#ef4444'; ctx.fillRect(coolX + 2, by, 3, 5.5);
+                ctx.fillStyle = '#10b981'; ctx.fillRect(coolX + 6, by, 3, 5.5);
+                ctx.fillStyle = '#06b6d4'; ctx.fillRect(coolX + 10, by, 3, 5.5);
+            }
+
+            // 玻璃推拉门反光斜线
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(coolX + 2, coolY + coolH - 3);
+            ctx.lineTo(coolX + coolW - 3, coolY + 3);
+            ctx.stroke();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && lbl.includes('X-RAY')) {
+            // === 关卡 2 地铁进站安检双能 X 射线行李检查仪 (Subway Security Dual-Energy X-Ray Scanner) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 主体机柜外壳 (深钛灰防暴机体 + 高光装甲包边)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 贯通式橡胶输送带与两端不锈钢导向滚筒 (Motorized Conveyor Belt & Rollers)
+            const beltY = p.y + 6;
+            const beltH = p.h - 12;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(p.x + 2, beltY, p.w - 4, beltH);
+
+            // 输送皮带防滑横肋纹
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1;
+            for (let bx = p.x + 4; bx < p.x + p.w - 4; bx += 4.5) {
+                ctx.beginPath();
+                ctx.moveTo(bx, beltY + 1);
+                ctx.lineTo(bx, beltY + beltH - 1);
+                ctx.stroke();
+            }
+
+            // 4. 中央重型铅屏蔽检测通道机舱 (Lead-Shielded Radiation Tunnel Chamber)
+            const tunW = p.w * 0.44;
+            const tunX = p.x + (p.w - tunW) / 2;
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(tunX, p.y + 2, tunW, p.h - 4);
+            ctx.strokeStyle = '#0284c7';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(tunX, p.y + 2, tunW, p.h - 4);
+
+            // 铅胶防辐射双层门帘 (Heavy Lead Rubber Strip Curtains at Both Ends)
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(tunX, beltY, 3, beltH);
+            ctx.fillRect(tunX + tunW - 3, beltY, 3, beltH);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(tunX + 1.5, beltY); ctx.lineTo(tunX + 1.5, beltY + beltH);
+            ctx.moveTo(tunX + tunW - 1.5, beltY); ctx.lineTo(tunX + tunW - 1.5, beltY + beltH);
+            ctx.stroke();
+
+            // 电离辐射安全三叶警告黄色徽标 (Yellow Radiation Hazard Symbol)
+            const hazX = tunX + tunW / 2;
+            const hazY = p.y + 5;
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath(); ctx.arc(hazX, hazY, 2.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#020617';
+            ctx.beginPath(); ctx.arc(hazX, hazY, 1, 0, Math.PI * 2); ctx.fill();
+
+            // 5. 西侧进料端安检塑料托盘 (Polymer Security Inspection Tray)
+            const trayW = 11;
+            const trayH = beltH - 4;
+            const trayX = p.x + 3;
+            const trayY = beltY + 2;
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(trayX, trayY, trayW, trayH);
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(trayX, trayY, trayW, trayH);
+            // 托盘内随身物品 (智能手机与金属钥匙)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(trayX + 2, trayY + 2, 6, trayH - 4);
+            ctx.fillStyle = '#eab308';
+            ctx.fillRect(trayX + 8.5, trayY + 3, 1.8, 3.5);
+
+            // 6. 东侧出料端待检旅行双肩包 (Scanned Backpack on Exit Roller)
+            const bagX = tunX + tunW + 2;
+            const bagY = beltY + 3;
+            const bagW = 8;
+            const bagH = beltH - 6;
+            ctx.fillStyle = '#0369a1';
+            ctx.beginPath();
+            ctx.roundRect(bagX, bagY, bagW, bagH, 2);
+            ctx.fill();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // 7. 安检员双能伪彩判图监视器悬臂工作站 (Operator HD Dual-Energy LCD Monitor Console)
+            const monW = 12;
+            const monH = 6.5;
+            const monX = tunX + tunW / 2 - monW / 2;
+            const monY = p.y - 2.5;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(monX, monY, monW, monH);
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(monX, monY, monW, monH);
+
+            // 监视器屏幕上的双能 X 光伪彩成像 (有机物橙色 / 金属无机物青蓝)
+            ctx.fillStyle = '#f97316'; // 橙色有机物特征 (衣服/液体)
+            ctx.fillRect(monX + 1.5, monY + 1.5, 4, 3.5);
+            ctx.fillStyle = '#06b6d4'; // 青蓝色高密度金属特征 (刀具/金属罐)
+            ctx.fillRect(monX + 6, monY + 1.5, 4.5, 3.5);
+
+            // 8. 运行就绪指示灯与红色急停蘑菇头按钮 (Status Indicator & E-Stop)
+            ctx.fillStyle = '#22c55e'; // 绿色正常指示
+            ctx.beginPath(); ctx.arc(tunX + 3, p.y + 3.5, 1.2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ef4444'; // 红色急停大按钮
+            ctx.beginPath(); ctx.arc(tunX + tunW - 3, p.y + 3.5, 1.5, 0, Math.PI * 2); ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && lbl.includes('BAGGAGE')) {
+            // === 关卡 2 地铁安检开箱复检与大件行李暂存区 (Subway Inspected Baggage Holding Staging Area) ===
+            ctx.save();
+            // 1. 地面黄黑安全划线斑马隔离框 (Safety Demarcation Hatching Border)
+            ctx.strokeStyle = 'rgba(245, 158, 11, 0.45)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 2.5]);
+            ctx.strokeRect(p.x - 2, p.y - 2, p.w + 4, p.h + 4);
+            ctx.setLineDash([]);
+
+            // 2. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 3. 不锈钢行李置物垫台 (Stainless Steel Luggage Staging Rack)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 金属防滑格栅条纹
+            ctx.strokeStyle = 'rgba(71, 85, 105, 0.5)';
+            ctx.lineWidth = 0.8;
+            for (let ly = p.y + 4; ly < p.y + p.h - 2; ly += 5) {
+                ctx.beginPath(); ctx.moveTo(p.x + 2, ly); ctx.lineTo(p.x + p.w - 2, ly); ctx.stroke();
+            }
+
+            // 4. 精细写实行李箱组 (High-Fidelity Realistic Passenger Suitcases & Bags)
+            // 行李 1: 银色金属拉丝万向轮拉杆箱 (Metallic Silver Polycarbonate Hard-Shell Case)
+            const bag1X = p.x + 3;
+            const bag1Y = p.y + 3;
+            const bag1W = 16;
+            const bag1H = 12;
+            ctx.fillStyle = '#64748b'; // 银灰色
+            ctx.fillRect(bag1X, bag1Y, bag1W, bag1H);
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(bag1X, bag1Y, bag1W, bag1H);
+            // 箱体横向抗压加强筋
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(bag1X + 2, bag1Y + 3.5, bag1W - 4, 1.2);
+            ctx.fillRect(bag1X + 2, bag1Y + 7.5, bag1W - 4, 1.2);
+            // 顶部提手与银色双伸缩拉杆 (Top Handle & Dual Tubes)
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(bag1X + 4, bag1Y - 2, 8, 2);
+            // 荧光黄行李安检标签 (Yellow Security Luggage Tag)
+            ctx.fillStyle = '#facc15';
+            ctx.fillRect(bag1X + 11, bag1Y + 1, 3.5, 2.5);
+
+            // 行李 2: 商务深蓝/藏青旅行箱 (Navy Blue Hard-Shell Trolley Case)
+            const bag2X = p.x + 18;
+            const bag2Y = p.y + 5;
+            const bag2W = 15;
+            const bag2H = 13;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(bag2X, bag2Y, bag2W, bag2H);
+            ctx.strokeStyle = '#0284c7';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(bag2X, bag2Y, bag2W, bag2H);
+            // 箱体黄色固定绑带
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(bag2X + 6, bag2Y, 2.5, bag2H);
+            // 提手
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(bag2X + 4, bag2Y - 1.5, 7, 1.5);
+
+            // 行李 3: 战术防水双肩旅行袋 (Heavy-Duty Olive Nylon Duffel Bag)
+            const bag3X = p.x + 4;
+            const bag3Y = p.y + 19;
+            const bag3W = 18;
+            const bag3H = 13;
+            ctx.fillStyle = '#14532d'; // 军绿色
+            ctx.beginPath();
+            ctx.roundRect(bag3X, bag3Y, bag3W, bag3H, 3);
+            ctx.fill();
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+            // 双织带手提环 (Nylon Webbing Straps)
+            ctx.strokeStyle = '#15803d';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(bag3X + 4, bag3Y); ctx.lineTo(bag3X + 4, bag3Y + bag3H);
+            ctx.moveTo(bag3X + 14, bag3Y); ctx.lineTo(bag3X + 14, bag3Y + bag3H);
+            ctx.stroke();
+
+            // 行李 4: 浅灰安检塑料复检框 (Inspection Tray with Tablet & Keys)
+            const trayX = p.x + 23;
+            const trayY = p.y + 20;
+            const trayW = 11;
+            const trayH = 12;
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(trayX, trayY, trayW, trayH);
+            ctx.strokeStyle = '#e2e8f0';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(trayX, trayY, trayW, trayH);
+            // 框内平板电脑与金属卡包
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(trayX + 2, trayY + 2, 7, 5);
+            ctx.fillStyle = '#eab308';
+            ctx.fillRect(trayX + 3, trayY + 8, 5, 2.5);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && lbl.includes('CONSOLE')) {
+            // === 关卡 2 地铁列车运行综合调度与信号控制台 (Subway CTC Railway Traffic Dispatch Console) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 调度工作台大理石/防静电钢质台身 (Heavy Ergonomic Dispatch Desk Body)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 三联屏全景行车监控显示阵列 (Triple-Screen Panoramic Railway Surveillance Array)
+            const screenW = (p.w - 14) / 3;
+            const screenH = 14;
+            const scrY = p.y + 3;
+
+            // 左屏幕: 地铁全线闭塞区间轨道占用图 (CTC Track Block Occupancy Diagram)
+            const scr1X = p.x + 3;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(scr1X, scrY, screenW, screenH);
+            ctx.strokeStyle = '#0284c7';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(scr1X, scrY, screenW, screenH);
+            // 轨道线路与绿色/红黄色区间信号
+            ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(scr1X + 2, scrY + 5); ctx.lineTo(scr1X + screenW - 2, scrY + 5);
+            ctx.moveTo(scr1X + 2, scrY + 10); ctx.lineTo(scr1X + screenW - 2, scrY + 10);
+            ctx.stroke();
+            // 占用区间列车方块 (TR-02)
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(scr1X + 4, scrY + 4, 4, 2);
+
+            // 中屏幕: 牵引供电与接触网三轨电压遥测 (Substation & Third-Rail Telemetry)
+            const scr2X = scr1X + screenW + 4;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(scr2X, scrY, screenW, screenH);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(scr2X, scrY, screenW, screenH);
+            // 示波器正弦波与柱状功率指示
+            ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(scr2X + 2, scrY + 7);
+            ctx.lineTo(scr2X + 4, scrY + 4);
+            ctx.lineTo(scr2X + 6, scrY + 10);
+            ctx.lineTo(scr2X + 8, scrY + 6);
+            ctx.lineTo(scr2X + screenW - 2, scrY + 7);
+            ctx.stroke();
+
+            // 右屏幕: 站台四分割 CCTV 实时安防画面 (Platform CCTV Quad-Split Feeds)
+            const scr3X = scr2X + screenW + 4;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(scr3X, scrY, screenW, screenH);
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(scr3X, scrY, screenW, screenH);
+            // 四宫格分屏线
+            ctx.strokeStyle = 'rgba(34, 197, 94, 0.4)';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath();
+            ctx.moveTo(scr3X + screenW / 2, scrY); ctx.lineTo(scr3X + screenW / 2, scrY + screenH);
+            ctx.moveTo(scr3X, scrY + screenH / 2); ctx.lineTo(scr3X + screenW, scrY + screenH / 2);
+            ctx.stroke();
+
+            // 4. 键盘操作区与道岔控制按键矩阵 (Switch Matrix & Keyboards)
+            const kbY = p.y + 19;
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x + 4, kbY, p.w - 8, p.h - 22);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(p.x + 4, kbY, p.w - 8, p.h - 22);
+
+            // 道岔控制按键排 (绿色正常、黄色待命、红色锁闭)
+            for (let bi = 0; bi < 6; bi++) {
+                const bx = p.x + 6 + bi * 4.5;
+                ctx.fillStyle = bi === 4 ? '#f59e0b' : (bi === 5 ? '#ef4444' : '#22c55e');
+                ctx.fillRect(bx, kbY + 2, 3, 2.5);
+            }
+
+            // 5. 紧急列车紧急制动/断电大闸 (Red Emergency Train Brake Lever with Hazard Cover)
+            const eBrakeX = p.x + p.w - 12;
+            const eBrakeY = kbY + 2;
+            ctx.fillStyle = '#f59e0b'; // 黄黑警戒底座
+            ctx.fillRect(eBrakeX - 1, eBrakeY - 1, 7, 7);
+            ctx.fillStyle = '#ef4444'; // 红色紧急拉杆
+            ctx.fillRect(eBrakeX, eBrakeY, 5, 5);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(eBrakeX + 1.5, eBrakeY + 1.5, 2, 2);
+
+            // 调度对讲鹅颈麦克风 (Dispatch Intercom Mic)
+            ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 6, p.y + p.h - 3);
+            ctx.lineTo(p.x + 8, p.y + p.h - 8);
+            ctx.stroke();
+            ctx.fillStyle = '#0284c7';
+            ctx.fillRect(p.x + 7.5, p.y + p.h - 9.5, 2, 2);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && lbl.includes('SERVER')) {
+            // === 关卡 2 地铁通信信号 SCADA / ATS 高密服务器机柜 (Subway Signaling SCADA Server Racks) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 19英寸 42U 重型冷轧钢工业机柜 (19-inch 42U Black Steel Server Rack)
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 内部刀片服务器层级与拉丝前面板 (Stacked 1U/2U Blade Units)
+            const numUnits = 5;
+            const unitH = (p.h - 10) / numUnits;
+            for (let ui = 0; ui < numUnits; ui++) {
+                const uy = p.y + 4 + ui * unitH;
+                // 服务器前面板
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(p.x + 3, uy, p.w - 6, unitH - 1.5);
+                ctx.strokeStyle = '#334155';
+                ctx.lineWidth = 0.5;
+                ctx.strokeRect(p.x + 3, uy, p.w - 6, unitH - 1.5);
+
+                // 蜂窝散热孔横条
+                ctx.strokeStyle = 'rgba(71, 85, 105, 0.4)';
+                ctx.lineWidth = 0.6;
+                ctx.beginPath();
+                ctx.moveTo(p.x + 5, uy + (unitH - 1.5) / 2);
+                ctx.lineTo(p.x + p.w - 14, uy + (unitH - 1.5) / 2);
+                ctx.stroke();
+
+                // 高频闪烁千兆网络/光纤链路指示灯 (Ethernet & Fiber Activity LEDs)
+                const pulseGreen = ((Date.now() + ui * 200) % 600 < 300);
+                const pulseAmber = ((Date.now() + ui * 350) % 800 < 400);
+                ctx.fillStyle = pulseGreen ? '#22c55e' : '#15803d';
+                ctx.fillRect(p.x + p.w - 11, uy + 1.5, 2, 2);
+                ctx.fillStyle = pulseAmber ? '#f59e0b' : '#78350f';
+                ctx.fillRect(p.x + p.w - 7, uy + 1.5, 2, 2);
+            }
+
+            // 4. 左侧垂直走线槽与青色光纤跳线 (Vertical Fiber Optic Jumper Bundles)
+            ctx.strokeStyle = '#06b6d4';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 4, p.y + 4);
+            ctx.lineTo(p.x + 4, p.y + p.h - 6);
+            ctx.stroke();
+            ctx.strokeStyle = '#14b8a6';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 6, p.y + 6);
+            ctx.lineTo(p.x + 6, p.y + p.h - 4);
+            ctx.stroke();
+
+            // 5. 顶部机房排风散热风扇格栅 (Top Dual Exhaust Fan Louvers)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x + 4, p.y + 1, p.w - 8, 2.5);
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(p.x + 6, p.y + 1.5, 4, 1.5);
+            ctx.fillRect(p.x + p.w - 10, p.y + 1.5, 4, 1.5);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && lbl.includes('CRATES')) {
+            // === 关卡 2 地铁工务段重型工业金属货箱与维保物资箱 (Subway Industrial Metal Cargo Lockers) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 重型镀锌瓦楞钢板箱体 (Corrugated Steel Cargo Container Body)
+            const steelGrad = ctx.createLinearGradient(p.x, p.y, p.x, p.y + p.h);
+            steelGrad.addColorStop(0, '#334155'); // 工业钛钢灰
+            steelGrad.addColorStop(0.5, '#1e293b'); // 瓦楞深暗
+            steelGrad.addColorStop(1, '#0f172a');
+            ctx.fillStyle = steelGrad;
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+
+            // 瓦楞加强抗压凹凸槽筋 (Horizontal Corrugated Metal Ribs)
+            const ribCount = 4;
+            const ribStep = (p.h - 6) / ribCount;
+            for (let ri = 1; ri <= ribCount; ri++) {
+                const ry = p.y + 3 + (ri - 1) * ribStep;
+                ctx.fillStyle = 'rgba(15, 23, 42, 0.8)';
+                ctx.fillRect(p.x + 4, ry, p.w - 8, 2.5);
+                ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+                ctx.fillRect(p.x + 4, ry, p.w - 8, 0.8);
+            }
+
+            // 3. 周边重型角钢加强框 (Heavy-Duty Steel Perimeter Frame)
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 四角铸钢防撞球形护角 (Cast Steel Corner Ball Brackets)
+            const cs = 5.5;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, cs, cs);
+            ctx.fillRect(p.x + p.w - cs, p.y, cs, cs);
+            ctx.fillRect(p.x, p.y + p.h - cs, cs, cs);
+            ctx.fillRect(p.x + p.w - cs, p.y + p.h - cs, cs, cs);
+
+            // 镀锌六角螺栓加固点 (Bright Zinc Hex Bolts)
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(p.x + 1.5, p.y + 1.5, 2, 2);
+            ctx.fillRect(p.x + p.w - 3.5, p.y + 1.5, 2, 2);
+            ctx.fillRect(p.x + 1.5, p.y + p.h - 3.5, 2, 2);
+            ctx.fillRect(p.x + p.w - 3.5, p.y + p.h - 3.5, 2, 2);
+
+            // 4. 双垂直不锈钢凸轮锁闭拉杆与挂锁 (Dual Locking Cam Rods & Padlock)
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + p.w * 0.35 - 1, p.y + 2, 2, p.h - 4);
+            ctx.fillRect(p.x + p.w * 0.65 - 1, p.y + 2, 2, p.h - 4);
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(p.x + p.w * 0.35 - 0.5, p.y + 2, 1, p.h - 4);
+            ctx.fillRect(p.x + p.w * 0.65 - 0.5, p.y + 2, 1, p.h - 4);
+
+            // 中央锁止把手与重型挂锁 (Center Lock & Padlock)
+            ctx.fillStyle = '#e2e8f0';
+            ctx.fillRect(p.x + p.w / 2 - 2.5, p.y + p.h / 2 - 3, 5, 6);
+            ctx.fillStyle = '#eab308'; // 黄铜挂锁
+            ctx.fillRect(p.x + p.w / 2 - 1.5, p.y + p.h / 2, 3, 3);
+
+            // 5. 工业模板黄色喷字与警示标识 (Stenciled Industrial Markings)
+            ctx.fillStyle = 'rgba(250, 204, 21, 0.9)';
+            ctx.font = 'bold 5.5px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText("METRO CARGO", p.x + p.w / 2, p.y + 9);
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = 'bold 5px monospace';
+            ctx.fillText("HEAVY FREIGHT", p.x + p.w / 2, p.y + p.h - 6);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && lbl.includes('GEAR')) {
+            // === 关卡 2 地铁线路轨道检修工具、液压起道器与路锥组 (Subway Track Repair Tools & Stash) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. 维保防油污橡胶托盘底座 (Heavy Duty Work Base)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. 黄色重型液压起道器 / 轨道千斤顶 (Heavy Hydraulic Railway Toe Jack)
+            const jackX = p.x + 4;
+            const jackY = p.y + 4;
+            const jackW = 12;
+            const jackH = 12;
+            ctx.fillStyle = '#eab308'; // 明黄色底座
+            ctx.fillRect(jackX, jackY, jackW, jackH);
+            ctx.strokeStyle = '#ca8a04';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(jackX, jackY, jackW, jackH);
+            // 镀铬顶升油缸 (Chrome Lifting Ram)
+            ctx.fillStyle = '#cbd5e1';
+            ctx.beginPath(); ctx.arc(jackX + jackW / 2, jackY + jackH / 2, 3.5, 0, Math.PI * 2); ctx.fill();
+            // 压动手柄 (Pump Lever)
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(jackX + jackW / 2, jackY + jackH / 2);
+            ctx.lineTo(jackX + jackW + 3, jackY - 1);
+            ctx.stroke();
+
+            // 4. 双反光高亮荧光橙色橡胶安全路锥 (Fluorescent Orange Traffic Safety Cones)
+            // 锥体 1 (右上)
+            const c1X = p.x + p.w - 10;
+            const c1Y = p.y + 8;
+            ctx.fillStyle = '#f97316'; // 亮橙色方形底座
+            ctx.fillRect(c1X - 5, c1Y - 5, 10, 10);
+            ctx.fillStyle = '#ea580c'; // 锥身圆环
+            ctx.beginPath(); ctx.arc(c1X, c1Y, 4, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#f1f5f9'; // 3M 银白高反光带 (Reflective Band)
+            ctx.beginPath(); ctx.arc(c1X, c1Y, 2.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ea580c'; // 锥尖
+            ctx.beginPath(); ctx.arc(c1X, c1Y, 1.2, 0, Math.PI * 2); ctx.fill();
+
+            // 5. 红色重型机械师钢制工具箱 (Red Mechanic's Steel Cantilever Toolbox)
+            const boxX = p.x + 3;
+            const boxY = p.y + 19;
+            const boxW = 14;
+            const boxH = 11;
+            ctx.fillStyle = '#dc2626'; // 经典工业红
+            ctx.fillRect(boxX, boxY, boxW, boxH);
+            ctx.strokeStyle = '#991b1b';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(boxX, boxY, boxW, boxH);
+            // 镀铬手柄与搭扣
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(boxX + 4, boxY + boxH / 2 - 1, 6, 2);
+            ctx.fillRect(boxX + 2, boxY + 2, 2, 2);
+            ctx.fillRect(boxX + boxW - 4, boxY + 2, 2, 2);
+
+            // 6. 重型高压电缆卷盘 (High-Voltage Cable Drum / Wire Spool)
+            const spoolX = p.x + p.w - 9;
+            const spoolY = p.y + p.h - 9;
+            ctx.fillStyle = '#78350f'; // 卷盘侧板
+            ctx.beginPath(); ctx.arc(spoolX, spoolY, 6, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ea580c'; // 卷绕的高压橙色电缆
+            ctx.beginPath(); ctx.arc(spoolX, spoolY, 4.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#0f172a'; // 卷轴中心轴
+            ctx.beginPath(); ctx.arc(spoolX, spoolY, 2, 0, Math.PI * 2); ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isSubwayLevel && lbl.includes('GENERATOR')) {
+            // === 关卡 2 地铁地下车站应急备用重型柴油发电机组 (Subway Station Emergency Diesel Generator) ===
+            ctx.save();
+            // 1. 基础落影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+
+            // 2. 重型减震防振工字钢底座 (Anti-Vibration Steel Skid Base)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 橡胶避震地脚垫 (Rubber Isolation Pads)
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(p.x + 2, p.y + 1, 6, 2.5);
+            ctx.fillRect(p.x + p.w - 8, p.y + 1, 6, 2.5);
+            ctx.fillRect(p.x + 2, p.y + p.h - 3.5, 6, 2.5);
+            ctx.fillRect(p.x + p.w - 8, p.y + p.h - 3.5, 6, 2.5);
+
+            // 3. 左侧大型散热水箱与强力冷却风扇网罩 (Large Radiator Cooling Fan Grille)
+            const radW = 16;
+            const radH = p.h - 10;
+            const radX = p.x + 4;
+            const radY = p.y + 5;
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(radX, radY, radW, radH);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(radX, radY, radW, radH);
+
+            // 圆形风扇罩与叶片剪影
+            const fanCX = radX + radW / 2;
+            const fanCY = radY + radH / 2;
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath(); ctx.arc(fanCX, fanCY, 6, 0, Math.PI * 2); ctx.stroke();
+            // 旋转叶片十字
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(fanCX - 5, fanCY); ctx.lineTo(fanCX + 5, fanCY);
+            ctx.moveTo(fanCX, fanCY - 5); ctx.lineTo(fanCX, fanCY + 5);
+            ctx.stroke();
+
+            // 4. 中央柴油发动机缸体与黄色防热饰盖 (Diesel Engine Cylinder Block)
+            const engX = radX + radW + 3;
+            const engW = 12;
+            const engY = p.y + 6;
+            const engH = p.h - 12;
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(engX, engY, engW, engH);
+            ctx.strokeStyle = '#f59e0b'; // 黄色防护盖
+            ctx.lineWidth = 1;
+            ctx.strokeRect(engX, engY, engW, engH);
+
+            // 黄色燃油箱注油口盖 (Yellow Diesel Fuel Cap)
+            ctx.fillStyle = '#eab308';
+            ctx.beginPath(); ctx.arc(engX + engW / 2, engY + 3, 2.2, 0, Math.PI * 2); ctx.fill();
+
+            // 5. 右侧发电机电控控制柜与双模拟电压表盘 (Generator Control Panel & Gauges)
+            const ctrlX = engX + engW + 3;
+            const ctrlW = p.w - (ctrlX - p.x) - 4;
+            const ctrlY = p.y + 5;
+            const ctrlH = p.h - 10;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(ctrlX, ctrlY, ctrlW, ctrlH);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(ctrlX, ctrlY, ctrlW, ctrlH);
+
+            // 双圆形仪表盘 (电压表与频率表 - Volt & Hz Analog Dials)
+            // 上仪表
+            ctx.fillStyle = '#020617';
+            ctx.beginPath(); ctx.arc(ctrlX + ctrlW / 2, ctrlY + 5, 3.5, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 0.6; ctx.stroke();
+            ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 0.8;
+            ctx.beginPath(); ctx.moveTo(ctrlX + ctrlW / 2, ctrlY + 5); ctx.lineTo(ctrlX + ctrlW / 2 + 2, ctrlY + 3.5); ctx.stroke();
+
+            // 主断路器空气开关与急停 (Breaker Toggle & Emergency Stop)
+            ctx.fillStyle = '#22c55e'; // 绿色合闸灯
+            ctx.fillRect(ctrlX + 2, ctrlY + 11, 2.5, 2.5);
+            ctx.fillStyle = '#ef4444'; // 红色急停按键
+            ctx.fillRect(ctrlX + ctrlW - 4.5, ctrlY + 11, 2.5, 2.5);
+
+            // 6. 顶部排气消音管 (Insulated Exhaust Muffler Pipe)
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(engX + 2, p.y + 1, 8, 3.5);
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(engX + 2, p.y + 1, 8, 3.5);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'chair_group') {
+            ctx.save();
+            const isVipSeat = isAirportLevel && (p.subType === 'vip' || p.isVip || p.y < 350);
+            const isTerminalSeat = isAirportLevel && !isVipSeat;
+            const isSubwaySeat = isSubwayLevel;
+
+            if (isVipSeat) {
+                // ==================== VIP 贵宾室豪华真皮扶手沙发座 (面向大厅中央: 朝南/朝下) ====================
+                // 1. 地面柔和阴影
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+                for (let i = 0; i < 4; i++) {
+                    ctx.fillRect(p.x + i * 22 + 1.5, p.y + 2.5, 18, 19);
+                }
+
+                // 2. 四张独立的豪华俱乐部真皮单人扶手沙发
+                for (let i = 0; i < 4; i++) {
+                    const cx = p.x + i * 22;
+                    const cy = p.y;
+
+                    // 沙发外底座
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(cx, cy, 18, 20);
+                    ctx.strokeStyle = '#1e293b';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(cx, cy, 18, 20);
+
+                    // 北侧高靠背 (置于北端，使用者朝南俯瞰大厅): 弧形厚实真皮高靠背
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(cx + 2, cy + 1, 14, 5.5);
+                    ctx.strokeStyle = '#f59e0b'; // 贵宾专属奢华琥珀金包边
+                    ctx.lineWidth = 0.9;
+                    ctx.strokeRect(cx + 2, cy + 1, 14, 5.5);
+
+                    // 靠背绗缝拉扣细节
+                    ctx.fillStyle = '#f59e0b';
+                    ctx.fillRect(cx + 5, cy + 2.8, 1.5, 2);
+                    ctx.fillRect(cx + 11.5, cy + 2.8, 1.5, 2);
+
+                    // 左右宽大软包真皮扶手 (从靠背延伸至座椅南侧前端)
+                    // 左扶手
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(cx + 1, cy + 3.5, 3.2, 15);
+                    ctx.strokeStyle = '#38bdf8';
+                    ctx.lineWidth = 0.7;
+                    ctx.strokeRect(cx + 1, cy + 3.5, 3.2, 15);
+                    // 右扶手
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(cx + 13.8, cy + 3.5, 3.2, 15);
+                    ctx.strokeRect(cx + 13.8, cy + 3.5, 3.2, 15);
+
+                    // 朝南敞开的奢华坐垫 (深皇家蓝软包 + 前沿双压线 + 微反光)
+                    const seatX = cx + 4.2;
+                    const seatY = cy + 6.5;
+                    const seatW = 9.6;
+                    const seatH = 12.5;
+                    ctx.fillStyle = '#1e3a8a';
+                    ctx.fillRect(seatX, seatY, seatW, seatH);
+
+                    // 坐垫前沿弧形凸起/缝线 (面向南侧大厅中央)
+                    ctx.fillStyle = '#2563eb';
+                    ctx.fillRect(seatX + 0.5, seatY + seatH - 3, seatW - 1, 2.5);
+                    ctx.strokeStyle = 'rgba(56, 189, 248, 0.6)';
+                    ctx.lineWidth = 0.8;
+                    ctx.strokeRect(seatX, seatY, seatW, seatH);
+
+                    // 靠背与坐垫结合处阴影
+                    ctx.fillStyle = '#090d16';
+                    ctx.fillRect(seatX, seatY, seatW, 1.5);
+                }
+
+                // 沙发底盘间的实木/大理石连接小几
+                ctx.fillStyle = '#0b1320';
+                for (let i = 0; i < 3; i++) {
+                    ctx.fillRect(p.x + (i + 1) * 22 - 4, p.y + 6, 4, 10);
+                    ctx.fillStyle = 'rgba(245, 158, 11, 0.4)';
+                    ctx.fillRect(p.x + (i + 1) * 22 - 3, p.y + 9, 2, 2);
+                    ctx.fillStyle = '#0b1320';
+                }
+
+            } else if (isTerminalSeat) {
+                // ==================== 候机大厅连排金属横梁排椅 (面向大厅中央: 朝北/朝上) ====================
+                // 1. 底层贯穿式铝合金金属主横梁 (Tandem Seating Beam) 与阴影
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+                ctx.fillRect(p.x - 1, p.y + 4, 4 * 22, 18);
+
+                // 金属主横梁
+                ctx.fillStyle = '#334155';
+                ctx.fillRect(p.x - 2, p.y + 6, 4 * 22, 3.5);
+                ctx.strokeStyle = '#64748b';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(p.x - 2, p.y + 6, 4 * 22, 3.5);
+
+                // 两端与中间的金属压铸底脚 (Floor Mounts)
+                ctx.fillStyle = '#94a3b8';
+                ctx.fillRect(p.x - 3, p.y + 4, 3, 14);
+                ctx.fillRect(p.x + 4 * 22 - 2, p.y + 4, 3, 14);
+                ctx.fillRect(p.x + 2 * 22 - 1.5, p.y + 4, 3, 14);
+
+                // 2. 四连排符合人体工学的现代候机工程贝壳椅 (面朝北/朝上)
+                for (let i = 0; i < 4; i++) {
+                    const cx = p.x + i * 22;
+                    const cy = p.y;
+
+                    // 南侧靠背 (置于南端，使用者面朝北仰望中央航班屏): 弧形现代模压靠背
+                    const backY = cy + 13;
+                    const backH = 5.5;
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(cx + 2, backY, 14, backH);
+                    ctx.strokeStyle = '#00FF66'; // 机场航站楼主色调青绿发光边框
+                    ctx.lineWidth = 0.9;
+                    ctx.strokeRect(cx + 2, backY, 14, backH);
+
+                    // 靠背防滑透气槽
+                    ctx.fillStyle = '#00FF66';
+                    ctx.fillRect(cx + 4.5, backY + 2, 9, 1.2);
+
+                    // 细长流线型不锈钢金属扶手 (分隔每个座位)
+                    // 左侧扶手
+                    ctx.fillStyle = '#64748b';
+                    ctx.fillRect(cx + 1, cy + 2, 1.8, 14);
+                    ctx.fillStyle = '#cbd5e1';
+                    ctx.fillRect(cx + 1.2, cy + 2, 1, 14);
+
+                    // 右侧扶手
+                    ctx.fillStyle = '#64748b';
+                    ctx.fillRect(cx + 15.2, cy + 2, 1.8, 14);
+                    ctx.fillStyle = '#cbd5e1';
+                    ctx.fillRect(cx + 15.4, cy + 2, 1, 14);
+
+                    // 朝北敞开的模压座面 (凹陷曲面造型，前沿瀑布流弧线)
+                    const seatX = cx + 3;
+                    const seatY = cy + 1.5;
+                    const seatW = 12;
+                    const seatH = 11.5;
+                    ctx.fillStyle = '#064e3b'; // 航站楼深墨绿工程材料
+                    ctx.fillRect(seatX, seatY, seatW, seatH);
+
+                    // 座面北端前沿瀑布弧口高光 (突出面向北侧大厅中央)
+                    ctx.fillStyle = '#00FF66';
+                    ctx.fillRect(seatX + 1, seatY, seatW - 2, 2);
+                    ctx.strokeStyle = 'rgba(0, 255, 102, 0.7)';
+                    ctx.lineWidth = 0.8;
+                    ctx.strokeRect(seatX, seatY, seatW, seatH);
+
+                    // 靠背与座面转折处深色阴影凹槽
+                    ctx.fillStyle = '#022c22';
+                    ctx.fillRect(seatX, seatY + seatH - 1.5, seatW, 1.5);
+                }
+            } else if (isSubwaySeat) {
+                // ==================== 关卡 2 地铁站台不锈钢连排候车长椅 (Subway Platform Tandem Passenger Benches) ====================
+                const isUp = (p.facing === 'up');
+                const numSeats = p.count || 4;
+
+                // 1. 地面落影与贯穿式长条承重横梁 (Tandem Beam Dropshadow & Steel Beam)
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+                ctx.fillRect(p.x - 2, p.y + 3, numSeats * 22 + 4, 18);
+
+                // 贯穿式不锈钢承重横梁
+                ctx.fillStyle = '#334155';
+                ctx.fillRect(p.x - 3, p.y + 7.5, numSeats * 22 + 6, 4);
+                ctx.strokeStyle = '#64748b';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(p.x - 3, p.y + 7.5, numSeats * 22 + 6, 4);
+
+                // 地面压铸铸铁锚固脚 (Floor Anchor Mounts)
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(p.x - 2, p.y + 3, 4, 16);
+                ctx.fillRect(p.x + numSeats * 22 - 2, p.y + 3, 4, 16);
+                if (numSeats >= 4) {
+                    ctx.fillRect(p.x + Math.floor(numSeats / 2) * 22 - 2, p.y + 3, 4, 16);
+                }
+
+                // 2. 连排人体工学不锈钢微孔模压座椅 (根据 facing 呈现精确的 朝北/朝上 或 朝南/朝下 视角)
+                for (let i = 0; i < numSeats; i++) {
+                    const cx = p.x + i * 22;
+                    const cy = p.y;
+
+                    if (isUp) {
+                        // === 座位朝向上方 / 北向 (使用者面朝北侧列车) ===
+                        // 南侧靠背 (置于下方/南侧)
+                        const backY = cy + 13.5;
+                        const backH = 5.5;
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(cx + 2, backY, 15, backH);
+                        ctx.strokeStyle = '#64748b';
+                        ctx.lineWidth = 0.9;
+                        ctx.strokeRect(cx + 2, backY, 15, backH);
+
+                        // 靠背地铁线路标识色镶嵌装饰线
+                        ctx.fillStyle = '#38bdf8';
+                        ctx.fillRect(cx + 4, backY + 1.8, 11, 1.5);
+
+                        // 左右两侧流线型金属扶手 (从南侧靠背延伸至北侧座面前沿)
+                        ctx.fillStyle = '#64748b';
+                        ctx.fillRect(cx + 1, cy + 1.5, 2, 17);
+                        ctx.fillRect(cx + 16, cy + 1.5, 2, 17);
+                        ctx.fillStyle = '#cbd5e1';
+                        ctx.fillRect(cx + 1.3, cy + 1.5, 0.8, 17);
+                        ctx.fillRect(cx + 16.3, cy + 1.5, 0.8, 17);
+
+                        // 北侧模压座面 (位于上方/北侧，朝上敞开)
+                        const seatX = cx + 3;
+                        const seatY = cy + 1.5;
+                        const seatW = 13;
+                        const seatH = 12;
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(seatX, seatY, seatW, seatH);
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(seatX + 1.5, seatY + 2, seatW - 3, seatH - 4);
+
+                        // 座面北端前沿弧度与亮蓝包边 (高光倒角清晰指向北方)
+                        ctx.fillStyle = '#38bdf8';
+                        ctx.fillRect(seatX + 1, seatY, seatW - 2, 2);
+                        ctx.strokeStyle = '#0284c7';
+                        ctx.lineWidth = 0.8;
+                        ctx.strokeRect(seatX, seatY, seatW, seatH);
+
+                        // 靠背与座面转折凹槽
+                        ctx.fillStyle = '#020617';
+                        ctx.fillRect(seatX, seatY + seatH - 1.5, seatW, 1.5);
+
+                    } else {
+                        // === 座位朝向下方 / 南向 (使用者面朝南侧列车) ===
+                        // 北侧靠背 (置于上方/北侧)
+                        const backY = cy + 1;
+                        const backH = 5.5;
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(cx + 2, backY, 15, backH);
+                        ctx.strokeStyle = '#64748b';
+                        ctx.lineWidth = 0.9;
+                        ctx.strokeRect(cx + 2, backY, 15, backH);
+
+                        // 靠背地铁线路标识色镶嵌装饰线
+                        ctx.fillStyle = '#38bdf8';
+                        ctx.fillRect(cx + 4, backY + 2.2, 11, 1.5);
+
+                        // 左右两侧流线型金属扶手 (从北侧靠背延伸至南侧座面前沿)
+                        ctx.fillStyle = '#64748b';
+                        ctx.fillRect(cx + 1, cy + 1.5, 2, 17);
+                        ctx.fillRect(cx + 16, cy + 1.5, 2, 17);
+                        ctx.fillStyle = '#cbd5e1';
+                        ctx.fillRect(cx + 1.3, cy + 1.5, 0.8, 17);
+                        ctx.fillRect(cx + 16.3, cy + 1.5, 0.8, 17);
+
+                        // 南侧模压座面 (位于下方/南侧，朝下敞开)
+                        const seatX = cx + 3;
+                        const seatY = cy + 6.5;
+                        const seatW = 13;
+                        const seatH = 12;
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(seatX, seatY, seatW, seatH);
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(seatX + 1.5, seatY + 2, seatW - 3, seatH - 4);
+
+                        // 座面南端前沿弧度与亮蓝包边 (高光倒角清晰指向南方)
+                        ctx.fillStyle = '#38bdf8';
+                        ctx.fillRect(seatX + 1, seatY + seatH - 2, seatW - 2, 2);
+                        ctx.strokeStyle = '#0284c7';
+                        ctx.lineWidth = 0.8;
+                        ctx.strokeRect(seatX, seatY, seatW, seatH);
+
+                        // 靠背与座面转折凹槽
+                        ctx.fillStyle = '#020617';
+                        ctx.fillRect(seatX, seatY, seatW, 1.5);
+                    }
+                }
+            } else {
+                // 通用排椅 (如其他关卡长椅等)
+                ctx.fillStyle = '#334155';
+                ctx.fillRect(p.x, p.y + 4, 4 * 22, 10);
+                for (let i = 0; i < 4; i++) {
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(p.x + i * 22 + 1, p.y + 1, 16, 16);
+                    ctx.strokeStyle = '#64748b';
+                    ctx.strokeRect(p.x + i * 22 + 1, p.y + 1, 16, 16);
+                }
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'luxury_bed' || lbl.includes('LUXURY BED'))) {
+            // VIP Presidential Suite King-Size Luxury Bed (总统套房真皮大床 - 床头靠左, 床尾靠右)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            const bedH = p.h - 4;
+
+            // 1. Carved Mahogany Headboard Frame on LEFT Edge (床头 - 最左侧暗红木高靠背与金边)
+            ctx.fillStyle = '#2c0e06';
+            ctx.fillRect(p.x, p.y, 8, p.h);
+            ctx.fillStyle = '#d97706'; // Gold accent line
+            ctx.fillRect(p.x + 6.5, p.y, 1.5, p.h);
+
+            // 2. Leather Headrest Backing on LEFT (床头软包)
+            ctx.fillStyle = '#4c0519'; // Rich burgundy leather
+            ctx.fillRect(p.x + 8, p.y + 2, 6, bedH);
+
+            // 3. Two Fluffy Ivory Pillows against the Headboard on LEFT (床头靠左双羽绒枕头 - 枕头在左侧)
+            const pillowW = 12;
+            const pillowH = Math.floor(bedH * 0.42);
+            ctx.fillStyle = '#f8fafc'; // Ivory pillows
+            ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 0.6;
+            // Top Pillow (Left side, top)
+            ctx.fillRect(p.x + 15, p.y + 3, pillowW, pillowH);
+            ctx.strokeRect(p.x + 15, p.y + 3, pillowW, pillowH);
+            // Bottom Pillow (Left side, bottom)
+            ctx.fillRect(p.x + 15, p.y + p.h - 3 - pillowH, pillowW, pillowH);
+            ctx.strokeRect(p.x + 15, p.y + p.h - 3 - pillowH, pillowW, pillowH);
+
+            // 4. White Sheet Layer Folded Back (左侧翻折白床单)
+            const quiltX = p.x + 14;
+            const quiltW = p.w - 20;
+            ctx.fillStyle = '#f1f5f9';
+            ctx.fillRect(quiltX, p.y + 2, 14, bedH);
+
+            // 5. Silk Duvet Quilt (床身丝绸金红被褥 - 向右延伸)
+            ctx.fillStyle = '#881337'; // Rosewood silk duvet
+            ctx.fillRect(quiltX + 10, p.y + 2, quiltW - 10, bedH);
+            ctx.strokeStyle = '#be123c'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(quiltX + 10, p.y + 2, quiltW - 10, bedH);
+
+            // 6. Golden Satin Bed Runner Throw on RIGHT / Foot of Bed (床尾巾 - 明确在右侧)
+            ctx.fillStyle = '#d97706';
+            ctx.fillRect(p.x + p.w - 18, p.y + 2, 10, bedH);
+            ctx.fillStyle = '#b45309';
+            ctx.fillRect(p.x + p.w - 18, p.y + 2, 2, bedH); // Fringe border
+
+            // 7. Mahogany Footboard Frame on RIGHT Edge (床尾 - 右侧低矮木立框)
+            ctx.fillStyle = '#2c0e06';
+            ctx.fillRect(p.x + p.w - 4, p.y, 4, p.h);
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + p.w - 4, p.y, 4, p.h);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'bed' || lbl.includes('BED')) {
+            // High-fidelity bed drawing (Standard vs Luxury with 4-way orientation support)
+            // 1. Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            const isLuxury = lbl.includes('OWNER') || lbl.includes('MASTER') || lbl.includes('GUEST') || lbl.includes('VIP') || lbl.includes('KING') || lbl.includes('豪华') || lbl.includes('欧式');
+            
+            // 2. Bed Base (Teak wood frame for staff, rich royal mahogany wood for luxury)
+            ctx.fillStyle = isLuxury ? '#2a1205' : '#78350f'; 
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = isLuxury ? '#d97706' : '#451a03';
+            ctx.lineWidth = isLuxury ? 2 : 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. Mattress / Bed Sheet (Clean white for staff, premium silk ivory/champagne for luxury)
+            ctx.fillStyle = isLuxury ? '#fdfbf7' : '#f8fafc'; 
+            ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, p.h - 4);
+
+            // Determine facing
+            let face = p.facing || 'up';
+
+            if (face === 'left') {
+                // Headboard on the left
+                if (isLuxury) {
+                    ctx.fillStyle = '#3b1a0e';
+                    ctx.fillRect(p.x - 2, p.y - 1, 5, p.h + 2);
+                    ctx.strokeStyle = '#d97706';
+                    ctx.strokeRect(p.x - 2, p.y - 1, 5, p.h + 2);
+
+                    // Two luxury pillows
+                    ctx.fillStyle = '#f1f5f9';
+                    ctx.strokeStyle = '#cbd5e1';
+                    ctx.lineWidth = 1;
+                    const pillH = (p.h - 10) / 2;
+                    ctx.fillRect(p.x + 4, p.y + 4, 11, pillH);
+                    ctx.strokeRect(p.x + 4, p.y + 4, 11, pillH);
+                    ctx.fillRect(p.x + 4, p.y + 6 + pillH, 11, pillH);
+                    ctx.strokeRect(p.x + 4, p.y + 6 + pillH, 11, pillH);
+                } else {
+                    ctx.fillStyle = '#cbd5e1'; 
+                    ctx.fillRect(p.x + 4, p.y + 4, 10, p.h - 8);
+                    ctx.strokeStyle = '#94a3b8';
+                    ctx.strokeRect(p.x + 4, p.y + 4, 10, p.h - 8);
+                }
+
+                // 5. Folded Blanket / Duvet (Burgundy / Royal Wine Red silk for luxury)
+                const blanketColor = isLuxury ? '#7f1d1d' : '#1e3a8a';
+                ctx.fillStyle = blanketColor;
+                ctx.fillRect(p.x + p.w - 20, p.y + 2, 18, p.h - 4);
+                if (isLuxury) {
+                    // Golden elegant details on royal wine red blanket
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.fillRect(p.x + p.w - 16, p.y + 4, 2, p.h - 8);
+                    ctx.fillRect(p.x + p.w - 10, p.y + 4, 2, p.h - 8);
+                } else {
+                    ctx.fillStyle = '#3b82f6';
+                    ctx.fillRect(p.x + p.w - 14, p.y + 4, 3, p.h - 8);
+                }
+            } else if (face === 'right') {
+                // Headboard on the right
+                if (isLuxury) {
+                    ctx.fillStyle = '#3b1a0e';
+                    ctx.fillRect(p.x + p.w - 3, p.y - 1, 5, p.h + 2);
+                    ctx.strokeStyle = '#d97706';
+                    ctx.strokeRect(p.x + p.w - 3, p.y - 1, 5, p.h + 2);
+
+                    ctx.fillStyle = '#f1f5f9';
+                    ctx.strokeStyle = '#cbd5e1';
+                    ctx.lineWidth = 1;
+                    const pillH = (p.h - 10) / 2;
+                    ctx.fillRect(p.x + p.w - 15, p.y + 4, 11, pillH);
+                    ctx.strokeRect(p.x + p.w - 15, p.y + 4, 11, pillH);
+                    ctx.fillRect(p.x + p.w - 15, p.y + 6 + pillH, 11, pillH);
+                    ctx.strokeRect(p.x + p.w - 15, p.y + 6 + pillH, 11, pillH);
+                } else {
+                    ctx.fillStyle = '#cbd5e1'; 
+                    ctx.fillRect(p.x + p.w - 14, p.y + 4, 10, p.h - 8);
+                    ctx.strokeStyle = '#94a3b8';
+                    ctx.strokeRect(p.x + p.w - 14, p.y + 4, 10, p.h - 8);
+                }
+
+                const blanketColor = isLuxury ? '#7f1d1d' : '#1e3a8a';
+                ctx.fillStyle = blanketColor;
+                ctx.fillRect(p.x + 2, p.y + 2, 18, p.h - 4);
+                if (isLuxury) {
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.fillRect(p.x + 6, p.y + 4, 2, p.h - 8);
+                    ctx.fillRect(p.x + 12, p.y + 4, 2, p.h - 8);
+                } else {
+                    ctx.fillStyle = '#3b82f6';
+                    ctx.fillRect(p.x + 6, p.y + 4, 3, p.h - 8);
+                }
+            } else if (face === 'down') {
+                if (isLuxury) {
+                    ctx.fillStyle = '#3b1a0e';
+                    ctx.fillRect(p.x - 1, p.y + p.h - 2, p.w + 2, 5);
+                    ctx.strokeStyle = '#d97706';
+                    ctx.strokeRect(p.x - 1, p.y + p.h - 2, p.w + 2, 5);
+
+                    ctx.fillStyle = '#f1f5f9';
+                    ctx.strokeStyle = '#cbd5e1';
+                    ctx.lineWidth = 1;
+                    const pillW = (p.w - 10) / 2;
+                    ctx.fillRect(p.x + 4, p.y + p.h - 15, pillW, 11);
+                    ctx.strokeRect(p.x + 4, p.y + p.h - 15, pillW, 11);
+                    ctx.fillRect(p.x + 6 + pillW, p.y + p.h - 15, pillW, 11);
+                    ctx.strokeRect(p.x + 6 + pillW, p.y + p.h - 15, pillW, 11);
+                } else {
+                    ctx.fillStyle = '#cbd5e1'; 
+                    ctx.fillRect(p.x + 4, p.y + p.h - 14, p.w - 8, 10);
+                    ctx.strokeStyle = '#94a3b8';
+                    ctx.strokeRect(p.x + 4, p.y + p.h - 14, p.w - 8, 10);
+                }
+
+                const blanketColor = isLuxury ? '#7f1d1d' : '#1e3a8a';
+                ctx.fillStyle = blanketColor;
+                ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, 18);
+                if (isLuxury) {
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.fillRect(p.x + 4, p.y + 6, p.w - 8, 2);
+                    ctx.fillRect(p.x + 4, p.y + 12, p.w - 8, 2);
+                } else {
+                    ctx.fillStyle = '#3b82f6';
+                    ctx.fillRect(p.x + 4, p.y + 6, p.w - 8, 3);
+                }
+            } else {
+                if (isLuxury) {
+                    ctx.fillStyle = '#3b1a0e';
+                    ctx.fillRect(p.x - 1, p.y - 3, p.w + 2, 5);
+                    ctx.strokeStyle = '#d97706';
+                    ctx.strokeRect(p.x - 1, p.y - 3, p.w + 2, 5);
+
+                    ctx.fillStyle = '#f1f5f9';
+                    ctx.strokeStyle = '#cbd5e1';
+                    ctx.lineWidth = 1;
+                    const pillW = (p.w - 10) / 2;
+                    ctx.fillRect(p.x + 4, p.y + 4, pillW, 11);
+                    ctx.strokeRect(p.x + 4, p.y + 4, pillW, 11);
+                    ctx.fillRect(p.x + 6 + pillW, p.y + 4, pillW, 11);
+                    ctx.strokeRect(p.x + 6 + pillW, p.y + 4, pillW, 11);
+                } else {
+                    ctx.fillStyle = '#cbd5e1'; 
+                    ctx.fillRect(p.x + 4, p.y + 4, p.w - 8, 10);
+                    ctx.strokeStyle = '#94a3b8';
+                    ctx.strokeRect(p.x + 4, p.y + 4, p.w - 8, 10);
+                }
+
+                const blanketColor = isLuxury ? '#7f1d1d' : '#1e3a8a';
+                ctx.fillStyle = blanketColor;
+                ctx.fillRect(p.x + 2, p.y + p.h - 20, p.w - 4, 18);
+                if (isLuxury) {
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.fillRect(p.x + 4, p.y + p.h - 16, p.w - 8, 2);
+                    ctx.fillRect(p.x + 4, p.y + p.h - 10, p.w - 8, 2);
+                } else {
+                    ctx.fillStyle = '#3b82f6';
+                    ctx.fillRect(p.x + 4, p.y + p.h - 14, p.w - 8, 3);
+                }
+            }
+
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'elevator' || lbl.includes('ELEVATOR') || lbl.includes('电梯')) {
+            // High-fidelity luxury brass & marble hotel elevator cab
+            ctx.save();
+            
+            // 1. Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+            
+            // Outer Elevator Cab Frame (Polished dark mahogany & brass border)
+            ctx.fillStyle = '#1e1b18';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#d97706'; // Gold outer trim
+            ctx.lineWidth = 2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Cab Floor Interior (Dark granite floor with brass inlay)
+            ctx.fillStyle = '#292524';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w - 6, p.h - 6);
+            ctx.strokeStyle = '#78350f';
+            ctx.strokeRect(p.x + 5, p.y + 5, p.w - 10, p.h - 10);
+
+            // Brass Handrails inside cab
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(p.x + 6, p.y + 6, p.w - 12, 2); // North rail
+            ctx.fillRect(p.x + 6, p.y + 6, 2, p.h - 12); // West rail
+            ctx.fillRect(p.x + p.w - 8, p.y + 6, 2, p.h - 12); // East rail
+
+            // Sliding Brushed Steel Doors (Split doors with center gap)
+            const doorW = (p.w - 12) / 2;
+            const doorH = p.h - 10;
+            
+            // Left Door
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + 6, p.y + 5, doorW, doorH);
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(p.x + 6, p.y + 5, doorW, doorH);
+
+            // Right Door
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + 6 + doorW, p.y + 5, doorW, doorH);
+            ctx.strokeRect(p.x + 6 + doorW, p.y + 5, doorW, doorH);
+
+            // Door Center Seam & Glint Line
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.beginPath();
+            ctx.moveTo(p.x + 6 + doorW, p.y + 5);
+            ctx.lineTo(p.x + 6 + doorW, p.y + 5 + doorH);
+            ctx.stroke();
+
+            // Elevator Header Floor Indicator Box (Display: "1F ▲")
+            const indW = Math.min(36, p.w - 12);
+            const indH = 8;
+            const indX = p.x + (p.w - indW) / 2;
+            const indY = p.y + 1;
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(indX, indY, indW, indH);
+            ctx.strokeStyle = '#b45309';
+            ctx.strokeRect(indX, indY, indW, indH);
+
+            // Green LED text "1F ▲"
+            ctx.fillStyle = '#22c55e';
+            ctx.font = 'bold 7px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('1F ▲', indX + indW / 2, indY + indH / 2);
+
+            // Call button panel on the right outer frame
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(p.x + p.w - 4, p.y + p.h / 2 - 4, 3, 8);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(p.x + p.w - 3, p.y + p.h / 2 - 3, 1, 2);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'sofa' || lbl.includes('SOFA') || lbl.includes('CHAIR') || lbl.includes('COUCH')) {
+            // High-fidelity luxury leather sofa drawing
+            // 1. Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+
+            // 2. Base cushion / main couch body color selection
+            const isWhite = (p.color === 'white' || (lbl.includes('WHITE') && p.color !== 'brown') || (lbl.includes('CHAIR') && !lbl.includes('STUDY') && p.color !== 'brown')) && !lbl.includes('OWNER') && !lbl.includes('MASTER') && !lbl.includes('VIP');
+            const baseColor = isWhite ? '#f8fafc' : '#451a03'; // White leather vs Dark brown leather
+            const strokeColor = isWhite ? '#cbd5e1' : '#d97706'; // Slate vs Golden brown stitching
+            const accentColor = isWhite ? '#e2e8f0' : '#78350f'; // Shaded backrest/armrest
+
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. Backrest & Armrest depending on custom facing orientation
+            let face = p.facing;
+            if (!face) {
+                face = (p.w >= p.h) ? 'down' : 'right'; // fallback
+            }
+
+            ctx.fillStyle = accentColor;
+            if (face === 'down') {
+                // Backrest at top, arms on left/right
+                ctx.fillRect(p.x, p.y, p.w, 4); // backrest
+                ctx.strokeRect(p.x, p.y, p.w, 4);
+                ctx.fillRect(p.x, p.y, 4, p.h); // left arm
+                ctx.strokeRect(p.x, p.y, 4, p.h);
+                ctx.fillRect(p.x + p.w - 4, p.y, 4, p.h); // right arm
+                ctx.strokeRect(p.x + p.w - 4, p.y, 4, p.h);
+
+                // Cushion split line
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x + p.w / 2, p.y + 4);
+                ctx.lineTo(p.x + p.w / 2, p.y + p.h);
+                ctx.stroke();
+            } else if (face === 'up') {
+                // Backrest at bottom, arms on left/right
+                ctx.fillRect(p.x, p.y + p.h - 4, p.w, 4); // backrest
+                ctx.strokeRect(p.x, p.y + p.h - 4, p.w, 4);
+                ctx.fillRect(p.x, p.y, 4, p.h); // left arm
+                ctx.strokeRect(p.x, p.y, 4, p.h);
+                ctx.fillRect(p.x + p.w - 4, p.y, 4, p.h); // right arm
+                ctx.strokeRect(p.x + p.w - 4, p.y, 4, p.h);
+
+                // Cushion split line
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x + p.w / 2, p.y);
+                ctx.lineTo(p.x + p.w / 2, p.y + p.h - 4);
+                ctx.stroke();
+            } else if (face === 'right') {
+                // Backrest at left, arms on top/bottom
+                ctx.fillRect(p.x, p.y, 4, p.h); // backrest
+                ctx.strokeRect(p.x, p.y, 4, p.h);
+                ctx.fillRect(p.x, p.y, p.w, 4); // top arm
+                ctx.strokeRect(p.x, p.y, p.w, 4);
+                ctx.fillRect(p.x, p.y + p.h - 4, p.w, 4); // bottom arm
+                ctx.strokeRect(p.x, p.y + p.h - 4, p.w, 4);
+
+                // Cushion split line
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x + 4, p.y + p.h / 2);
+                ctx.lineTo(p.x + p.w, p.y + p.h / 2);
+                ctx.stroke();
+            } else if (face === 'left') {
+                // Backrest at right, arms on top/bottom
+                ctx.fillRect(p.x + p.w - 4, p.y, 4, p.h); // backrest
+                ctx.strokeRect(p.x + p.w - 4, p.y, 4, p.h);
+                ctx.fillRect(p.x, p.y, p.w, 4); // top arm
+                ctx.strokeRect(p.x, p.y, p.w, 4);
+                ctx.fillRect(p.x, p.y + p.h - 4, p.w, 4); // bottom arm
+                ctx.strokeRect(p.x, p.y + p.h - 4, p.w, 4);
+
+                // Cushion split line
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y + p.h / 2);
+                ctx.lineTo(p.x + p.w - 4, p.y + p.h / 2);
+                ctx.stroke();
+            }
+
+            // 4. Luxurious decorative details for high-end owner/master/VIP sofas
+            const isLuxurySofa = lbl.includes('STUDY') || lbl.includes('OWNER') || lbl.includes('MASTER') || lbl.includes('VIP');
+            if (isLuxurySofa) {
+                // Button tufting / stitching pattern on the cushions
+                ctx.fillStyle = '#1c0a00'; // Dark leather tuft button
+                ctx.strokeStyle = '#d97706'; // Golden stitch circle
+                ctx.lineWidth = 0.5;
+
+                // Tufting positions based on size
+                if (p.w > p.h) {
+                    // Horizontal sofa
+                    const tuftCount = p.w > 80 ? 4 : 2;
+                    const step = p.w / (tuftCount + 1);
+                    for (let i = 1; i <= tuftCount; i++) {
+                        const tx = p.x + i * step;
+                        const ty = p.y + p.h / 2;
+                        ctx.beginPath(); ctx.arc(tx, ty, 1.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                    }
+                } else {
+                    // Vertical sofa
+                    const tuftCount = p.h > 80 ? 4 : 2;
+                    const step = p.h / (tuftCount + 1);
+                    for (let i = 1; i <= tuftCount; i++) {
+                        const tx = p.x + p.w / 2;
+                        const ty = p.y + i * step;
+                        ctx.beginPath(); ctx.arc(tx, ty, 1.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                    }
+                }
+
+                // Add unique colorful throw pillows to make each room's sofa look different!
+                if (lbl.includes('MASTER') && lbl.includes('LONG')) {
+                    // Master Long Couch gets two gold silk throw pillows at both ends
+                    ctx.fillStyle = '#fbbf24'; // Gold
+                    ctx.strokeStyle = '#d97706';
+                    ctx.lineWidth = 1;
+                    // Pillow Left
+                    ctx.fillRect(p.x + 8, p.y + 6, 10, 10);
+                    ctx.strokeRect(p.x + 8, p.y + 6, 10, 10);
+                    // Pillow Right
+                    ctx.fillRect(p.x + p.w - 18, p.y + 6, 10, 10);
+                    ctx.strokeRect(p.x + p.w - 18, p.y + 6, 10, 10);
+                } else if (lbl.includes('MASTER')) {
+                    // Master couch gets a single crimson red throw pillow
+                    ctx.fillStyle = '#ef4444'; // Crimson
+                    ctx.strokeStyle = '#b91c1c';
+                    ctx.lineWidth = 1;
+                    if (p.w > p.h) {
+                        ctx.fillRect(p.x + p.w/2 - 5, p.y + 6, 10, 10);
+                        ctx.strokeRect(p.x + p.w/2 - 5, p.y + 6, 10, 10);
+                    } else {
+                        ctx.fillRect(p.x + 6, p.y + p.h/2 - 5, 10, 10);
+                        ctx.strokeRect(p.x + 6, p.y + p.h/2 - 5, 10, 10);
+                    }
+                } else if (lbl.includes('VIP')) {
+                    // VIP couch gets an emerald green silk throw pillow
+                    ctx.fillStyle = '#10b981'; // Emerald
+                    ctx.strokeStyle = '#047857';
+                    ctx.lineWidth = 1;
+                    if (p.w > p.h) {
+                        ctx.fillRect(p.x + p.w/2 - 5, p.y + 6, 10, 10);
+                        ctx.strokeRect(p.x + p.w/2 - 5, p.y + 6, 10, 10);
+                    } else {
+                        ctx.fillRect(p.x + 6, p.y + p.h/2 - 5, 10, 10);
+                        ctx.strokeRect(p.x + 6, p.y + p.h/2 - 5, 10, 10);
+                    }
+                } else if (lbl.includes('STUDY')) {
+                    // Study chairs are rounded executive armchairs!
+                    ctx.strokeStyle = '#fbbf24'; // Shiny gold rivets
+                    ctx.lineWidth = 1.2;
+                    ctx.beginPath();
+                    if (face === 'right') {
+                        ctx.arc(p.x + 4, p.y + p.h/2, p.h/3, -Math.PI/2, Math.PI/2);
+                    } else {
+                        ctx.arc(p.x + p.w - 4, p.y + p.h/2, p.h/3, Math.PI/2, -Math.PI/2);
+                    }
+                    ctx.stroke();
+                }
+            }
+
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'cash_rack' || lbl.includes('CASH') || lbl.includes('RACK')) {
+            // Ultra-realistic cash and gold storage rack drawing
+            // 1. Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+
+            // 2. Base steel frame
+            ctx.fillStyle = '#1e293b'; // Slate dark grey rack
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#64748b'; // Metallic steel borders
+            ctx.lineWidth = 2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3. Draw shelves/dividers (4 columns/compartments)
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1.5;
+            const cols = 4;
+            const colW = p.w / cols;
+            for (let i = 1; i < cols; i++) {
+                ctx.beginPath();
+                ctx.moveTo(p.x + i * colW, p.y);
+                ctx.lineTo(p.x + i * colW, p.y + p.h);
+                ctx.stroke();
+            }
+
+            // 4. Fill compartments with money stacks and gold bars alternately!
+            for (let i = 0; i < cols; i++) {
+                const startX = p.x + i * colW + 3;
+                const endX = p.x + (i + 1) * colW - 3;
+                const currentW = endX - startX;
+                
+                if (i % 2 === 0) {
+                    // Gold bars: Draw shiny yellow golden rectangles with orange highlights
+                    ctx.fillStyle = '#f59e0b'; // Gold base
+                    ctx.fillRect(startX, p.y + 3, currentW, p.h - 6);
+                    
+                    // Shiny highlights
+                    ctx.fillStyle = '#fef08a'; // Golden shine
+                    for (let gy = p.y + 5; gy < p.y + p.h - 5; gy += 4) {
+                        ctx.fillRect(startX + 2, gy, currentW - 4, 1.5);
+                    }
+                    // Border around gold pile
+                    ctx.strokeStyle = '#d97706';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(startX, p.y + 3, currentW, p.h - 6);
+                } else {
+                    // Dollar bundles: Draw emerald green rectangles with a white ribbon/strap in the center
+                    ctx.fillStyle = '#10b981'; // Money green
+                    ctx.fillRect(startX, p.y + 3, currentW, p.h - 6);
+                    
+                    // White strap/band in the center of the bundle
+                    ctx.fillStyle = '#f8fafc'; // Clean white paper strap
+                    ctx.fillRect(startX + currentW / 2 - 2, p.y + 3, 4, p.h - 6);
+                    
+                    // Money paper lines
+                    ctx.strokeStyle = '#047857';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(startX, p.y + 3, currentW, p.h - 6);
+                }
+            }
+
+            // Red security LED indicator
+            ctx.fillStyle = '#ef4444'; 
+            ctx.beginPath();
+            ctx.arc(p.x + 6, p.y + p.h / 2, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'deposit_boxes' || lbl.includes('DEPOSIT') || lbl.includes('BOXES')) {
+            // High-fidelity Safe Deposit Lockers
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+
+            // Metallic safe base
+            ctx.fillStyle = '#334155'; // Dark slate
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            
+            ctx.strokeStyle = '#94a3b8'; // Metallic grey frame
+            ctx.lineWidth = 2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Draw a grid of safe deposit box doors
+            const rows = p.h > 45 ? 3 : 2;
+            const cols = p.w > 65 ? 4 : 3;
+            const boxW = p.w / cols;
+            const boxH = p.h / rows;
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const bx = p.x + c * boxW;
+                    const by = p.y + r * boxH;
+                    
+                    // Box borders
+                    ctx.strokeStyle = '#475569';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(bx, by, boxW, boxH);
+                    
+                    // Golden keyhole dot
+                    ctx.fillStyle = '#eab308';
+                    ctx.beginPath();
+                    ctx.arc(bx + boxW * 0.3, by + boxH * 0.5, 1.5, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Tiny lock latch line
+                    ctx.strokeStyle = '#1e293b';
+                    ctx.beginPath();
+                    ctx.moveTo(bx + boxW * 0.3, by + boxH * 0.5);
+                    ctx.lineTo(bx + boxW * 0.5, by + boxH * 0.5);
+                    ctx.stroke();
+
+                    // Miniature indicator LED
+                    ctx.fillStyle = (r + c) % 3 === 0 ? '#10b981' : '#ef4444'; // blink-like static lights
+                    ctx.fillRect(bx + boxW - 5, by + 3, 2, 2);
+                }
+            }
+
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'wardrobe' || lbl.includes('WARDROBE') || lbl.includes('CLOSET') || (isHotelLevel && lbl.includes('CABINET') && p.type !== 'display_cabinet') || lbl.includes('衣柜')) {
+            // High-fidelity luxury wardrobe/closet with clothes, hangers, and shelves of daily supplies
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 1. Solid Mahogany/Teak wood outer body
+            ctx.fillStyle = '#2c1a04'; // Deep luxurious wood
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#d97706'; // Golden wood-grain/brass trim
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 2. Wardrobe split into clothes-hanging bay (left) and shelves bay (right)
+            const dividerX = p.x + p.w * 0.58;
+            ctx.strokeStyle = '#543f33';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(dividerX, p.y);
+            ctx.lineTo(dividerX, p.y + p.h);
+            ctx.stroke();
+
+            // === LEFT BAY: CLOTHES AND HANGERS ===
+            // Hanging rod
+            ctx.strokeStyle = '#94a3b8'; // Metal hanger pole
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 6, p.y + p.h/2);
+            ctx.lineTo(dividerX - 4, p.y + p.h/2);
+            ctx.stroke();
+
+            // Hanging clothes
+            const garmentColors = ['#ef4444', '#3b82f6', '#10b981', '#fbbf24', '#ec4899', '#f8fafc'];
+            let currentCX = p.x + 10;
+            const leftLimit = dividerX - 8;
+            let index = 0;
+            while (currentCX < leftLimit) {
+                // Little hanger hook (thin curved grey stroke above rod)
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.8;
+                ctx.beginPath();
+                ctx.arc(currentCX, p.y + p.h/2 - 2, 1.8, Math.PI, 0);
+                ctx.stroke();
+
+                // Colored garment rect below rod
+                ctx.fillStyle = garmentColors[index % garmentColors.length];
+                ctx.fillRect(currentCX - 3, p.y + p.h/2 + 1, 6, p.h * 0.45);
+                ctx.strokeStyle = 'rgba(15, 23, 42, 0.35)';
+                ctx.lineWidth = 0.5;
+                ctx.strokeRect(currentCX - 3, p.y + p.h/2 + 1, 6, p.h * 0.45);
+
+                currentCX += 10;
+                index++;
+            }
+
+            // === RIGHT BAY: SHELVES & FOLDED LINENS ===
+            // 2 Stacked supply sections on right side
+            // Horizontal shelf divider
+            ctx.strokeStyle = '#543f33';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(dividerX, p.y + p.h/2);
+            ctx.lineTo(p.x + p.w, p.y + p.h/2);
+            ctx.stroke();
+
+            // Shelf 1 (Top-Right): Neatly folded white/cream luxury bath towels
+            ctx.fillStyle = '#f8fafc'; // Ivory towels
+            ctx.fillRect(dividerX + 4, p.y + 3, p.w * 0.3, 3);
+            ctx.fillStyle = '#f1f5f9';
+            ctx.fillRect(dividerX + 4, p.y + 7, p.w * 0.3, 3);
+
+            // Shelf 2 (Bottom-Right): Neatly folded silk lavender/blue linens
+            ctx.fillStyle = '#bae6fd'; // Light blue sheets
+            ctx.fillRect(dividerX + 4, p.y + p.h/2 + 3, p.w * 0.3, 3);
+            ctx.fillStyle = '#e0f2fe';
+            ctx.fillRect(dividerX + 4, p.y + p.h/2 + 7, p.w * 0.3, 3);
+
+            // 3. Sliding Glass reflection overlay & handles
+            // Elegant gold sliding door handles
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(p.x + p.w/2 - 3, p.y + 4, 1.5, p.h - 8);
+            ctx.fillRect(p.x + p.w/2 + 1.5, p.y + 4, 1.5, p.h - 8);
+
+            // Diagonal high-gloss glass reflection lines
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 8, p.y + 2);
+            ctx.lineTo(p.x + p.w - 8, p.y + p.h - 2);
+            ctx.stroke();
+
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'stair' || p.type === 'stairs' || lbl.includes('STAIR') || lbl.includes('楼梯') || lbl.includes('STEP')) {
+            // Elegant wooden stairs
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+            ctx.fillStyle = '#341a04'; 
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#1e0c02';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+            const stepCount = Math.max(4, Math.floor(p.h / 14));
+            const stepH = p.h / stepCount;
+            for (let i = 0; i < stepCount; i++) {
+                const sy = p.y + i * stepH;
+                ctx.fillStyle = i % 2 === 0 ? '#512d11' : '#45220c';
+                ctx.fillRect(p.x, sy, p.w, stepH);
+                ctx.fillStyle = '#fbbf24'; 
+                ctx.fillRect(p.x, sy + stepH - 1.5, p.w, 1.5);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+                ctx.fillRect(p.x, sy, p.w, 1.5);
+            }
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w/2, p.y + p.h - 10);
+            ctx.lineTo(p.x + p.w/2, p.y + 10);
+            ctx.stroke();
+            ctx.fillStyle = '#22c55e';
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w/2 - 4, p.y + 14);
+            ctx.lineTo(p.x + p.w/2, p.y + 8);
+            ctx.lineTo(p.x + p.w/2 + 4, p.y + 14);
+            ctx.closePath();
+            ctx.fill();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'piano' || lbl.includes('PIANO') || lbl.includes('钢琴')) {
+            // High-fidelity Grand Piano
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+            ctx.fillStyle = '#090d16'; 
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.fillStyle = '#b45309'; 
+            ctx.fillRect(p.x + 4, p.y + 4, p.w - 8, p.h - 8);
+            ctx.strokeStyle = '#d97706';
+            ctx.lineWidth = 0.5;
+            for (let i = p.x + 8; i < p.x + p.w - 8; i += 3) {
+                ctx.beginPath();
+                ctx.moveTo(i, p.y + 6);
+                ctx.lineTo(i, p.y + p.h - 6);
+                ctx.stroke();
+            }
+            ctx.fillStyle = '#1e293b'; 
+            ctx.fillRect(p.x, p.y, p.w * 0.22, p.h); 
+            ctx.fillRect(p.x, p.y, p.w, p.h * 0.2); 
+            const keyH = 8;
+            ctx.fillStyle = '#f8fafc'; 
+            ctx.fillRect(p.x + 2, p.y + p.h - keyH - 2, p.w - 4, keyH);
+            ctx.strokeStyle = '#cbd5e1';
+            for (let k = p.x + 5; k < p.x + p.w - 5; k += 4) {
+                ctx.beginPath();
+                ctx.moveTo(k, p.y + p.h - keyH - 2);
+                ctx.lineTo(k, p.y + p.h - 2);
+                ctx.stroke();
+            }
+            ctx.fillStyle = '#020617';
+            for (let k = p.x + 7; k < p.x + p.w - 7; k += 8) {
+                ctx.fillRect(k - 1, p.y + p.h - keyH - 2, 2, keyH * 0.6);
+            }
+            ctx.fillStyle = '#78350f';
+            ctx.fillRect(p.x + p.w * 0.25, p.y + p.h * 0.35, p.w * 0.5, 2.5);
+            ctx.strokeStyle = '#94a3b8';
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'plant' || lbl.includes('PLANT') || lbl.includes('POTTED') || lbl.includes('椰子') || lbl.includes('绿植') || lbl.includes('盆栽')) {
+            // Elegant Lobby Potted Plant
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.beginPath();
+            ctx.arc(p.x + p.w/2 + 2, p.y + p.h/2 + 2, Math.min(p.w, p.h)/2, 0, Math.PI * 2);
+            ctx.fill();
+            const cx = p.x + p.w/2;
+            const cy = p.y + p.h/2;
+            const radius = Math.min(p.w, p.h) * 0.35;
+            ctx.fillStyle = '#c2410c'; 
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#7c2d12';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.fillStyle = '#451a03'; 
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius * 0.8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#15803d'; 
+            ctx.lineWidth = 2.5;
+            const leafLength = Math.min(p.w, p.h) * 0.65;
+            const angles = [0, Math.PI/3, 2*Math.PI/3, Math.PI, 4*Math.PI/3, 5*Math.PI/3];
+            angles.forEach((ang) => {
+                const lx = cx + Math.cos(ang) * leafLength;
+                const ly = cy + Math.sin(ang) * leafLength;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.quadraticCurveTo(cx + Math.cos(ang + 0.2) * (leafLength * 0.5), cy + Math.sin(ang + 0.2) * (leafLength * 0.5), lx, ly);
+                ctx.stroke();
+            });
+            ctx.fillStyle = '#4ade80';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'toilet' || lbl.includes('TOILET') || lbl.includes('LAVATORY') || lbl.includes('马桶')) {
+            // Sanitary Ceramic Toilet (标准卫生瓷马桶 - 支持真实人体工学朝向与标准长宽比)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            // Base Porcelain Frame
+            ctx.fillStyle = '#f8fafc';
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 3);
+            ctx.fill();
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.lineWidth = 1.0;
+            ctx.stroke();
+
+            const tFace = p.facing || (p.h >= p.w ? 'down' : 'right');
+
+            if (tFace === 'down') {
+                // North wall mount, facing south/down
+                const tankH = Math.max(3.5, Math.min(5, p.h * 0.28));
+                ctx.fillStyle = '#e2e8f0';
+                ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, tankH);
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.6;
+                ctx.strokeRect(p.x + 1, p.y + 1, p.w - 2, tankH);
+
+                // Chrome flush button on top of water tank
+                ctx.fillStyle = '#38bdf8';
+                ctx.fillRect(p.x + p.w / 2 - 1.5, p.y + 1.5, 3, 1.2);
+
+                // Toilet Seat Rim & Water Bowl
+                const bowlY = p.y + tankH + 1;
+                const bowlH = p.h - tankH - 2;
+                const bowlW = p.w - 2;
+
+                ctx.fillStyle = '#38bdf8'; // Water blue bowl basin
+                ctx.beginPath();
+                ctx.ellipse(p.x + p.w / 2, bowlY + bowlH * 0.48, Math.max(1, bowlW * 0.28), Math.max(1, bowlH * 0.34), 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // White Porcelain Seat Ring
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1.4;
+                ctx.beginPath();
+                ctx.ellipse(p.x + p.w / 2, bowlY + bowlH * 0.48, Math.max(1.5, bowlW * 0.40), Math.max(1.5, bowlH * 0.42), 0, 0, Math.PI * 2);
+                ctx.stroke();
+
+            } else if (tFace === 'up') {
+                // South wall mount, facing north/up
+                const tankH = Math.max(3.5, Math.min(5, p.h * 0.28));
+                const tankY = p.y + p.h - tankH - 1;
+                ctx.fillStyle = '#e2e8f0';
+                ctx.fillRect(p.x + 1, tankY, p.w - 2, tankH);
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.6;
+                ctx.strokeRect(p.x + 1, tankY, p.w - 2, tankH);
+
+                // Flush button
+                ctx.fillStyle = '#38bdf8';
+                ctx.fillRect(p.x + p.w / 2 - 1.5, tankY + tankH - 2.5, 3, 1.2);
+
+                // Bowl
+                const bowlH = p.h - tankH - 2;
+                const bowlW = p.w - 2;
+                ctx.fillStyle = '#38bdf8';
+                ctx.beginPath();
+                ctx.ellipse(p.x + p.w / 2, p.y + bowlH * 0.52, Math.max(1, bowlW * 0.28), Math.max(1, bowlH * 0.34), 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1.4;
+                ctx.beginPath();
+                ctx.ellipse(p.x + p.w / 2, p.y + bowlH * 0.52, Math.max(1.5, bowlW * 0.40), Math.max(1.5, bowlH * 0.42), 0, 0, Math.PI * 2);
+                ctx.stroke();
+
+            } else if (tFace === 'left') {
+                // East wall mount, facing west/left
+                const tankW = Math.max(3.5, Math.min(5, p.w * 0.28));
+                const tankX = p.x + p.w - tankW - 1;
+                ctx.fillStyle = '#e2e8f0';
+                ctx.fillRect(tankX, p.y + 1, tankW, p.h - 2);
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.6;
+                ctx.strokeRect(tankX, p.y + 1, tankW, p.h - 2);
+
+                ctx.fillStyle = '#38bdf8';
+                ctx.beginPath();
+                ctx.arc(tankX + tankW / 2, p.y + p.h / 2, 1.2, 0, Math.PI * 2);
+                ctx.fill();
+
+                const bowlW = p.w - tankW - 2;
+                ctx.fillStyle = '#38bdf8';
+                ctx.beginPath();
+                ctx.ellipse(p.x + 1 + bowlW / 2, p.y + p.h / 2, Math.max(1, bowlW / 2 - 1.2), Math.max(1, p.h / 2 - 2.5), 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1.4;
+                ctx.stroke();
+
+            } else {
+                // West wall mount, facing east/right (default legacy)
+                const tankW = Math.max(3.5, Math.min(5, p.w * 0.28));
+                ctx.fillStyle = '#e2e8f0';
+                ctx.fillRect(p.x + 1, p.y + 1, tankW, p.h - 2);
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.6;
+                ctx.strokeRect(p.x + 1, p.y + 1, tankW, p.h - 2);
+
+                ctx.fillStyle = '#38bdf8';
+                ctx.beginPath();
+                ctx.arc(p.x + tankW / 2 + 0.5, p.y + p.h / 2, 1.2, 0, Math.PI * 2);
+                ctx.fill();
+
+                const bowlX = p.x + tankW + 1.5;
+                const bowlW = p.w - tankW - 2.5;
+                ctx.fillStyle = '#38bdf8';
+                ctx.beginPath();
+                ctx.ellipse(bowlX + bowlW / 2, p.y + p.h / 2, Math.max(1, bowlW / 2 - 1.2), Math.max(1, p.h / 2 - 2.5), 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1.4;
+                ctx.stroke();
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (!isYachtLevel && (p.type === 'sink' || p.type === 'counter' || p.type === 'vanity' || lbl.includes('SINK') || (isTrainLevel && lbl.includes('VANITY')) || (p.displayName && p.displayName.includes('VANITY') && isTrainLevel) || (p.displayName && p.displayName.includes('SINK')) || lbl.includes('盥洗台') || lbl.includes('洗手池') || lbl.includes('洗手台'))) {
+            // Washbasin / Vanity Counter (洗手台/洗手池/VIP洁白梳妆盥洗台)
+            ctx.save();
+            const isVanity = lbl.includes('VANITY') || (p.displayName && p.displayName.includes('VANITY')) || p.type === 'vanity';
+
+            if (isVanity) {
+                // Pristine Pure White Marble Vanity Console with Gold Accents
+                // 1. Drop Shadow
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+                ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+                // 2. Pure White Marble Surface
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+
+                // Border: Clean Marble Edge with Fine Gold Trim
+                ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1.2;
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.8; // Brass gold inlay
+                ctx.strokeRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2);
+
+                // 3. Mirror Strip on top/wall edge
+                ctx.fillStyle = 'rgba(224, 242, 254, 0.7)';
+                ctx.fillRect(p.x + 2, p.y + 1.5, p.w - 4, 2.5);
+                ctx.fillStyle = '#fbbf24'; // Mirror brass frame
+                ctx.fillRect(p.x + 2, p.y + 3.8, p.w - 4, 0.8);
+
+                // 4. Porcelain White Oval Basin with Translucent Water Pool
+                const basinW = Math.min(18, p.w * 0.45);
+                const basinH = Math.min(12, p.h * 0.65);
+                const basinX = p.x + p.w / 2;
+                const basinY = p.y + p.h / 2 + 1;
+
+                ctx.fillStyle = '#ffffff';
+                ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.ellipse(basinX, basinY, basinW / 2, basinH / 2, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+
+                // Water pool
+                ctx.fillStyle = 'rgba(56, 189, 248, 0.3)';
+                ctx.beginPath();
+                ctx.ellipse(basinX, basinY, basinW / 3, basinH / 3, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // 5. Swan-neck Gold Brass Faucet & Knobs
+                ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(basinX, p.y + 4.5);
+                ctx.lineTo(basinX, basinY - 2);
+                ctx.stroke();
+                ctx.fillStyle = '#fbbf24';
+                ctx.beginPath(); ctx.arc(basinX, p.y + 4.5, 1.2, 0, Math.PI * 2); ctx.fill();
+
+                // Hot & Cold temperature dots
+                ctx.fillStyle = '#ef4444'; ctx.fillRect(basinX - 3, p.y + 4, 1, 1);
+                ctx.fillStyle = '#38bdf8'; ctx.fillRect(basinX + 2, p.y + 4, 1, 1);
+
+                // 6. Luxury Toiletries (Soap Pump & Gold-bound Towels)
+                // Left side: Pure White Soap Pump
+                const soapX = p.x + 3;
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(soapX, p.y + p.h / 2 - 3, 4, 6);
+                ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 0.5;
+                ctx.strokeRect(soapX, p.y + p.h / 2 - 3, 4, 6);
+                ctx.fillStyle = '#fbbf24'; // Gold dispenser
+                ctx.fillRect(soapX + 0.5, p.y + p.h / 2 - 5, 3, 2);
+
+                // Right side: Rolled White Towels with Gold Ribbon
+                const towelX = p.x + p.w - 7;
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(towelX, p.y + p.h / 2 - 3, 5, 6);
+                ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 0.5;
+                ctx.strokeRect(towelX, p.y + p.h / 2 - 3, 5, 6);
+                ctx.fillStyle = '#d97706'; // Gold ribbon tie
+                ctx.fillRect(towelX, p.y + p.h / 2 - 0.5, 5, 1);
+
+            } else {
+                // Standard Washbasin / Sink Counter (标准卫生洗手台/盥洗池 - 支持多朝向与关卡定制风格)
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+                ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+                // Countertop Surface: Hotel gets polished light marble, others get granite
+                if (isHotelLevel) {
+                    ctx.fillStyle = '#e2e8f0'; // Luxury polished white-marble
+                    ctx.beginPath();
+                    ctx.roundRect(p.x, p.y, p.w, p.h, 2.5);
+                    ctx.fill();
+                    ctx.strokeStyle = '#cbd5e1';
+                    ctx.lineWidth = 1.0;
+                    ctx.stroke();
+                } else {
+                    ctx.fillStyle = '#334155'; // Granite / Slate
+                    ctx.beginPath();
+                    ctx.roundRect(p.x, p.y, p.w, p.h, 2.5);
+                    ctx.fill();
+                    ctx.strokeStyle = '#64748b';
+                    ctx.lineWidth = 1.0;
+                    ctx.stroke();
+                }
+
+                // Porcelain Basin Sink (Oval)
+                const basinW = Math.max(6, Math.min(p.w - 3.5, p.w * 0.62));
+                const basinH = Math.max(5, Math.min(p.h - 3.5, p.h * 0.62));
+                const basinX = p.x + (p.w - basinW) / 2;
+                const basinY = p.y + (p.h - basinH) / 2;
+
+                ctx.fillStyle = '#f8fafc';
+                ctx.beginPath();
+                ctx.ellipse(basinX + basinW / 2, basinY + basinH / 2, basinW / 2, basinH / 2, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.8;
+                ctx.stroke();
+
+                // Water shimmer inside basin
+                ctx.fillStyle = 'rgba(56, 189, 248, 0.25)';
+                ctx.beginPath();
+                ctx.ellipse(basinX + basinW / 2, basinY + basinH / 2, basinW * 0.35, basinH * 0.35, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Water basin drain plug
+                ctx.fillStyle = '#475569';
+                ctx.beginPath();
+                ctx.arc(basinX + basinW / 2, basinY + basinH / 2, 1.2, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Chrome Faucet / Mixer Tap according to facing
+                const sFace = p.facing || (p.w >= p.h ? 'down' : 'left');
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 1.4;
+
+                if (sFace === 'down') {
+                    // Tap on North wall (top), extending down into basin
+                    ctx.beginPath();
+                    ctx.moveTo(p.x + p.w / 2, p.y + 1);
+                    ctx.lineTo(p.x + p.w / 2, basinY + basinH * 0.32);
+                    ctx.stroke();
+
+                    // Temperature dots
+                    ctx.fillStyle = '#ef4444'; ctx.fillRect(p.x + p.w / 2 - 2.5, p.y + 1, 1.2, 1.2);
+                    ctx.fillStyle = '#38bdf8'; ctx.fillRect(p.x + p.w / 2 + 1.5, p.y + 1, 1.2, 1.2);
+
+                    // Liquid Soap Dispenser Bottle on top-right corner
+                    ctx.fillStyle = '#10b981';
+                    ctx.fillRect(p.x + p.w - 3.5, p.y + 1.5, 2, 2.5);
+                } else if (sFace === 'up') {
+                    // Tap on South wall (bottom), extending up
+                    ctx.beginPath();
+                    ctx.moveTo(p.x + p.w / 2, p.y + p.h - 1);
+                    ctx.lineTo(p.x + p.w / 2, basinY + basinH * 0.68);
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#ef4444'; ctx.fillRect(p.x + p.w / 2 - 2.5, p.y + p.h - 2.2, 1.2, 1.2);
+                    ctx.fillStyle = '#38bdf8'; ctx.fillRect(p.x + p.w / 2 + 1.5, p.y + p.h - 2.2, 1.2, 1.2);
+                } else if (sFace === 'right') {
+                    // Tap on West wall (left), extending east
+                    ctx.beginPath();
+                    ctx.moveTo(p.x + 1, p.y + p.h / 2);
+                    ctx.lineTo(basinX + basinW * 0.32, p.y + p.h / 2);
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#ef4444'; ctx.fillRect(p.x + 1, p.y + p.h / 2 - 2.5, 1.2, 1.2);
+                    ctx.fillStyle = '#38bdf8'; ctx.fillRect(p.x + 1, p.y + p.h / 2 + 1.5, 1.2, 1.2);
+                } else {
+                    // Tap on East wall (right), extending west
+                    ctx.beginPath();
+                    ctx.moveTo(p.x + p.w - 1, p.y + p.h / 2);
+                    ctx.lineTo(basinX + basinW * 0.68, p.y + p.h / 2);
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#ef4444'; ctx.fillRect(p.x + p.w - 2.2, p.y + p.h / 2 - 2.5, 1.2, 1.2);
+                    ctx.fillStyle = '#38bdf8'; ctx.fillRect(p.x + p.w - 2.2, p.y + p.h / 2 + 1.5, 1.2, 1.2);
+
+                    // Liquid Soap Dispenser Bottle on West corner
+                    ctx.fillStyle = '#10b981';
+                    ctx.fillRect(p.x + 1.5, p.y + 2, 2.5, 2.5);
+                }
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'bathtub' || lbl.includes('BATHTUB') || lbl.includes('浴缸') || lbl.includes('浴盆')) {
+            // Elegant clawfoot porcelain & brass bathtub
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+            
+            // Outer clawfoot porcelain rim
+            ctx.fillStyle = '#f8fafc';
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 10);
+            ctx.fill();
+            ctx.strokeStyle = '#d97706'; // Gold accent trim
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+
+            // Inner tub basin (Clear blue water)
+            ctx.fillStyle = '#38bdf8'; 
+            ctx.beginPath();
+            ctx.roundRect(p.x + 5, p.y + 5, p.w - 10, p.h - 10, 6);
+            ctx.fill();
+            ctx.strokeStyle = '#0284c7';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Water shimmer highlight
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+            ctx.beginPath();
+            ctx.roundRect(p.x + 8, p.y + 7, (p.w - 16) * 0.4, (p.h - 14) * 0.4, 3);
+            ctx.fill();
+
+            // Polished brass faucet and taps at top edge
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(p.x + p.w / 2 - 3, p.y + 1, 6, 4);
+            ctx.fillStyle = '#d97706';
+            ctx.fillRect(p.x + p.w / 2 - 5, p.y + 1, 3, 2);
+            ctx.fillRect(p.x + p.w / 2 + 2, p.y + 1, 3, 2);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'office_chair' || lbl.includes('OFFICE CHAIR') || lbl.includes('办公椅') || lbl.includes('转椅')) {
+            // High-fidelity executive reception office chair (Rotatable leather office chair)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+
+            // 1. Five-star wheeled base (Metal brass/chrome legs)
+            ctx.strokeStyle = isBankLevel ? '#94a3b8' : '#64748b';
+            ctx.lineWidth = 1.8;
+            for (let i = 0; i < 5; i++) {
+                const angle = (i * Math.PI * 2) / 5 - Math.PI / 2;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx + Math.cos(angle) * (p.w * 0.45), cy + Math.sin(angle) * (p.h * 0.45));
+                ctx.stroke();
+            }
+
+            // Central Stem
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 2. Leather Seat Cushion (Bank: Cool Navy Slate / Hotel: Rich mahogany)
+            const seatW = p.w * 0.7;
+            const seatH = p.h * 0.65;
+            ctx.fillStyle = isBankLevel ? '#1e293b' : '#451a03';
+            ctx.strokeStyle = isBankLevel ? '#3b82f6' : '#b45309';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.roundRect(cx - seatW / 2, cy - seatH / 2 + 1, seatW, seatH, 4);
+            ctx.fill();
+            ctx.stroke();
+
+            // 3. Ergonomic High Backrest (Top end depending on facing or default down)
+            const backW = p.w * 0.72;
+            const backH = 6;
+            let backY = cy - seatH / 2 - 2;
+            if (p.facing === 'down') {
+                backY = cy - seatH / 2 - 3;
+            } else if (p.facing === 'up') {
+                backY = cy + seatH / 2 - 3;
+            }
+
+            ctx.fillStyle = isBankLevel ? '#0f172a' : '#270e02';
+            ctx.strokeStyle = isBankLevel ? '#60a5fa' : '#d97706';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(cx - backW / 2, backY, backW, backH, 2);
+            ctx.fill();
+            ctx.stroke();
+
+            // Armrests (Left & Right)
+            ctx.fillStyle = isBankLevel ? '#334155' : '#78350f';
+            ctx.fillRect(cx - seatW / 2 - 2, cy - 3, 2, 8);
+            ctx.fillRect(cx + seatW / 2, cy - 3, 2, 8);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'reception_desk' || lbl.includes('RECEPTION DESK') || lbl.includes('RECEPTION COUNTER') || lbl.includes('前台')) {
+            // High-fidelity Front Desk - Distinct custom styles for Bank (Modern Titanium Slate) vs Hotel (Classic Mahogany & Brass)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Countertop Gradient
+            const deskGrad = ctx.createLinearGradient(p.x, p.y, p.x, p.y + p.h);
+            if (isBankLevel) {
+                // Bank style: High-tech Titanium Slate & Dark Obsidian Navy
+                deskGrad.addColorStop(0, '#1e293b'); 
+                deskGrad.addColorStop(1, '#0f172a'); 
+            } else {
+                // Luxury hotel mahogany wood texture
+                deskGrad.addColorStop(0, '#5C1D0F'); 
+                deskGrad.addColorStop(1, '#300E06'); 
+            }
+            ctx.fillStyle = deskGrad;
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+
+            // Outer Inlay Trim
+            ctx.strokeStyle = isBankLevel ? 'rgba(59, 130, 246, 0.85)' : '#fbbf24'; 
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x + 2, p.y + 2, p.w - 4, p.h - 4);
+
+            const face = p.facing || 'up'; // Default 'up' as staff stands on North side (inward)
+
+            if (face === 'up') {
+                // Raised guest privacy counter on bottom (facing the lobby/guests)
+                if (isBankLevel) {
+                    ctx.fillStyle = '#09101f';
+                    ctx.fillRect(p.x + 2, p.y + p.h - 4, p.w - 4, 3);
+                    // Blue optic glowing fiber security strip
+                    ctx.fillStyle = 'rgba(56, 189, 248, 0.9)';
+                    ctx.fillRect(p.x + 3, p.y + p.h - 3.2, p.w - 6, 1.2);
+                } else {
+                    ctx.fillStyle = '#451208';
+                    ctx.fillRect(p.x + 2, p.y + p.h - 4, p.w - 4, 3);
+                    ctx.strokeStyle = '#d97706';
+                    ctx.lineWidth = 0.8;
+                    ctx.strokeRect(p.x + 2, p.y + p.h - 4, p.w - 4, 3);
+                }
+
+                if (isBankLevel) {
+                    // === Bank Specific Lobby Items - All oriented facing NORTH towards staff ===
+                    // 1. Bank Computer Terminal (Centered with receptionist chair)
+                    const stX = p.x + 24;
+                    // Keyboard on staff side (North edge, right under receptionist's fingers)
+                    ctx.fillStyle = '#0b0f19';
+                    ctx.fillRect(stX - 6, p.y + 2, 12, 3.2);
+                    ctx.fillStyle = '#334155';
+                    ctx.fillRect(stX - 5, p.y + 2.4, 10, 1.2); // Key grid
+                    ctx.fillStyle = '#475569';
+                    ctx.fillRect(stX - 2.5, p.y + 3.8, 5, 0.8); // Spacebar
+                    // Optical mouse on right of keyboard
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(stX + 7.5, p.y + 2.2, 2.2, 3);
+
+                    // Monitor Bezel & Stand
+                    // Screen surface facing NORTH towards staff's eyes
+                    ctx.fillStyle = '#0f172a'; // Monitor chassis
+                    ctx.fillRect(stX - 7, p.y + 6.2, 14, 3.5);
+                    // Glowing cyan banking terminal screen on NORTH side of bezel
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillRect(stX - 6, p.y + 6.2, 12, 1.6);
+                    ctx.fillStyle = '#0284c7';
+                    ctx.fillRect(stX - 5, p.y + 6.6, 6, 0.8); // Terminal data feed
+                    // Monitor Stand Base on SOUTH side (behind the screen, facing counter)
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(stX - 1, p.y + 9.5, 2, 1.8); // Stand neck
+                    ctx.fillStyle = '#334155';
+                    ctx.fillRect(stX - 3.5, p.y + 11.2, 7, 1.8); // Sturdy weighted stand foot
+
+                    // 2. Bank Signing Clipboard (文件夹板/签约板) on Left - 夹子部分朝外(南侧)，文件部分朝内(北侧，面向工作人员)
+                    const clipX = p.x + 4;
+                    // Navy blue portfolio hardboard
+                    ctx.fillStyle = '#1e3a8a';
+                    ctx.fillRect(clipX, p.y + 2, 9.5, 13);
+                    // Crisp white contract paperwork sheet
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(clipX + 1, p.y + 2.5, 7.5, 12);
+                    // Metallic chrome spring clip at the SOUTH edge (朝外 - 柜台外侧)
+                    ctx.fillStyle = '#cbd5e1';
+                    ctx.fillRect(clipX + 2, p.y + 12.8, 5.5, 1.8);
+                    ctx.fillStyle = '#475569';
+                    ctx.fillRect(clipX + 3.8, p.y + 13.2, 2, 0.8); // Clip rivet
+                    // Contract document header near outer edge (South side)
+                    ctx.fillStyle = '#3b82f6';
+                    ctx.fillRect(clipX + 2, p.y + 11.2, 5.5, 0.8); // Header banner
+                    // Document clauses text lines (文件部分朝内，面向工作人员阅读)
+                    ctx.fillStyle = '#94a3b8';
+                    ctx.fillRect(clipX + 2, p.y + 9.4, 5.5, 0.6); // Clause 1
+                    ctx.fillRect(clipX + 2, p.y + 7.8, 5.5, 0.6); // Clause 2
+                    ctx.fillRect(clipX + 2, p.y + 6.2, 4.5, 0.6); // Clause 3
+                    // Active signature line & Red Bank Official Stamp (印章) at NORTH edge (朝内，工作人员执笔处)
+                    ctx.fillStyle = '#ef4444';
+                    ctx.beginPath();
+                    ctx.arc(clipX + 3.5, p.y + 4.2, 1.5, 0, Math.PI * 2); // Official bank red seal
+                    ctx.fill();
+                    ctx.fillStyle = '#1e40af';
+                    ctx.fillRect(clipX + 5.5, p.y + 4.2, 2.5, 0.8); // Staff signature mark
+                    // Stylus / bank signature pen on right side, grip and tip positioned at NORTH for staff's right hand
+                    ctx.fillStyle = '#3b82f6';
+                    ctx.fillRect(clipX + 9.8, p.y + 2.2, 1.2, 3.5); // Ergonomic grip closest to staff fingers
+                    ctx.fillStyle = '#94a3b8';
+                    ctx.fillRect(clipX + 9.8, p.y + 5.7, 1.2, 6.5); // Pen shaft
+
+                    // 3. Queue Calling & Intercom Terminal (呼叫叫号终端) on Right - 屏幕对着工作人员(北侧)
+                    const termX = p.x + p.w - 14.5;
+                    // Console base chassis
+                    ctx.fillStyle = '#09101f';
+                    ctx.fillRect(termX, p.y + 2, 11, 13);
+
+                    // TACTILE CALLING BUTTONS & NUMPAD on NORTH side (朝内，工作人员直接按压)
+                    ctx.fillStyle = '#10b981'; // Large Green "CALL / NEXT" button
+                    ctx.fillRect(termX + 1.2, p.y + 2.5, 3.8, 2.2);
+                    ctx.fillStyle = '#f59e0b'; // Amber "RECALL" button
+                    ctx.fillRect(termX + 5.8, p.y + 2.5, 3.8, 2.2);
+                    // Mini numeric keypad matrix facing staff
+                    ctx.fillStyle = '#334155';
+                    ctx.fillRect(termX + 1.2, p.y + 5.2, 8.4, 1.8);
+                    ctx.fillStyle = '#64748b';
+                    ctx.fillRect(termX + 1.8, p.y + 5.5, 1.6, 1.2);
+                    ctx.fillRect(termX + 4.6, p.y + 5.5, 1.6, 1.2);
+                    ctx.fillRect(termX + 7.4, p.y + 5.5, 1.6, 1.2);
+
+                    // BACKLIT DIGITAL QUEUE LCD SCREEN on SOUTH side (斜仰式屏幕，朝向北侧工作人员眼睛)
+                    ctx.fillStyle = '#1e293b'; // Screen bezel housing
+                    ctx.fillRect(termX + 1, p.y + 7.6, 9, 4.6);
+                    ctx.fillStyle = '#38bdf8'; // Backlit LCD panel
+                    ctx.fillRect(termX + 1.5, p.y + 8.1, 8, 3.6);
+                    ctx.fillStyle = '#047857';
+                    ctx.fillRect(termX + 2, p.y + 8.6, 7, 2.6); // Dark contrast display area
+                    ctx.fillStyle = '#34d399'; // Bright green digital ticket LED ("A028") facing staff
+                    ctx.fillRect(termX + 2.5, p.y + 9.2, 3, 1.4);
+                    ctx.fillStyle = '#38bdf8'; // Counter window LED ("W1")
+                    ctx.fillRect(termX + 6.2, p.y + 9.2, 2.2, 1.4);
+
+                    // Intercom speaker grille on bottom edge
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(termX + 1.2, p.y + 12.6, 8.6, 1.8);
+
+                    // Gooseneck Microphone arching NORTH directly towards staff's mouth
+                    ctx.strokeStyle = '#94a3b8';
+                    ctx.lineWidth = 1.2;
+                    ctx.beginPath();
+                    ctx.moveTo(termX + 1, p.y + 7.5);
+                    ctx.quadraticCurveTo(termX - 3.5, p.y + 2, termX - 2, p.y - 2.5);
+                    ctx.stroke();
+                    // Microphone capsule with active green LED ring aimed at staff
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(termX - 3.5, p.y - 4.5, 3.2, 2.2);
+                    ctx.fillStyle = '#22c55e';
+                    ctx.fillRect(termX - 3.5, p.y - 4.5, 3.2, 0.8);
+
+                } else if (p.w > 75) {
+                    // === Hotel Front Desk (Wide Luxury Counter with 3 Staff Workstations) ===
+                    // All equipment oriented facing NORTH towards staff sitting behind the desk
+                    const stations = [
+                        p.x + p.w * 0.17, // Station 1 (aligns with Chair 1)
+                        p.x + p.w * 0.50, // Station 2 (aligns with Chair 2)
+                        p.x + p.w * 0.83  // Station 3 (aligns with Chair 3)
+                    ];
+
+                    // Draw 3 Computer Terminals facing NORTH towards staff
+                    for (let i = 0; i < stations.length; i++) {
+                        const stX = stations[i];
+                        // Keyboard closest to receptionist (North edge)
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(stX - 6, p.y + 2, 12, 3.2);
+                        ctx.fillStyle = '#334155';
+                        ctx.fillRect(stX - 5, p.y + 2.4, 10, 1.2); // Keycaps facing staff
+                        ctx.fillStyle = '#475569';
+                        ctx.fillRect(stX - 2.5, p.y + 3.8, 5, 0.8); // Spacebar
+                        // Optical Mouse on right of keyboard
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(stX + 7.5, p.y + 2.5, 2.2, 3);
+
+                        // Monitor Bezel & Stand
+                        // Screen surface facing NORTH towards receptionist
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(stX - 7, p.y + 6.2, 14, 3.5);
+                        // Glowing hotel PMS screen (cyan & warm amber) facing NORTH
+                        ctx.fillStyle = '#06b6d4';
+                        ctx.fillRect(stX - 6, p.y + 6.2, 12, 1.6);
+                        ctx.fillStyle = '#fef08a';
+                        ctx.fillRect(stX - 5, p.y + 6.5, 4, 0.8); // Reservation booking bar
+                        // Monitor Stand Base on SOUTH side (behind the screen, facing counter)
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(stX - 1, p.y + 9.5, 2, 1.8); // Stand neck
+                        ctx.fillStyle = '#334155';
+                        ctx.fillRect(stX - 3.5, p.y + 11.2, 7, 1.8); // Base foot
+                    }
+
+                    // 宾客入住登记册 (Guest Ledger Book) - between Station 1 & 2, oriented facing NORTH towards staff
+                    const bookX = p.x + p.w * 0.335;
+                    ctx.fillStyle = '#450a0a'; // Rich burgundy leather binder
+                    ctx.fillRect(bookX - 6, p.y + 2, 12, 12.5);
+                    ctx.fillStyle = '#fffbeb'; // Ivory open parchment pages
+                    ctx.fillRect(bookX - 5.2, p.y + 2.5, 10.4, 11.2);
+                    ctx.fillStyle = '#b45309'; // Center spine crease
+                    ctx.fillRect(bookX - 0.4, p.y + 2.5, 0.8, 11.2);
+
+                    // Top header row of guest ledger table at NORTH side (closest to staff)
+                    ctx.fillStyle = '#d97706';
+                    ctx.fillRect(bookX - 4.6, p.y + 3.2, 4, 1.2);
+                    ctx.fillRect(bookX + 0.6, p.y + 3.2, 4, 1.2);
+                    // Ruled guest entry lines flowing downwards towards south
+                    ctx.fillStyle = '#94a3b8';
+                    ctx.fillRect(bookX - 4.6, p.y + 5.2, 4, 0.6);
+                    ctx.fillRect(bookX - 4.6, p.y + 7.0, 4, 0.6);
+                    ctx.fillRect(bookX - 4.6, p.y + 8.8, 4, 0.6);
+                    ctx.fillRect(bookX + 0.6, p.y + 5.2, 4, 0.6);
+                    ctx.fillRect(bookX + 0.6, p.y + 7.0, 4, 0.6);
+                    ctx.fillRect(bookX + 0.6, p.y + 8.8, 4, 0.6);
+                    // Active entry line with blue checkmark at SOUTH edge
+                    ctx.fillStyle = '#1d4ed8';
+                    ctx.fillRect(bookX - 4.6, p.y + 11.0, 3.5, 0.8);
+                    ctx.fillRect(bookX + 0.6, p.y + 11.0, 3.5, 0.8);
+
+                    // Gold satin ribbon bookmark anchored at top of spine (North) and trailing downwards
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.fillRect(bookX - 0.5, p.y + 1.5, 1, 4.5);
+
+                    // Polished brass desk stand pen on staff side (North-East, right by receptionist's right hand)
+                    ctx.fillStyle = '#b45309';
+                    ctx.beginPath();
+                    ctx.arc(bookX + 7, p.y + 3.2, 1.8, 0, Math.PI * 2); // Heavy weighted brass base
+                    ctx.fill();
+                    ctx.strokeStyle = '#fbbf24';
+                    ctx.lineWidth = 1.2;
+                    ctx.beginPath();
+                    ctx.moveTo(bookX + 7, p.y + 3.2);
+                    ctx.lineTo(bookX + 4.5, p.y + 4.2); // Pen angled towards writing line
+                    ctx.stroke();
+
+                    // 前台内线电话 (Concierge Desk Phone) - between Station 2 & 3
+                    const phoneX = p.x + p.w * 0.665;
+                    ctx.fillStyle = '#020617'; // Matte black phone console
+                    ctx.fillRect(phoneX - 5.5, p.y + 2, 11, 12.8);
+
+                    if (isHotelLevel) {
+                        // Level 5 酒店前台专属：电话颠倒过来朝向工作人员 (面向北侧坐着的前台员工)
+                        // 1. Handset on LEFT side (标准左侧话筒听筒布局，话筒在北/听筒在南)
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(phoneX - 4.6, p.y + 2.6, 3.2, 11.2);
+                        ctx.strokeStyle = '#334155';
+                        ctx.lineWidth = 0.6;
+                        ctx.strokeRect(phoneX - 4.6, p.y + 2.6, 3.2, 11.2);
+                        // Handset earpiece & mouthpiece detail
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(phoneX - 4.2, p.y + 2.9, 2.4, 2.5); // Mouthpiece near staff
+                        ctx.fillRect(phoneX - 4.2, p.y + 11.0, 2.4, 2.5); // Earpiece
+                        // Coiled handset cable at NORTH edge (话筒线自话筒底端连入主机，靠近工作人员)
+                        ctx.strokeStyle = '#475569';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(phoneX - 3.0, p.y + 2.6);
+                        ctx.quadraticCurveTo(phoneX - 1.2, p.y + 1.6, phoneX - 0.2, p.y + 2.6);
+                        ctx.stroke();
+
+                        // 2. DIAL BUTTON KEYPAD on NORTH side (按键朝向北侧工作人员，便于操作)
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(phoneX - 0.8, p.y + 2.6, 5.6, 6.0); // Keypad recess
+                        // 12-Button Numeric Dial Grid
+                        ctx.fillStyle = '#64748b';
+                        // Row 1 (1, 2, 3)
+                        ctx.fillRect(phoneX - 0.4, p.y + 3.0, 1.2, 1);
+                        ctx.fillRect(phoneX + 1.2, p.y + 3.0, 1.2, 1);
+                        ctx.fillRect(phoneX + 2.8, p.y + 3.0, 1.2, 1);
+                        // Row 2 (4, 5, 6)
+                        ctx.fillRect(phoneX - 0.4, p.y + 4.3, 1.2, 1);
+                        ctx.fillRect(phoneX + 1.2, p.y + 4.3, 1.2, 1);
+                        ctx.fillRect(phoneX + 2.8, p.y + 4.3, 1.2, 1);
+                        // Row 3 (7, 8, 9)
+                        ctx.fillRect(phoneX - 0.4, p.y + 5.6, 1.2, 1);
+                        ctx.fillRect(phoneX + 1.2, p.y + 5.6, 1.2, 1);
+                        ctx.fillRect(phoneX + 2.8, p.y + 5.6, 1.2, 1);
+                        // Speed dial extension keys with amber/green status LEDs (快速转接键)
+                        ctx.fillStyle = '#f59e0b';
+                        ctx.fillRect(phoneX - 0.4, p.y + 7.0, 1.8, 0.8);
+                        ctx.fillStyle = '#10b981';
+                        ctx.fillRect(phoneX + 2.0, p.y + 7.0, 1.8, 0.8);
+
+                        // 3. ANGLED BACKLIT LCD DISPLAY on SOUTH side (屏幕在南侧仰角朝北，正对工作人员视线)
+                        ctx.fillStyle = '#1e293b'; // Wedge display housing
+                        ctx.fillRect(phoneX - 0.8, p.y + 9.2, 5.6, 4.8);
+                        ctx.fillStyle = '#38bdf8'; // Glowing cyan screen
+                        ctx.fillRect(phoneX - 0.4, p.y + 9.6, 4.8, 4.0);
+                        ctx.fillStyle = '#0f172a'; // Contrast text line "EXT 101"
+                        ctx.fillRect(phoneX, p.y + 10.8, 4.0, 1.4);
+                        ctx.strokeStyle = '#0284c7';
+                        ctx.lineWidth = 0.5;
+                        ctx.strokeRect(phoneX - 0.4, p.y + 9.6, 4.8, 4.0);
+
+                    } else {
+                        // Default / other levels fallback
+                        // ANGLED BACKLIT LCD DISPLAY on NORTH side
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(phoneX - 4.8, p.y + 2.5, 5.2, 4.2);
+                        ctx.fillStyle = '#38bdf8';
+                        ctx.fillRect(phoneX - 4.4, p.y + 2.9, 4.4, 3.4);
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(phoneX - 3.8, p.y + 3.8, 3.2, 1.2);
+
+                        // DIAL BUTTON KEYPAD on SOUTH side
+                        ctx.fillStyle = '#1e293b';
+                        ctx.fillRect(phoneX - 4.8, p.y + 7.4, 5.2, 6.8);
+                        ctx.fillStyle = '#64748b';
+                        ctx.fillRect(phoneX - 4.3, p.y + 7.8, 1.2, 1);
+                        ctx.fillRect(phoneX - 2.8, p.y + 7.8, 1.2, 1);
+                        ctx.fillRect(phoneX - 1.3, p.y + 7.8, 1.2, 1);
+                        ctx.fillRect(phoneX - 4.3, p.y + 9.2, 1.2, 1);
+                        ctx.fillRect(phoneX - 2.8, p.y + 9.2, 1.2, 1);
+                        ctx.fillRect(phoneX - 1.3, p.y + 9.2, 1.2, 1);
+                        ctx.fillRect(phoneX - 4.3, p.y + 10.6, 1.2, 1);
+                        ctx.fillRect(phoneX - 2.8, p.y + 10.6, 1.2, 1);
+                        ctx.fillRect(phoneX - 1.3, p.y + 10.6, 1.2, 1);
+                        ctx.fillStyle = '#f59e0b';
+                        ctx.fillRect(phoneX - 4.3, p.y + 12.2, 1.8, 0.8);
+                        ctx.fillStyle = '#10b981';
+                        ctx.fillRect(phoneX - 2.0, p.y + 12.2, 1.8, 0.8);
+
+                        // Handset on right side
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(phoneX + 1.2, p.y + 2.4, 3.2, 11.2);
+                        ctx.strokeStyle = '#334155';
+                        ctx.lineWidth = 0.6;
+                        ctx.strokeRect(phoneX + 1.2, p.y + 2.4, 3.2, 11.2);
+                        ctx.strokeStyle = '#475569';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(phoneX + 2.8, p.y + 2.4);
+                        ctx.quadraticCurveTo(phoneX + 0.8, p.y + 1.5, phoneX - 0.5, p.y + 2.4);
+                        ctx.stroke();
+                    }
+
+                    // Polished Brass Service Call Bell (on guest counter ledge)
+                    ctx.fillStyle = '#eab308';
+                    ctx.beginPath();
+                    ctx.arc(p.x + p.w * 0.50, p.y + p.h - 4, 2.5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#78350f';
+                    ctx.fillRect(p.x + p.w * 0.50 - 1.2, p.y + p.h - 5.5, 2.4, 1.2); // Bell plunger
+
+                } else {
+                    // Standard Compact Reception Desk (Single staff workstation, all items facing NORTH towards staff)
+                    const stX = p.x + p.w * 0.50;
+                    // Keyboard facing staff
+                    ctx.fillStyle = '#090d16';
+                    ctx.fillRect(stX - 5, p.y + 2, 10, 2.8);
+                    // Monitor with screen facing NORTH
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(stX - 6, p.y + 5.5, 12, 3);
+                    ctx.fillStyle = '#06b6d4';
+                    ctx.fillRect(stX - 5, p.y + 5.5, 10, 1.2); // Screen face
+                    ctx.fillStyle = '#334155';
+                    ctx.fillRect(stX - 2.5, p.y + 9.5, 5, 1.5); // Stand base on South
+
+                    // Compact Guest Ledger Book (left side, facing NORTH towards staff)
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(p.x + 3, p.y + 2.5, 7, 6);
+                    ctx.strokeStyle = '#94a3b8';
+                    ctx.lineWidth = 0.6;
+                    ctx.strokeRect(p.x + 3, p.y + 2.5, 7, 6);
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.fillRect(p.x + 6, p.y + 2, 1, 6.5); // Bookmark
+
+                    // Compact Hotel Telephone on right side (keypad & display facing NORTH towards staff)
+                    ctx.fillStyle = '#020617';
+                    ctx.fillRect(p.x + p.w - 10, p.y + 2.5, 7, 6);
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillRect(p.x + p.w - 9, p.y + 3, 4, 1.5); // LCD facing North
+
+                    // Brass Call Bell on guest counter ledge
+                    ctx.fillStyle = '#eab308';
+                    ctx.beginPath();
+                    ctx.arc(p.x + p.w * 0.75, p.y + p.h - 4, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+            } else if (face === 'left') {
+                // Staff on West (left) side inside booth, guests on East (right) side
+                // Raised guest privacy counter on right (facing lobby)
+                if (isBankLevel) {
+                    ctx.fillStyle = '#09101f';
+                    ctx.fillRect(p.x + p.w - 4, p.y + 2, 3, p.h - 4);
+                    ctx.fillStyle = 'rgba(56, 189, 248, 0.9)';
+                    ctx.fillRect(p.x + p.w - 3.2, p.y + 3, 1.2, p.h - 6);
+
+                    // Bank paperwork tray on staff side
+                    ctx.fillStyle = '#1e3a8a';
+                    ctx.fillRect(p.x + 3, p.y + p.h * 0.30 - 4, Math.min(10, p.w - 8), 8);
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(p.x + 4, p.y + p.h * 0.30 - 3, Math.min(8, p.w - 10), 6);
+
+                    // Internal secure phone
+                    ctx.fillStyle = '#09101f';
+                    ctx.fillRect(p.x + 3, p.y + p.h * 0.68 - 4, Math.min(8, p.w - 8), 7);
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillRect(p.x + 4, p.y + p.h * 0.68 - 3, 4, 2);
+                } else {
+                    ctx.fillStyle = '#451208';
+                    ctx.fillRect(p.x + p.w - 4, p.y + 2, 3, p.h - 4);
+                    ctx.strokeStyle = '#d97706';
+                    ctx.lineWidth = 0.8;
+                    ctx.strokeRect(p.x + p.w - 4, p.y + 2, 3, p.h - 4);
+
+                    // Staff items on the left edge (facing inward toward reception interior)
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(p.x + 3, p.y + p.h * 0.30 - 4, Math.min(10, p.w - 8), 8);
+                    ctx.strokeStyle = '#94a3b8';
+                    ctx.lineWidth = 0.6;
+                    ctx.strokeRect(p.x + 3, p.y + p.h * 0.30 - 4, Math.min(10, p.w - 8), 8);
+
+                    ctx.fillStyle = '#020617';
+                    ctx.fillRect(p.x + 3, p.y + p.h * 0.65 - 4, Math.min(8, p.w - 8), 7);
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillRect(p.x + 4, p.y + p.h * 0.65 - 3, 4, 2);
+                }
+
+            } else if (face === 'right') {
+                // Staff on East (right) side, guests on West (left) side
+                if (isBankLevel) {
+                    ctx.fillStyle = '#09101f';
+                    ctx.fillRect(p.x + 1, p.y + 2, 3, p.h - 4);
+                    ctx.fillStyle = 'rgba(56, 189, 248, 0.9)';
+                    ctx.fillRect(p.x + 1.8, p.y + 3, 1.2, p.h - 6);
+
+                    ctx.fillStyle = '#1e3a8a';
+                    ctx.fillRect(p.x + p.w - 11, p.y + p.h * 0.30 - 4, 8, 8);
+                    ctx.fillStyle = '#09101f';
+                    ctx.fillRect(p.x + p.w - 11, p.y + p.h * 0.65 - 4, 8, 7);
+                } else {
+                    ctx.fillStyle = '#451208';
+                    ctx.fillRect(p.x + 1, p.y + 2, 3, p.h - 4);
+                    ctx.strokeStyle = '#d97706';
+                    ctx.lineWidth = 0.8;
+                    ctx.strokeRect(p.x + 1, p.y + 2, 3, p.h - 4);
+
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(p.x + p.w - 11, p.y + p.h * 0.30 - 4, 8, 8);
+                    ctx.fillStyle = '#020617';
+                    ctx.fillRect(p.x + p.w - 11, p.y + p.h * 0.65 - 4, 8, 7);
+                }
+
+            } else {
+                // Default / Downwards facing (staff on bottom, guests on top)
+                if (isBankLevel) {
+                    ctx.fillStyle = '#09101f';
+                    ctx.fillRect(p.x + 2, p.y + 1, p.w - 4, 3);
+                    ctx.fillStyle = 'rgba(56, 189, 248, 0.9)';
+                    ctx.fillRect(p.x + 3, p.y + 1.8, p.w - 6, 1.2);
+
+                    ctx.fillStyle = '#090d16';
+                    ctx.fillRect(p.x + p.w * 0.35 - 6, p.y + p.h - 5, 12, 3);
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(p.x + p.w * 0.35 - 7, p.y + p.h - 9, 14, 3);
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.fillRect(p.x + p.w * 0.35 - 6, p.y + p.h - 7.5, 12, 1.2);
+
+                    ctx.fillStyle = '#1e3a8a'; 
+                    ctx.fillRect(p.x + 6, p.y + p.h - 8.5, 10, 6);
+                    ctx.fillStyle = '#09101f'; 
+                    ctx.fillRect(p.x + p.w - 18, p.y + p.h - 8.5, 9, 6);
+                } else {
+                    ctx.fillStyle = '#451208';
+                    ctx.fillRect(p.x + 2, p.y + 1, p.w - 4, 3);
+
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(p.x + p.w * 0.35 - 6, p.y + p.h - 5, 12, 3);
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(p.x + p.w * 0.35 - 7, p.y + p.h - 9, 14, 3);
+                    ctx.fillStyle = '#06b6d4';
+                    ctx.fillRect(p.x + p.w * 0.35 - 6, p.y + p.h - 7.5, 12, 1.2);
+
+                    ctx.fillStyle = '#f8fafc'; 
+                    ctx.fillRect(p.x + 6, p.y + p.h - 8.5, 10, 6);
+                    ctx.fillStyle = '#020617'; 
+                    ctx.fillRect(p.x + p.w - 18, p.y + p.h - 8.5, 9, 6);
+
+                    ctx.fillStyle = '#eab308'; 
+                    ctx.beginPath();
+                    ctx.arc(p.x + p.w * 0.50, p.y + 4, 2.5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'luggage_stack' || lbl.includes('LUGGAGE') || lbl.includes('BAGGAGE') || lbl.includes('行李'))) {
+            // High-Speed Train Tiered Luggage Rack & Suitcases (客舱多层行李架与拉杆箱)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Metal Frame Base Structure
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Metallic rack slats
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 0.8;
+            for (let sy = p.y + 3; sy < p.y + p.h - 2; sy += 4) {
+                ctx.beginPath();
+                ctx.moveTo(p.x + 2, sy);
+                ctx.lineTo(p.x + p.w - 2, sy);
+                ctx.stroke();
+            }
+
+            // Multiple Stored Luggage Suitcases & Travel Bags
+            // Suitcase 1: Red Hard-shell Spinner (Left)
+            ctx.fillStyle = '#991b1b'; // Crimson Red
+            ctx.beginPath();
+            ctx.roundRect(p.x + 3, p.y + 2, Math.max(4, p.w * 0.42), p.h - 4, 3);
+            ctx.fill();
+            ctx.strokeStyle = '#f87171';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // Corner protectors & Handle for Suitcase 1
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 2, p.y + p.h / 2 - 3, 2, 6); // Handle
+            ctx.fillStyle = '#cbd5e1'; // Silver corner caps
+            ctx.fillRect(p.x + 4, p.y + 3, 2.5, 2.5);
+            ctx.fillRect(p.x + 4, p.y + p.h - 5.5, 2.5, 2.5);
+
+            // Suitcase 2: Navy Tactical Duffel / Leather Bag (Right)
+            const s2x = p.x + p.w * 0.48;
+            const s2w = p.w * 0.48;
+            if (s2w > 6) {
+                ctx.fillStyle = '#1e3a8a'; // Deep Navy
+                ctx.beginPath();
+                ctx.roundRect(s2x, p.y + 2, s2w, p.h - 4, 3);
+                ctx.fill();
+                ctx.strokeStyle = '#60a5fa';
+                ctx.lineWidth = 0.8;
+                ctx.stroke();
+
+                // Leather straps across duffel
+                ctx.strokeStyle = '#b45309'; // Tan leather straps
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.moveTo(s2x + s2w * 0.3, p.y + 2);
+                ctx.lineTo(s2x + s2w * 0.3, p.y + p.h - 2);
+                ctx.moveTo(s2x + s2w * 0.7, p.y + 2);
+                ctx.lineTo(s2x + s2w * 0.7, p.y + p.h - 2);
+                ctx.stroke();
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'water_dispenser' || lbl.includes('WATER DISPENSER') || lbl.includes('WATER') || lbl.includes('饮水机')) {
+            // Cabin Water Cooler & Hot Dispenser (车厢立式饮水机)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            // Brushed Metallic Base Body Cabinet
+            ctx.fillStyle = '#e2e8f0';
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 3);
+            ctx.fill();
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Translucent Blue Water Jug / Reservoir in middle
+            const bottleRadius = Math.min(p.w, p.h) * 0.32;
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h * 0.42;
+
+            const waterGrad = ctx.createRadialGradient(cx, cy, 1, cx, cy, bottleRadius);
+            waterGrad.addColorStop(0, '#7dd3fc');
+            waterGrad.addColorStop(0.7, '#0284c7');
+            waterGrad.addColorStop(1, '#0369a1');
+
+            ctx.fillStyle = waterGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, bottleRadius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // Hot & Cold Taps & Drip Tray Area
+            const trayY = p.y + p.h - 5;
+            ctx.fillStyle = '#334155'; // Dark drip tray
+            ctx.fillRect(p.x + 2, trayY, p.w - 4, 3);
+
+            // Hot Water Tap (Red) & Cold Water Tap (Blue)
+            ctx.fillStyle = '#ef4444'; // Hot tap
+            ctx.fillRect(cx - 3, trayY - 2.5, 2, 2);
+            ctx.fillStyle = '#38bdf8'; // Cold tap
+            ctx.fillRect(cx + 1, trayY - 2.5, 2, 2);
+
+            // Green Power LED
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(p.x + 2, p.y + 2, 1.5, 1.5);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'rug' || lbl.includes('RUG') || lbl.includes('CARPET') || lbl.includes('地毯') || lbl.includes('织毯')) {
+            // Ornamental carpet/rug
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+            ctx.fillStyle = lbl.includes('EMERALD') || p.x % 2 === 0 ? '#064e3b' : '#7f1d1d'; 
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(p.x + 4, p.y + 4, p.w - 8, p.h - 8);
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+            const r = Math.min(p.w, p.h) * 0.28;
+            ctx.fillStyle = 'rgba(245, 158, 11, 0.8)';
+            ctx.beginPath();
+            for (let i = 0; i < 8; i++) {
+                const angle = (i * Math.PI) / 4;
+                ctx.lineTo(cx + Math.cos(angle) * r, cy + Math.sin(angle) * r);
+            }
+            ctx.closePath();
+            ctx.fill();
+            for (let ly = p.y + 2; ly < p.y + p.h - 2; ly += 4) {
+                ctx.strokeStyle = '#f3f4f6';
+                ctx.lineWidth = 0.8;
+                ctx.beginPath(); ctx.moveTo(p.x, ly); ctx.lineTo(p.x - 3, ly); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(p.x + p.w, ly); ctx.lineTo(p.x + p.w + 3, ly); ctx.stroke();
+            }
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'lamp' || lbl.includes('LAMP') || lbl.includes('LIGHT') || lbl.includes('灯')) {
+            // Standing floor lamp with radial light glow
+            ctx.save();
+            const cx = p.x + p.w/2;
+            const cy = p.y + p.h/2;
+            const glowRadius = Math.max(80, Math.min(p.w, p.h) * 5);
+            const radialGrad = ctx.createRadialGradient(cx, cy, 2, cx, cy, glowRadius);
+            radialGrad.addColorStop(0, 'rgba(254, 240, 138, 0.35)'); 
+            radialGrad.addColorStop(0.3, 'rgba(253, 224, 71, 0.15)'); 
+            radialGrad.addColorStop(1, 'rgba(253, 224, 71, 0)');      
+            ctx.fillStyle = radialGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, glowRadius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.beginPath(); ctx.arc(cx + 2, cy + 2, p.w/2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#d97706'; 
+            ctx.beginPath(); ctx.arc(cx, cy, p.w/2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#fef08a';
+            ctx.beginPath(); ctx.arc(cx, cy, p.w/6, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'wardrobe' || lbl.includes('WARDROBE') || lbl.includes('CLOSET') || lbl.includes('衣柜') || lbl.includes('柜子'))) {
+            // Executive luxury mahogany wardrobe with brass hardware & paneled doors facing corridor
+            ctx.save();
+            const isFacingUp = p.facing === 'up' || (!p.facing && p.y > 100);
+
+            // 1. Drop shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+            
+            // 2. Main cabinet outer body (Rich dark mahogany)
+            ctx.fillStyle = '#230e04';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            
+            // 3. Back wall solid panel (Thick dark timber backing attached to room wall)
+            ctx.fillStyle = '#0f0502';
+            if (isFacingUp) {
+                // Back wall is at the BOTTOM (attached to South carriage wall)
+                ctx.fillRect(p.x, p.y + p.h - 5, p.w, 5);
+                ctx.fillStyle = '#4a1b08'; ctx.fillRect(p.x + 1, p.y + p.h - 5, p.w - 2, 1);
+            } else {
+                // Back wall is at the TOP (attached to North carriage wall)
+                ctx.fillRect(p.x, p.y, p.w, 5);
+                ctx.fillStyle = '#4a1b08'; ctx.fillRect(p.x + 1, p.y + 4, p.w - 2, 1);
+            }
+            
+            // Outer cabinet border
+            ctx.strokeStyle = '#5a230a';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 4. Double Front Doors facing corridor
+            const doorCount = p.w >= 36 ? 2 : 1;
+            const doorW = (p.w - 6 - (doorCount - 1) * 2) / doorCount;
+            const doorH = p.h - 7;
+            const doorY = isFacingUp ? (p.y + 1) : (p.y + 5);
+
+            for (let d = 0; d < doorCount; d++) {
+                const dx = p.x + 3 + d * (doorW + 2);
+                
+                // Door face base
+                ctx.fillStyle = '#4c1e08';
+                ctx.fillRect(dx, doorY, doorW, doorH);
+                
+                // Recessed panel border
+                ctx.strokeStyle = '#270e02';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(dx + 2, doorY + 2, doorW - 4, doorH - 4);
+                
+                // Inner wood panel
+                ctx.fillStyle = '#3a1605';
+                ctx.fillRect(dx + 3, doorY + 3, doorW - 6, doorH - 6);
+
+                // Polished brass handles located AT THE CORRIDOR FRONT EDGE
+                const handleX = d === 0 ? (dx + doorW - 4) : (dx + 3);
+                const handleY = isFacingUp ? (doorY + 2) : (doorY + doorH - 7);
+                
+                // Handle shadow
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(handleX + 0.5, handleY + 0.5, 2, 5);
+                
+                // Handle brass metal
+                ctx.fillStyle = '#f59e0b';
+                ctx.fillRect(handleX, handleY, 2, 5);
+                
+                // Specular glint
+                ctx.fillStyle = '#fef08a';
+                ctx.fillRect(handleX, handleY + 1, 2, 2);
+            }
+
+            // Central partition seam if double door
+            if (doorCount === 2) {
+                ctx.strokeStyle = '#1e0a01';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x + p.w / 2, doorY);
+                ctx.lineTo(p.x + p.w / 2, doorY + doorH);
+                ctx.stroke();
+            }
+
+            // 5. Prominent Front Door Brass Edge & Door Lip facing corridor
+            ctx.fillStyle = '#fbbf24'; // Bright brass front edge facing corridor
+            if (isFacingUp) {
+                // Front door lip at TOP (facing North corridor)
+                ctx.fillRect(p.x + 1, p.y, p.w - 2, 2);
+                // Door knob indicator dots on top front edge
+                ctx.fillStyle = '#d97706';
+                ctx.fillRect(p.x + p.w / 2 - 4, p.y, 3, 2);
+                ctx.fillRect(p.x + p.w / 2 + 1, p.y, 3, 2);
+            } else {
+                // Front door lip at BOTTOM (facing South corridor)
+                ctx.fillRect(p.x + 1, p.y + p.h - 2, p.w - 2, 2);
+                // Door knob indicator dots on bottom front edge
+                ctx.fillStyle = '#d97706';
+                ctx.fillRect(p.x + p.w / 2 - 4, p.y + p.h - 2, 3, 2);
+                ctx.fillRect(p.x + p.w / 2 + 1, p.y + p.h - 2, 3, 2);
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'coffee_table' || p.type === 'tea_table' || lbl.includes('茶几') || lbl.includes('茶台')) {
+            // Luxury hotel tea/coffee table with a clay teapot and cups
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+            ctx.fillStyle = '#5c2d11'; 
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#3b1d0a';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+            ctx.fillStyle = 'rgba(224, 242, 254, 0.2)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w - 8, p.h - 8);
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
+            ctx.strokeRect(p.x + 4, p.y + 4, p.w - 8, p.h - 8);
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+            ctx.fillStyle = '#9a3412'; 
+            ctx.beginPath(); ctx.arc(cx, cy, 4.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#7c2d12';
+            ctx.fillRect(cx - 7, cy - 1, 3, 2); 
+            ctx.strokeStyle = '#7c2d12';
+            ctx.beginPath(); ctx.arc(cx + 5, cy, 1.8, -Math.PI/2, Math.PI/2); ctx.stroke();
+            ctx.fillStyle = '#f8fafc'; 
+            const cupOffsets = [[-7, -7], [7, -7], [-7, 7], [7, 7]];
+            cupOffsets.forEach(([ox, oy]) => {
+                ctx.beginPath(); ctx.arc(cx + ox, cy + oy, 2, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#0284c7'; ctx.lineWidth = 0.5; ctx.stroke();
+            });
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'writing_desk' || lbl.includes('写字台') || lbl.includes('STUDY DESK'))) {
+            // Executive VIP Mahogany Writing & Study Desk (符合VIP车厢的高级细节书桌)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 1. Polished Dark Mahogany Wood Surface
+            ctx.fillStyle = '#2b1105'; 
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#1a0d06'; ctx.lineWidth = 1.5;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Gold foil edge inlay
+            ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x + 1.5, p.y + 1.5, p.w - 3, p.h - 3);
+
+            // 4 Brass L-shaped Corner Protectors
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(p.x, p.y, 3, 3);
+            ctx.fillRect(p.x + p.w - 3, p.y, 3, 3);
+            ctx.fillRect(p.x, p.y + p.h - 3, 3, 3);
+            ctx.fillRect(p.x + p.w - 3, p.y + p.h - 3, 3, 3);
+
+            // 2. Central Burgundy Leather Blotter Desk Pad with Gold Stitching
+            const padW = Math.max(16, p.w - 12);
+            const padH = Math.max(10, p.h - 8);
+            const padX = p.x + p.w/2 - padW/2;
+            const padY = p.y + p.h/2 - padH/2;
+            ctx.fillStyle = '#2a0c0e'; // Deep burgundy leather
+            ctx.fillRect(padX, padY, padW, padH);
+            ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 0.5;
+            ctx.strokeRect(padX + 0.5, padY + 0.5, padW - 1, padH - 1);
+
+            // 3. Art-Deco Emerald Glass Banker's Desk Lamp with Soft Radial Warm Light Glow
+            const lampX = p.x + 8;
+            const lampY = p.y + 6;
+            // Warm light cone glow
+            const glowGrad = ctx.createRadialGradient(lampX, lampY, 1, lampX, lampY, 14);
+            glowGrad.addColorStop(0, 'rgba(254, 240, 138, 0.45)');
+            glowGrad.addColorStop(1, 'rgba(254, 240, 138, 0)');
+            ctx.fillStyle = glowGrad;
+            ctx.beginPath(); ctx.arc(lampX, lampY, 14, 0, Math.PI * 2); ctx.fill();
+
+            // Brass Lamp Stand & Emerald Shade
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(lampX - 1, lampY - 1, 2, 4); // Brass stem
+            ctx.fillStyle = '#047857'; // Emerald green glass shade
+            ctx.fillRect(lampX - 3.5, lampY - 3.5, 7, 3);
+            ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 0.5; ctx.strokeRect(lampX - 3.5, lampY - 3.5, 7, 3);
+
+            // 4. Open Executive Leather Dossier Folder & Golden Fountain Pen (文件夹与金羽毛笔)
+            const dosX = p.x + p.w - 16;
+            const dosY = p.y + 4;
+            ctx.fillStyle = '#78350f'; // Leather dossier cover
+            ctx.fillRect(dosX, dosY, 11, 10);
+            ctx.fillStyle = '#f8fafc'; // White paper sheet inside
+            ctx.fillRect(dosX + 1, dosY + 1, 9, 8);
+            ctx.fillStyle = '#94a3b8'; // Delicate writing text lines
+            ctx.fillRect(dosX + 2, dosY + 3, 7, 0.8);
+            ctx.fillRect(dosX + 2, dosY + 5, 5, 0.8);
+
+            // Gold Fountain Pen
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(dosX - 3, dosY + 4, 1.5, 6);
+
+            // 5. Ultra-thin Slate Executive Laptop
+            const lapW = Math.min(18, padW - 4);
+            const lapH = Math.min(11, padH - 3);
+            const lapX = padX + padW/2 - lapW/2;
+            const lapY = padY + padH/2 - lapH/2;
+            ctx.fillStyle = '#0f172a'; // Slate dark body
+            ctx.fillRect(lapX, lapY, lapW, lapH);
+            ctx.fillStyle = '#38bdf8'; // Cyan keyboard glow line
+            ctx.fillRect(lapX + 2, lapY + lapH - 3, lapW - 4, 1.5);
+            ctx.fillStyle = '#94a3b8'; // Metallic edge highlight
+            ctx.fillRect(lapX, lapY, lapW, 1);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'pillar' || lbl.includes('大理石柱') || lbl.includes('立柱')) {
+            // Grand lobby Support Column
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.beginPath(); ctx.arc(p.x + p.w/2 + 2, p.y + p.h/2 + 2, Math.min(p.w, p.h)/2, 0, Math.PI * 2); ctx.fill();
+            const cx = p.x + p.w/2;
+            const cy = p.y + p.h/2;
+            const radius = Math.min(p.w, p.h)/2;
+            ctx.fillStyle = '#7f1d1d'; 
+            ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#450a0a'; ctx.lineWidth = 1.5; ctx.stroke();
+            ctx.strokeStyle = '#eab308'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(cx, cy, radius - 1, 0, Math.PI * 2); ctx.stroke();
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'fountain' || lbl.includes('景观喷泉') || lbl.includes('喷泉')) {
+            // Lobby Water Fountain
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.beginPath(); ctx.arc(p.x + p.w/2 + 4, p.y + p.h/2 + 4, p.w/2, 0, Math.PI * 2); ctx.fill();
+            const cx = p.x + p.w/2;
+            const cy = p.y + p.h/2;
+            const r = p.w/2;
+            ctx.fillStyle = '#475569'; 
+            ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#334155'; ctx.lineWidth = 2.5; ctx.stroke();
+            ctx.fillStyle = '#06b6d4'; 
+            ctx.beginPath(); ctx.arc(cx, cy, r * 0.8, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath(); ctx.arc(cx, cy, r * 0.15, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)'; ctx.lineWidth = 1.2;
+            ctx.beginPath(); ctx.arc(cx, cy, r * 0.6, 0, Math.PI * 2); ctx.stroke();
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'desk' || p.type === 'table' || p.type === 'counter' || lbl.includes('DESK') || lbl.includes('TABLE') || lbl.includes('RECEPTION') || lbl.includes('PANTRY') || lbl.includes('TELLER') || lbl.includes('COUNTER')) {
+            // Custom Office Workspace Desk / Conference Table / Pantry Leisure Table
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            const isLeisure = lbl.includes('PANTRY') || lbl.includes('COFFEE') || lbl.includes('TEA') || lbl.includes('LOUNGE') || lbl.includes('SOFA') || lbl.includes('REST') || lbl.includes('BREAK') || lbl.includes('SIDE') || lbl.includes('DINING') || lbl.includes('VANITY') || lbl.includes('LEISURE') || p.type === 'table';
+            const isConference = lbl.includes('CONF') || p.w > 120;
+            const isKitchen = lbl.includes('GALLEY') || lbl.includes('COOKING') || lbl.includes('KITCHEN') || lbl.includes('STOVE') || lbl.includes('OVEN');
+            const isOwnerDesk = (lbl.includes('OWNER') || lbl.includes('MASTER') || lbl.includes('CHIEF')) && !lbl.includes('VANITY');
+
+            if (isKitchen) {
+                // High-end Yacht Galley Cooking Station (Stainless steel top with glowing orange burners and cutting board)
+                ctx.fillStyle = '#cbd5e1'; // Stainless steel base
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#64748b'; // Sleek slate border
+                ctx.lineWidth = 1.8;
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                // Draw burners (stove top)
+                ctx.fillStyle = '#1e293b'; // Burner grates
+                ctx.strokeStyle = '#ea580c'; // Glowing orange coil
+                ctx.lineWidth = 1.2;
+                
+                if (p.h > p.w) {
+                    // Vertical stove top layout
+                    ctx.beginPath(); ctx.arc(p.x + p.w/2, p.y + 20, p.w * 0.3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                    ctx.beginPath(); ctx.arc(p.x + p.w/2, p.y + p.h - 20, p.w * 0.25, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+                    // Wooden cutting board in the middle
+                    ctx.fillStyle = '#b45309'; // Warm bamboo wood cutting board
+                    ctx.fillRect(p.x + 3, p.y + p.h/2 - 12, p.w - 6, 24);
+                    ctx.strokeStyle = '#78350f';
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(p.x + 3, p.y + p.h/2 - 12, p.w - 6, 24);
+                    
+                    // Tiny steel knife on board
+                    ctx.fillStyle = '#e2e8f0';
+                    ctx.fillRect(p.x + p.w/2 - 1, p.y + p.h/2 - 6, 2, 12);
+                } else {
+                    // Horizontal stove top layout
+                    ctx.beginPath(); ctx.arc(p.x + 20, p.y + p.h/2, p.h * 0.3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                    ctx.beginPath(); ctx.arc(p.x + p.w - 20, p.y + p.h/2, p.h * 0.25, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+                    ctx.fillStyle = '#b45309';
+                    ctx.fillRect(p.x + p.w/2 - 12, p.y + 3, 24, p.h - 6);
+                    ctx.strokeStyle = '#78350f';
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(p.x + p.w/2 - 12, p.y + 3, 24, p.h - 6);
+
+                    ctx.fillStyle = '#e2e8f0';
+                    ctx.fillRect(p.x + p.w/2 - 6, p.y + p.h/2 - 1, 12, 2);
+                }
+
+            } else if (isOwnerDesk) {
+                // Luxurious mahogany study desk (No standard office look!)
+                ctx.fillStyle = '#2c1a04'; // Dark mahogany
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#fbbf24'; // Premium golden/brass border
+                ctx.lineWidth = 1.8;
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                // High-end leather desk mat (dark forest green) in center
+                ctx.fillStyle = '#064e3b';
+                const matW = p.w * 0.6;
+                const matH = p.h * 0.6;
+                ctx.fillRect(p.x + p.w/2 - matW/2, p.y + p.h/2 - matH/2, matW, matH);
+                ctx.strokeStyle = '#fbbf24';
+                ctx.lineWidth = 0.5;
+                ctx.strokeRect(p.x + p.w/2 - matW/2, p.y + p.h/2 - matH/2, matW, matH);
+
+                // Curved ultra-wide monitor with glowing cyan screen & golden desk lamp based on facing direction
+                let face = p.facing || 'left';
+                const screenH = Math.min(22, p.h * 0.5);
+                const screenW = Math.min(22, p.w * 0.5);
+
+                ctx.fillStyle = '#1e293b'; // Premium matte black monitor bezel
+                
+                // Draw 3 gold-handled office desk drawers on left/right edges for custom executive detail
+                ctx.fillStyle = '#1c0a00'; // Dark drawer face
+                ctx.fillRect(p.x + 2, p.y + 2, 8, p.h - 4);
+                ctx.fillRect(p.x + p.w - 10, p.y + 2, 8, p.h - 4);
+                ctx.fillStyle = '#fbbf24'; // Gold handles
+                ctx.fillRect(p.x + 6, p.y + p.h/2 - 4, 1.5, 8);
+                ctx.fillRect(p.x + p.w - 7.5, p.y + p.h/2 - 4, 1.5, 8);
+
+                // Add an elegant leather notepad / writing pad on the desk corner
+                ctx.fillStyle = '#f8fafc'; // Ivory paper
+                ctx.fillRect(p.x + p.w/2 - 12, p.y + 4, 10, 8);
+                ctx.strokeStyle = '#b45309'; // Wood rim holder
+                ctx.strokeRect(p.x + p.w/2 - 12, p.y + 4, 10, 8);
+                ctx.fillStyle = '#1e3a8a'; // Tiny fountain pen
+                ctx.fillRect(p.x + p.w/2 - 4, p.y + 6, 1.5, 6);
+
+                if (face === 'left') {
+                    const monitorX = p.x + p.w - 16;
+                    const monitorY = p.y + p.h/2 - screenH/2;
+                    ctx.fillRect(monitorX, monitorY, 4, screenH);
+                    
+                    ctx.fillStyle = '#06b6d4'; // Cyan display glow
+                    ctx.fillRect(monitorX - 2, monitorY + 2, 2, screenH - 4);
+
+                    // Keyboard to the left (perfectly aligned under the study chair)
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(p.x + 14, p.y + p.h/2 - 8, 4, 16);
+                    
+                    // Gold executive desk lamp on the top-left
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.beginPath(); ctx.arc(p.x + p.w/2 + 6, p.y + 6, 2.5, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = '#fef08a'; // Glowing yellow cone
+                    ctx.beginPath(); ctx.arc(p.x + p.w/2 + 10, p.y + 6, 1.5, 0, Math.PI * 2); ctx.fill();
+                } else if (face === 'right') {
+                    const monitorX = p.x + 12;
+                    const monitorY = p.y + p.h/2 - screenH/2;
+                    ctx.fillRect(monitorX, monitorY, 4, screenH);
+
+                    ctx.fillStyle = '#06b6d4';
+                    ctx.fillRect(monitorX + 4, monitorY + 2, 2, screenH - 4);
+
+                    // Keyboard to the right (perfectly aligned under the guest study chair)
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(p.x + p.w - 18, p.y + p.h/2 - 8, 4, 16);
+
+                    // Gold desk lamp on the top-right
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.beginPath(); ctx.arc(p.x + p.w/2 - 6, p.y + 6, 2.5, 0, Math.PI * 2); ctx.fill();
+                } else if (face === 'down') {
+                    const monitorX = p.x + p.w/2 - screenW/2;
+                    const monitorY = p.y + p.h - 12;
+                    ctx.fillRect(monitorX, monitorY, screenW, 4);
+
+                    ctx.fillStyle = '#06b6d4';
+                    ctx.fillRect(monitorX + 2, monitorY - 2, screenW - 4, 2);
+
+                    // Keyboard above
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(p.x + p.w/2 - 8, monitorY - 12, 16, 4);
+
+                    // Gold lamp on top-right
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.beginPath(); ctx.arc(p.x + p.w - 16, p.y + 6, 2.5, 0, Math.PI * 2); ctx.fill();
+                } else {
+                    const monitorX = p.x + p.w/2 - screenW/2;
+                    const monitorY = p.y + 12;
+                    ctx.fillRect(monitorX, monitorY, screenW, 4);
+
+                    ctx.fillStyle = '#06b6d4';
+                    ctx.fillRect(monitorX + 2, monitorY + 4, screenW - 4, 2);
+
+                    // Keyboard below
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(p.x + p.w/2 - 8, monitorY + 8, 16, 4);
+
+                    // Gold lamp on top-right
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.beginPath(); ctx.arc(p.x + p.w - 16, p.y + p.h - 12, 2.5, 0, Math.PI * 2); ctx.fill();
+                }
+
+            } else if (isLeisure) {
+                const isDining = lbl.includes('DINING');
+                const isVanity = lbl.includes('VANITY');
+
+                if (isDining) {
+                    // Luxurious Yacht Dining Table (No computers, with plates, wine glasses and flower vase)
+                    ctx.fillStyle = '#451a03'; // Rich dark mahogany oak wood
+                    ctx.fillRect(p.x, p.y, p.w, p.h);
+                    ctx.strokeStyle = '#d97706';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                    // Central white flower runner
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+                    ctx.fillRect(p.x + 10, p.y + p.h/2 - 2, p.w - 20, 4);
+
+                    // Draw elegant dining plates and tiny wine glasses
+                    ctx.fillStyle = '#f8fafc'; // White ceramic plates
+                    ctx.strokeStyle = '#e2e8f0';
+                    ctx.lineWidth = 0.5;
+                    const plateCount = Math.max(2, Math.floor(p.w / 30));
+                    const plateStep = p.w / (plateCount + 1);
+                    for (let i = 1; i <= plateCount; i++) {
+                        const plateX = p.x + i * plateStep;
+                        // Top plate
+                        ctx.fillStyle = '#f8fafc';
+                        ctx.beginPath(); ctx.arc(plateX, p.y + 6, 3.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                        // Top wine glass (tiny ruby red circle)
+                        ctx.fillStyle = '#991b1b';
+                        ctx.beginPath(); ctx.arc(plateX + 6, p.y + 6, 1.2, 0, Math.PI * 2); ctx.fill();
+
+                        // Bottom plate
+                        ctx.fillStyle = '#f8fafc';
+                        ctx.beginPath(); ctx.arc(plateX, p.y + p.h - 6, 3.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                        // Bottom wine glass
+                        ctx.fillStyle = '#991b1b';
+                        ctx.beginPath(); ctx.arc(plateX - 6, p.y + p.h - 6, 1.2, 0, Math.PI * 2); ctx.fill();
+                    }
+
+                    // Central Rose Vase
+                    ctx.fillStyle = '#10b981'; // Green stem/leaves
+                    ctx.fillRect(p.x + p.w / 2 - 1, p.y + p.h / 2 - 2, 2, 4);
+                    ctx.fillStyle = '#ef4444'; // Red rose petals
+                    ctx.beginPath(); ctx.arc(p.x + p.w / 2, p.y + p.h / 2 - 3, 2, 0, Math.PI * 2); ctx.fill();
+
+                } else if (isVanity) {
+                    if (isYachtLevel) {
+                        // Luxury Superyacht Stateroom & Bathroom Vanity (顶级豪华游艇专属梳妆盥洗台)
+                        ctx.save();
+                        // 1. Drop shadow
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+                        ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+                        // 2. High-gloss Polished Teak & Italian White Marble Console
+                        ctx.fillStyle = '#2c1404'; // Deep polished teak wood base
+                        ctx.fillRect(p.x, p.y, p.w, p.h);
+                        ctx.strokeStyle = '#d97706'; ctx.lineWidth = 1.5; // Polished brass frame
+                        ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                        // Top surface: Polished White Carrara Marble inlay
+                        ctx.fillStyle = '#f8fafc';
+                        ctx.fillRect(p.x + 1.5, p.y + 1.5, p.w - 3, p.h - 3);
+                        ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 0.8;
+                        ctx.strokeRect(p.x + 1.5, p.y + 1.5, p.w - 3, p.h - 3);
+
+                        // Gold mirror strip at wall edge
+                        const isFacingDown = (p.facing === 'down') || (p.y < 200);
+                        const mirrorY = isFacingDown ? (p.y + 2) : (p.y + p.h - 4.5);
+                        ctx.fillStyle = 'rgba(224, 242, 254, 0.85)'; // Mirrored glass
+                        ctx.fillRect(p.x + 3, mirrorY, p.w - 6, 2.5);
+                        ctx.fillStyle = '#fbbf24'; // Brass mirror bezel
+                        ctx.fillRect(p.x + 3, isFacingDown ? (mirrorY + 2.5) : (mirrorY - 0.8), p.w - 6, 0.8);
+
+                        // Sink Basin(s)
+                        const isMaster = lbl.includes('MASTER');
+                        const isVip = lbl.includes('VIP');
+
+                        if (isMaster && p.w >= 50) {
+                            // Double luxury sinks for Master Stateroom!
+                            const sY = p.y + p.h / 2 + (isFacingDown ? 1.5 : -1.5);
+                            [p.x + p.w * 0.32, p.x + p.w * 0.68].forEach(sx => {
+                                // Porcelain basin
+                                ctx.fillStyle = '#ffffff';
+                                ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1;
+                                ctx.beginPath(); ctx.ellipse(sx, sY, 6, 4.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                                // Turquoise ocean water pool
+                                ctx.fillStyle = 'rgba(6, 182, 212, 0.3)';
+                                ctx.beginPath(); ctx.ellipse(sx, sY, 3.8, 2.6, 0, 0, Math.PI * 2); ctx.fill();
+                                // Gold swan-neck faucet
+                                ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 1.3;
+                                ctx.beginPath();
+                                ctx.moveTo(sx, isFacingDown ? (p.y + 5) : (p.y + p.h - 5));
+                                ctx.lineTo(sx, sY + (isFacingDown ? -1.5 : 1.5));
+                                ctx.stroke();
+                            });
+                        } else {
+                            // Single central oval luxury sink
+                            const sx = p.x + p.w / 2;
+                            const sy = p.y + p.h / 2 + (isFacingDown ? 1.5 : -1.5);
+                            ctx.fillStyle = '#ffffff';
+                            ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.ellipse(sx, sy, 7, 5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                            // Turquoise ocean water pool
+                            ctx.fillStyle = 'rgba(6, 182, 212, 0.3)';
+                            ctx.beginPath(); ctx.ellipse(sx, sy, 4.5, 3, 0, 0, Math.PI * 2); ctx.fill();
+                            // Gold faucet
+                            ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 1.3;
+                            ctx.beginPath();
+                            ctx.moveTo(sx, isFacingDown ? (p.y + 5) : (p.y + p.h - 5));
+                            ctx.lineTo(sx, sy + (isFacingDown ? -2 : 2));
+                            ctx.stroke();
+                        }
+
+                        // Luxury Yacht Toiletries on sides:
+                        // 1. Left side: Emerald green artisan glass soap lotion pump with brass nozzle
+                        ctx.fillStyle = '#10b981'; // Emerald glass bottle
+                        ctx.fillRect(p.x + 3.5, p.y + p.h / 2 - 2, 4, 6);
+                        ctx.strokeStyle = '#047857'; ctx.lineWidth = 0.5;
+                        ctx.strokeRect(p.x + 3.5, p.y + p.h / 2 - 2, 4, 6);
+                        ctx.fillStyle = '#fbbf24'; // Brass pump head
+                        ctx.fillRect(p.x + 4, p.y + p.h / 2 - 4.5, 3, 2.5);
+                        ctx.fillRect(p.x + 2.5, p.y + p.h / 2 - 4.5, 2, 1.2); // Nozzle
+
+                        // 2. Right side: French Ruby Crystal Perfume Atomizer
+                        ctx.fillStyle = '#ec4899'; // Ruby pink crystal glass
+                        ctx.beginPath();
+                        ctx.ellipse(p.x + p.w - 6, p.y + p.h / 2, 3.2, 4.2, 0, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.strokeStyle = '#be185d'; ctx.lineWidth = 0.6;
+                        ctx.stroke();
+                        ctx.fillStyle = '#fbbf24'; // Gold spray cap
+                        ctx.fillRect(p.x + p.w - 7.5, p.y + p.h / 2 - 4, 3, 2);
+
+                        // 3. Stateroom special:
+                        if (isMaster) {
+                            // Master Stateroom: Gold jewelry & watch tray
+                            ctx.fillStyle = '#3b0712'; // Burgundy velvet jewelry tray
+                            ctx.fillRect(p.x + p.w / 2 - 4.5, p.y + (isFacingDown ? 3 : p.h - 6), 9, 3.5);
+                            ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 0.5;
+                            ctx.strokeRect(p.x + p.w / 2 - 4.5, p.y + (isFacingDown ? 3 : p.h - 6), 9, 3.5);
+                            // Gold watch glint
+                            ctx.fillStyle = '#fbbf24';
+                            ctx.fillRect(p.x + p.w / 2 - 1.5, p.y + (isFacingDown ? 4 : p.h - 5), 3, 1.5);
+                        } else if (isVip) {
+                            // VIP Stateroom: Rolled white hand towels with gold ribbon tie
+                            ctx.fillStyle = '#ffffff';
+                            ctx.fillRect(p.x + p.w - 13, p.y + p.h / 2 - 2.5, 4.5, 5);
+                            ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 0.5;
+                            ctx.strokeRect(p.x + p.w - 13, p.y + p.h / 2 - 2.5, 4.5, 5);
+                            ctx.fillStyle = '#d97706'; // Gold ribbon tie
+                            ctx.fillRect(p.x + p.w - 13, p.y + p.h / 2 - 0.5, 4.5, 1);
+                        } else {
+                            // Guest Bathroom: Toothbrush porcelain cup
+                            ctx.fillStyle = '#ffffff';
+                            ctx.fillRect(p.x + 9, p.y + p.h / 2 - 1, 3.5, 5);
+                            ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.moveTo(p.x + 10, p.y + p.h / 2 + 1); ctx.lineTo(p.x + 8, p.y + p.h / 2 - 3); ctx.stroke();
+                            ctx.strokeStyle = '#3b82f6';
+                            ctx.beginPath(); ctx.moveTo(p.x + 11, p.y + p.h / 2 + 1); ctx.lineTo(p.x + 13, p.y + p.h / 2 - 3); ctx.stroke();
+                        }
+                        ctx.restore();
+
+                    } else if (isVipVanity) {
+                        // VIP Carriage Exclusive Pristine Pure White Vanity Console (洁白高级VIP洗手池)
+                        ctx.fillStyle = '#ffffff'; // Pristine pure white marble surface
+                        ctx.fillRect(p.x, p.y, p.w, p.h);
+                        ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1.2;
+                        ctx.strokeRect(p.x, p.y, p.w, p.h);
+                        // Fine gold trim inlay
+                        ctx.strokeStyle = '#d97706'; ctx.lineWidth = 0.8;
+                        ctx.strokeRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2);
+
+                        // Gold Mirror Backsplash strip at top
+                        ctx.fillStyle = '#f8fafc';
+                        ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, 3);
+                        ctx.fillStyle = '#fbbf24'; // Brass gold mirror frame line
+                        ctx.fillRect(p.x + 2, p.y + 4.5, p.w - 4, 1);
+
+                        // Oval Porcelain White Sink Basin
+                        const sinkX = p.x + p.w / 2;
+                        const sinkY = p.y + p.h / 2 + 1;
+                        ctx.fillStyle = '#ffffff';
+                        ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1;
+                        ctx.beginPath(); ctx.ellipse(sinkX, sinkY, 7, 5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                        // Inner water pool
+                        ctx.fillStyle = 'rgba(56, 189, 248, 0.25)';
+                        ctx.beginPath(); ctx.ellipse(sinkX, sinkY, 4.5, 3, 0, 0, Math.PI * 2); ctx.fill();
+                        // Polished Swan-neck Gold Faucet
+                        ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 1.4;
+                        ctx.beginPath();
+                        ctx.moveTo(sinkX, p.y + 5);
+                        ctx.lineTo(sinkX, sinkY - 2);
+                        ctx.stroke();
+                        ctx.fillStyle = '#fbbf24';
+                        ctx.beginPath(); ctx.arc(sinkX, p.y + 4.5, 1.2, 0, Math.PI * 2); ctx.fill();
+
+                        // Luxury Pure White & Gold Toiletries on sides
+                        // 1. Pure White Ceramic Hand Soap Pump (Left side)
+                        ctx.fillStyle = '#ffffff';
+                        ctx.fillRect(p.x + 3, p.y + p.h/2 - 2, 4, 6);
+                        ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 0.5;
+                        ctx.strokeRect(p.x + 3, p.y + p.h/2 - 2, 4, 6);
+                        ctx.fillStyle = '#fbbf24'; // Gold dispenser head
+                        ctx.fillRect(p.x + 3.5, p.y + p.h/2 - 4, 2.5, 2);
+
+                        // 2. Rolled Plush White Hand Towels with Gold Ribbon (Right side)
+                        ctx.fillStyle = '#ffffff';
+                        ctx.fillRect(p.x + p.w - 8, p.y + p.h/2 - 3, 5, 6);
+                        ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 0.5;
+                        ctx.strokeRect(p.x + p.w - 8, p.y + p.h/2 - 3, 5, 6);
+                        ctx.fillStyle = '#d97706'; // Gold ribbon tie around towels
+                        ctx.fillRect(p.x + p.w - 8, p.y + p.h/2 - 0.5, 5, 1);
+
+                    } else {
+                        // General Carriage Standard Toilet Vanity (一般车厢洗手池保持不变)
+                        ctx.fillStyle = '#f1f5f9'; // Clean white Carrara marble
+                        ctx.fillRect(p.x, p.y, p.w, p.h);
+                        ctx.strokeStyle = '#94a3b8';
+                        ctx.lineWidth = 1.5;
+                        ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                        // Luxury gold back splash / mirror line at the top
+                        ctx.fillStyle = '#fbbf24'; // Golden brass border
+                        ctx.fillRect(p.x, p.y, p.w, 2);
+
+                        // 2 circular porcelain sink bowls
+                        ctx.fillStyle = '#ffffff';
+                        ctx.strokeStyle = '#cbd5e1';
+                        ctx.lineWidth = 1;
+                        const sinkCount = Math.max(1, Math.floor(p.w / 30));
+                        const sinkStep = p.w / (sinkCount + 1);
+                        for (let i = 1; i <= sinkCount; i++) {
+                            const sinkX = p.x + i * sinkStep;
+                            const sinkY = p.y + p.h/2;
+                            // Outer bowl
+                            ctx.beginPath(); ctx.arc(sinkX, sinkY, 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                            // Water center (cyan)
+                            ctx.fillStyle = '#e0f2fe';
+                            ctx.beginPath(); ctx.arc(sinkX, sinkY, 2.5, 0, Math.PI * 2); ctx.fill();
+                            // Chrome faucet (golden or silver line)
+                            ctx.strokeStyle = '#d97706'; // brass faucet
+                            ctx.lineWidth = 1.2;
+                            ctx.beginPath();
+                            ctx.moveTo(sinkX, sinkY - 6);
+                            ctx.lineTo(sinkX, sinkY - 2);
+                            ctx.stroke();
+                        }
+
+                        // Highly visible, beautiful luxury toiletries on the sides
+                        // 1. Hand Soap Lotion Pump (Left side of vanity counter)
+                        ctx.fillStyle = '#10b981'; // Emerald green glass base
+                        ctx.fillRect(p.x + 4, p.y + p.h/2 - 3, 5, 8);
+                        ctx.strokeStyle = '#047857';
+                        ctx.strokeRect(p.x + 4, p.y + p.h/2 - 3, 5, 8);
+                        ctx.fillStyle = '#fbbf24'; // Golden brass pump head
+                        ctx.fillRect(p.x + 5, p.y + p.h/2 - 6, 3, 3);
+                        ctx.fillRect(p.x + 3, p.y + p.h/2 - 6, 3, 1.5); // nozzle pointing left
+
+                        // 2. French Perfume Atomizer (Right side of vanity counter)
+                        ctx.fillStyle = '#ec4899'; // Ruby pink glass bottle
+                        ctx.beginPath(); ctx.ellipse(p.x + p.w - 7, p.y + p.h/2 + 1, 3.5, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+                        ctx.strokeStyle = '#be185d';
+                        ctx.beginPath(); ctx.ellipse(p.x + p.w - 7, p.y + p.h/2 + 1, 3.5, 4.5, 0, 0, Math.PI * 2); ctx.stroke();
+                        ctx.fillStyle = '#fbbf24'; // Gold cap
+                        ctx.fillRect(p.x + p.w - 8.5, p.y + p.h/2 - 5, 3, 2.5);
+
+                        // 3. Toothbrush Cup with red and blue toothbrushes (Next to the soap lotion pump)
+                        ctx.fillStyle = '#ffffff'; // White porcelain cup
+                        ctx.fillRect(p.x + 12, p.y + p.h/2 - 1, 5, 7);
+                        ctx.strokeStyle = '#cbd5e1';
+                        ctx.strokeRect(p.x + 12, p.y + p.h/2 - 1, 5, 7);
+                        // Toothbrushes angled out
+                        ctx.strokeStyle = '#ef4444'; // Red toothbrush
+                        ctx.lineWidth = 1.2;
+                        ctx.beginPath(); ctx.moveTo(p.x + 13, p.y + p.h/2 + 2); ctx.lineTo(p.x + 10, p.y + p.h/2 - 5); ctx.stroke();
+                        ctx.strokeStyle = '#3b82f6'; // Blue toothbrush
+                        ctx.beginPath(); ctx.moveTo(p.x + 15, p.y + p.h/2 + 2); ctx.lineTo(p.x + 18, p.y + p.h/2 - 5); ctx.stroke();
+                    }
+
+                } else {
+                    // Leisure Coffee / Pantry / Lounge Table (NO computers, keyboards or monitors!)
+                    ctx.fillStyle = '#7c2d12'; // Rich warm mahogany wood
+                    ctx.fillRect(p.x, p.y, p.w, p.h);
+                    ctx.strokeStyle = '#a16207'; // Polished wooden border
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                    // Glass top / decorative center runner
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
+                    ctx.fillRect(p.x + 3, p.y + 3, p.w - 6, p.h - 6);
+
+                    // Leisure Items: Coffee Mugs, Snacks/Pastries on a plate, Books/Magazines, Teapot
+                    // 1. Coffee / Tea Mug
+                    const mugX = p.x + 8;
+                    const mugY = p.y + p.h / 2;
+                    ctx.fillStyle = '#ffffff'; // Porcelain white mug
+                    ctx.beginPath();
+                    ctx.arc(mugX, mugY, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#451a03'; // Coffee brown liquid center
+                    ctx.beginPath();
+                    ctx.arc(mugX, mugY, 1.8, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // 2. Snack Plate with pastries/doughnuts/cookies
+                    const plateX = p.x + p.w / 2;
+                    const plateY = p.y + p.h / 2;
+                    ctx.fillStyle = '#f8fafc'; // White ceramic plate
+                    ctx.beginPath();
+                    ctx.arc(plateX, plateY, 4.5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = '#cbd5e1';
+                    ctx.lineWidth = 0.8;
+                    ctx.stroke();
+
+                    // Croissant / cookies on plate
+                    ctx.fillStyle = '#f59e0b'; // Golden pastry
+                    ctx.beginPath();
+                    ctx.arc(plateX - 1.5, plateY - 1, 1.8, 0, Math.PI * 2);
+                    ctx.arc(plateX + 1.5, plateY + 1, 1.8, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // 3. Books & Magazines stacked
+                    if (p.w > 40) {
+                        const bookX = p.x + p.w - 14;
+                        const bookY = p.y + 3;
+                        ctx.fillStyle = '#0284c7'; // Blue book
+                        ctx.fillRect(bookX, bookY, 10, 6);
+                        ctx.fillStyle = '#ef4444'; // Red magazine on top
+                        ctx.fillRect(bookX + 2, bookY + 1.5, 8, 4.5);
+                    }
+
+                    // 4. Teapot / Glass carafe if larger table
+                    if (p.w > 60) {
+                        const potX = p.x + 22;
+                        const potY = p.y + p.h / 2;
+                        ctx.fillStyle = '#38bdf8'; // Glass tea kettle
+                        ctx.beginPath();
+                        ctx.arc(potX, potY, 3.5, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+
+            } else if (isConference) {
+                // Conference Table: Draw modern central frosted glass strip and wooden inlay
+                ctx.fillStyle = '#7c2d12';
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#9a3412';
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+                ctx.fillRect(p.x + 8, p.y + p.h / 2 - 2, p.w - 16, 4);
+                
+                // Draw multiple paper/documentation folders around the table for meetings
+                ctx.fillStyle = '#f8fafc'; // White docs
+                for (let dx = p.x + 15; dx < p.x + p.w - 15; dx += 30) {
+                    ctx.fillRect(dx, p.y + 3, 8, 6);
+                    ctx.fillRect(dx + 10, p.y + p.h - 9, 8, 6);
+                }
+
+            } else {
+                // Standard Office Workspace Desk / Staff Desk / Teller Counter
+                ctx.fillStyle = '#475569'; // Office steel grey
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#64748b';
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                // 1. Dual computer screens with glowing cyan display
+                const screenW = Math.min(22, p.w * 0.4);
+                const screenX = p.x + p.w / 2 - screenW / 2;
+                const screenY = p.y + 4;
+                
+                ctx.fillStyle = '#0f172a'; // Monitor bezel
+                ctx.fillRect(screenX, screenY, screenW, 4);
+                ctx.fillStyle = '#06b6d4'; // Cyan display screen glow
+                ctx.fillRect(screenX + 2, screenY + 1, screenW - 4, 2);
+
+                // 2. Keyboard
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(screenX + 2, screenY + 6, screenW - 4, 3);
+                
+                // 3. Papers / folders on the side
+                ctx.fillStyle = '#e2e8f0'; // Folder sheets
+                ctx.fillRect(p.x + 4, p.y + p.h - 10, 8, 6);
+                ctx.fillStyle = '#3b82f6'; // Blue folder spine
+                ctx.fillRect(p.x + 4, p.y + p.h - 12, 8, 2);
+
+                // 4. Coffee cup
+                ctx.fillStyle = '#f43f5e'; // Red mug
+                ctx.beginPath();
+                ctx.arc(p.x + p.w - 8, p.y + p.h - 8, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#78350f';
+                ctx.beginPath();
+                ctx.arc(p.x + p.w - 8, p.y + p.h - 8, 1.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'sunbed' || lbl.includes('SUNBED') || lbl.includes('LOUNGER') || lbl.includes('CHAISE')) {
+            // High-fidelity luxury sunbed/sunlounger
+            // 1. Shadow (Draw simple rect shadow)
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // If an angle or custom rotation is provided, we can rotate centered at the prop
+            if (p.angle !== undefined) {
+                ctx.translate(p.x + p.w / 2, p.y + p.h / 2);
+                ctx.rotate(p.angle);
+                const cx = -p.w / 2;
+                const cy = -p.h / 2;
+
+                // 2. Teak Wood Base / Frame
+                ctx.fillStyle = '#b45309'; // Warm teak wood color
+                ctx.fillRect(cx, cy, p.w, p.h);
+                ctx.strokeStyle = '#78350f';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(cx, cy, p.w, p.h);
+
+                // Wood slats lines
+                ctx.strokeStyle = 'rgba(120, 53, 15, 0.4)';
+                for (let sl = cx + 4; sl < cx + p.w - 4; sl += 6) {
+                    ctx.beginPath(); ctx.moveTo(sl, cy); ctx.lineTo(sl, cy + p.h); ctx.stroke();
+                }
+
+                // 3. Crisp white/cyan luxury cushion on top
+                ctx.fillStyle = p.color || '#bae6fd'; // Light blue / Cyan cushion
+                ctx.fillRect(cx + 3, cy + 2, p.w - 6, p.h - 4);
+                ctx.strokeStyle = '#38bdf8';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(cx + 3, cy + 2, p.w - 6, p.h - 4);
+
+                // Cushion ribbing (stitching lines across)
+                ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
+                for (let rx = cx + 8; rx < cx + p.w - 8; rx += 4) {
+                    ctx.beginPath(); ctx.moveTo(rx, cy + 2); ctx.lineTo(rx, cy + p.h - 2); ctx.stroke();
+                }
+
+                // 4. Headrest / Pillow (at left end or right end based on facing/default)
+                ctx.fillStyle = '#f8fafc'; // White fluffy pillow
+                ctx.fillRect(cx + 4, cy + 4, 8, p.h - 8);
+                ctx.strokeStyle = '#e2e8f0';
+                ctx.strokeRect(cx + 4, cy + 4, 8, p.h - 8);
+
+                // 5. Tiny side glass of cocktail with orange slice!
+                ctx.fillStyle = '#f59e0b'; // Orange juice
+                ctx.beginPath();
+                ctx.arc(cx + p.w - 8, cy + p.h / 2, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#ffffff'; // Glass rim
+                ctx.stroke();
+                ctx.strokeStyle = '#ef4444'; // Red straw
+                ctx.beginPath();
+                ctx.moveTo(cx + p.w - 8, cy + p.h / 2);
+                ctx.lineTo(cx + p.w - 11, cy + p.h / 2 - 3);
+                ctx.stroke();
+
+            } else {
+                // Axis-aligned draw
+                // 2. Teak Wood Base / Frame
+                ctx.fillStyle = '#b45309'; // Warm teak wood color
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#78350f';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+                // Wood slats lines
+                ctx.strokeStyle = 'rgba(120, 53, 15, 0.4)';
+                if (p.w > p.h) {
+                    for (let sl = p.x + 4; sl < p.x + p.w - 4; sl += 6) {
+                        ctx.beginPath(); ctx.moveTo(sl, p.y); ctx.lineTo(sl, p.y + p.h); ctx.stroke();
+                    }
+                } else {
+                    for (let sl = p.y + 4; sl < p.y + p.h - 4; sl += 6) {
+                        ctx.beginPath(); ctx.moveTo(p.x, sl); ctx.lineTo(p.x + p.w, sl); ctx.stroke();
+                    }
+                }
+
+                // 3. Crisp white/cyan luxury cushion on top
+                ctx.fillStyle = p.color || '#bae6fd'; // Light blue / Cyan cushion
+                ctx.fillRect(p.x + 3, p.y + 2, p.w - 6, p.h - 4);
+                ctx.strokeStyle = '#38bdf8';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(p.x + 3, p.y + 2, p.w - 6, p.h - 4);
+
+                // Cushion ribbing (stitching lines across)
+                ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
+                if (p.w > p.h) {
+                    for (let rx = p.x + 8; rx < p.x + p.w - 8; rx += 4) {
+                        ctx.beginPath(); ctx.moveTo(rx, p.y + 2); ctx.lineTo(rx, p.y + p.h - 2); ctx.stroke();
+                    }
+                } else {
+                    for (let ry = p.y + 8; ry < p.y + p.h - 8; ry += 4) {
+                        ctx.beginPath(); ctx.moveTo(p.x + 2, ry); ctx.lineTo(p.x + p.w - 2, ry); ctx.stroke();
+                    }
+                }
+
+                // 4. Headrest / Pillow
+                ctx.fillStyle = '#f8fafc'; // White fluffy pillow
+                if (p.facing === 'right') {
+                    ctx.fillRect(p.x + p.w - 12, p.y + 4, 8, p.h - 8);
+                    ctx.strokeStyle = '#e2e8f0';
+                    ctx.strokeRect(p.x + p.w - 12, p.y + 4, 8, p.h - 8);
+                } else {
+                    ctx.fillRect(p.x + 4, p.y + 4, 8, p.h - 8);
+                    ctx.strokeStyle = '#e2e8f0';
+                    ctx.strokeRect(p.x + 4, p.y + 4, 8, p.h - 8);
+                }
+
+                // 5. Tiny side glass of cocktail with orange slice!
+                ctx.fillStyle = '#f59e0b'; // Orange juice
+                const glX = p.facing === 'right' ? p.x + 8 : p.x + p.w - 8;
+                ctx.beginPath();
+                ctx.arc(glX, p.y + p.h / 2, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#ffffff'; // Glass rim
+                ctx.stroke();
+                ctx.strokeStyle = '#ef4444'; // Red straw
+                ctx.beginPath();
+                ctx.moveTo(glX, p.y + p.h / 2);
+                ctx.lineTo(glX - 3, p.y + p.h / 2 - 3);
+                ctx.stroke();
+            }
+
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'helicopter' || lbl.includes('HELICOPTER')) {
+            // High-fidelity executive/military tactical helicopter (top-down view)
+            ctx.save();
+            ctx.translate(p.x + p.w / 2, p.y + p.h / 2);
+            if (p.angle !== undefined) {
+                ctx.rotate(p.angle);
+            }
+
+            // Dimensions relative to center
+            const bodyLength = p.w * 0.45; // core cabin body length
+            const bodyWidth = p.h * 0.22;  // core cabin body width (made sleeker/skinnier as requested)
+
+            // 1. Landing Skids (underneath, drawn first)
+            ctx.strokeStyle = '#475569'; // Steel dark grey
+            ctx.lineWidth = 3;
+            // Left Skid
+            ctx.beginPath();
+            ctx.moveTo(-bodyLength * 0.7, -bodyWidth * 0.75);
+            ctx.lineTo(bodyLength * 0.7, -bodyWidth * 0.75);
+            ctx.stroke();
+            // Right Skid
+            ctx.beginPath();
+            ctx.moveTo(-bodyLength * 0.7, bodyWidth * 0.75);
+            ctx.lineTo(bodyLength * 0.7, bodyWidth * 0.75);
+            ctx.stroke();
+
+            // Skid Struts (connectors to body)
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(-bodyLength * 0.3, -bodyWidth * 0.75); ctx.lineTo(-bodyLength * 0.3, -bodyWidth * 0.5);
+            ctx.moveTo(bodyLength * 0.3, -bodyWidth * 0.75); ctx.lineTo(bodyLength * 0.3, -bodyWidth * 0.5);
+            ctx.moveTo(-bodyLength * 0.3, bodyWidth * 0.75); ctx.lineTo(-bodyLength * 0.3, bodyWidth * 0.5);
+            ctx.moveTo(bodyLength * 0.3, bodyWidth * 0.75); ctx.lineTo(bodyLength * 0.3, bodyWidth * 0.5);
+            ctx.stroke();
+
+            // 2. Tail Boom
+            ctx.fillStyle = '#1e293b'; // Slate charcoal grey
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(-bodyLength * 0.4, -bodyWidth * 0.25);
+            ctx.lineTo(-p.w * 0.65, -bodyWidth * 0.08);
+            ctx.lineTo(-p.w * 0.65, bodyWidth * 0.08);
+            ctx.lineTo(-bodyLength * 0.4, bodyWidth * 0.25);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+
+            // Tail Fin & Rotor
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(-p.w * 0.72, -bodyWidth * 0.35, 8, bodyWidth * 0.7);
+            ctx.strokeRect(-p.w * 0.72, -bodyWidth * 0.35, 8, bodyWidth * 0.7);
+
+            // Tail Rotor Blades
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+            ctx.lineWidth = 1.2;
+            const tailRotorTime = (Date.now() / 60) % (Math.PI * 2);
+            ctx.save();
+            ctx.translate(-p.w * 0.68, -bodyWidth * 0.3);
+            ctx.rotate(tailRotorTime);
+            ctx.beginPath();
+            ctx.moveTo(-12, 0); ctx.lineTo(12, 0);
+            ctx.moveTo(0, -12); ctx.lineTo(0, 12);
+            ctx.stroke();
+            ctx.restore();
+
+            // Tail warning decals (diagonal yellow/black stripes)
+            ctx.fillStyle = '#fbbf24'; // Yellow
+            ctx.fillRect(-p.w * 0.55, -bodyWidth * 0.08, 12, bodyWidth * 0.16);
+            ctx.fillStyle = '#0f172a'; // Black stripes
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-p.w * 0.55, -bodyWidth * 0.08); ctx.lineTo(-p.w * 0.51, bodyWidth * 0.08);
+            ctx.moveTo(-p.w * 0.51, -bodyWidth * 0.08); ctx.lineTo(-p.w * 0.47, bodyWidth * 0.08);
+            ctx.stroke();
+
+            // 3. Main Fuselage Cabin
+            const cabinGrad = ctx.createLinearGradient(-bodyLength, 0, bodyLength, 0);
+            cabinGrad.addColorStop(0, '#0f172a');
+            cabinGrad.addColorStop(0.4, '#1e293b');
+            cabinGrad.addColorStop(1, '#334155');
+            ctx.fillStyle = cabinGrad;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, bodyLength, bodyWidth, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+
+            // 4. Cockpit Windshield
+            ctx.fillStyle = '#0891b2'; // Rich glossy cyan
+            ctx.beginPath();
+            ctx.arc(bodyLength * 0.4, 0, bodyWidth * 0.72, -Math.PI * 0.4, Math.PI * 0.4);
+            ctx.lineTo(bodyLength, 0);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#06b6d4';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Cockpit sheen reflection
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(bodyLength * 0.5, -bodyWidth * 0.1, bodyWidth * 0.4, -Math.PI * 0.25, Math.PI * 0.15);
+            ctx.stroke();
+
+            // Side passenger windows
+            ctx.fillStyle = '#020617';
+            ctx.beginPath();
+            ctx.roundRect(-bodyLength * 0.3, -bodyWidth * 0.65, bodyLength * 0.5, bodyWidth * 0.18, 2);
+            ctx.roundRect(-bodyLength * 0.3, bodyWidth * 0.47, bodyLength * 0.5, bodyWidth * 0.18, 2);
+            ctx.fill();
+
+            // 5. Main Rotor Hub & Mast
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(0, 0, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Secondary shiny center bolt
+            ctx.fillStyle = '#94a3b8';
+            ctx.beginPath();
+            ctx.arc(0, 0, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 6. 4 Massive Main Rotor Blades
+            const mainRotorTime = (Date.now() / 250) % (Math.PI * 2);
+            ctx.save();
+            ctx.rotate(mainRotorTime);
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 3.5;
+            const bladeLen = p.w * 0.72;
+
+            for (let b = 0; b < 4; b++) {
+                const angle = (b * Math.PI) / 2;
+                ctx.save();
+                ctx.rotate(angle);
+                ctx.beginPath();
+                ctx.moveTo(8, 0);
+                ctx.lineTo(bladeLen, 0);
+                ctx.stroke();
+
+                ctx.fillStyle = '#ef4444';
+                ctx.fillRect(bladeLen - 8, -1.8, 8, 3.6);
+                ctx.restore();
+            }
+            ctx.restore();
+
+            // 7. Tactical flashing anti-collision strobe beacon
+            const strobeOn = (Date.now() % 1000 < 150);
+            if (strobeOn) {
+                ctx.fillStyle = '#ef4444';
+                ctx.shadowColor = '#ef4444';
+                ctx.shadowBlur = 10;
+                ctx.beginPath();
+                ctx.arc(-bodyLength * 0.25, 0, 3.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'jetski' || lbl.includes('JETSKI') || lbl.includes('JET SKI')) {
+            // High-fidelity racing jet ski (top-down view)
+            ctx.save();
+            ctx.translate(p.x + p.w / 2, p.y + p.h / 2);
+            
+            // Set rotation based on facing or angle
+            let rot = 0;
+            if (p.angle !== undefined) {
+                rot = p.angle;
+            } else if (p.facing === 'left') {
+                rot = Math.PI;
+            } else if (p.facing === 'up') {
+                rot = -Math.PI / 2;
+            } else if (p.facing === 'down') {
+                rot = Math.PI / 2;
+            }
+            ctx.rotate(rot);
+
+            const hw = p.w / 2;
+            const hh = p.h / 2;
+
+            // 1. Water wake & Ripple shadow (since it floats in swimming pool)
+            ctx.fillStyle = 'rgba(0, 229, 255, 0.2)';
+            ctx.beginPath();
+            ctx.arc(-hw * 0.2, 0, hh * 1.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 2. Hull Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+            ctx.beginPath();
+            ctx.moveTo(-hw, -hh * 0.7);
+            ctx.quadraticCurveTo(-hw * 0.5, -hh, hw, 0);
+            ctx.quadraticCurveTo(-hw * 0.5, hh, -hw, hh * 0.7);
+            ctx.closePath();
+            ctx.fill();
+
+            // 3. Sleek Jet Ski Hull Base (Aerodynamic design)
+            // Royal deep blue & metallic silver color palette
+            const hullGrad = ctx.createLinearGradient(-hw, 0, hw, 0);
+            hullGrad.addColorStop(0, '#0f172a'); // Dark slate navy back
+            hullGrad.addColorStop(0.4, '#1e3a8a'); // Rich deep navy blue
+            hullGrad.addColorStop(1, '#1d4ed8'); // Vibrant royal navy blue nose
+            
+            ctx.fillStyle = hullGrad;
+            ctx.strokeStyle = '#e2e8f0'; // Bright metallic silver outline
+            ctx.lineWidth = 1.5;
+            
+            ctx.beginPath();
+            ctx.moveTo(-hw, -hh * 0.75);
+            ctx.quadraticCurveTo(-hw * 0.5, -hh * 0.95, hw, 0); // Upper curved nose
+            ctx.quadraticCurveTo(-hw * 0.5, hh * 0.95, -hw, hh * 0.75); // Lower curved nose
+            ctx.lineTo(-hw * 0.95, hh * 0.3);
+            ctx.lineTo(-hw * 0.95, -hh * 0.3);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            // 4. Center Seat Saddle (Leathery textured saddle)
+            ctx.fillStyle = '#0f172a'; // Black leather
+            ctx.strokeStyle = '#94a3b8'; // Metallic silver seam
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(-hw * 0.65, -hh * 0.28, hw * 0.75, hh * 0.56, 4);
+            ctx.fill();
+            ctx.stroke();
+
+            // 5. Handlebars & Steering Column (chrome / black)
+            ctx.strokeStyle = '#94a3b8'; // Silver steel bracket
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(hw * 0.25, 0); // Stem
+            ctx.stroke();
+
+            // Handlebar bar
+            ctx.strokeStyle = '#0f172a'; // Handlebars
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(hw * 0.25, -hh * 0.65);
+            ctx.lineTo(hw * 0.25, hh * 0.65);
+            ctx.stroke();
+
+            // Handlebar rubber grips
+            ctx.fillStyle = '#cbd5e1'; // Silver grips
+            ctx.fillRect(hw * 0.25 - 1.5, -hh * 0.65, 3, 4);
+            ctx.fillRect(hw * 0.25 - 1.5, hh * 0.65 - 4, 3, 4);
+
+            // 6. Windshield / Control Console (Glass reflection)
+            ctx.fillStyle = '#0f172a'; // Deep console body
+            ctx.beginPath();
+            ctx.moveTo(hw * 0.2, -hh * 0.4);
+            ctx.lineTo(hw * 0.45, -hh * 0.25);
+            ctx.lineTo(hw * 0.45, hh * 0.25);
+            ctx.lineTo(hw * 0.2, hh * 0.4);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#38bdf8'; // Glowing ice blue HUD / windshield screen
+            ctx.beginPath();
+            ctx.moveTo(hw * 0.32, -hh * 0.25);
+            ctx.lineTo(hw * 0.48, -hh * 0.15);
+            ctx.lineTo(hw * 0.48, hh * 0.15);
+            ctx.lineTo(hw * 0.32, hh * 0.25);
+            ctx.closePath();
+            ctx.fill();
+
+            // 7. Footwells (Traction pads)
+            ctx.fillStyle = '#020617'; // Grip tape black
+            ctx.fillRect(-hw * 0.55, -hh * 0.62, hw * 0.5, hh * 0.22);
+            ctx.fillRect(-hw * 0.55, hh * 0.4, hw * 0.5, hh * 0.22);
+
+            // 8. Jet Nozzle at the back
+            ctx.fillStyle = '#475569'; // Silver metallic nozzle
+            ctx.fillRect(-hw - 6, -hh * 0.2, 6, hh * 0.4);
+            ctx.strokeStyle = '#94a3b8';
+            ctx.strokeRect(-hw - 6, -hh * 0.2, 6, hh * 0.4);
+
+            // 9. Sponsor/Racing decals on the side hull (Metallic silver stripes)
+            ctx.fillStyle = '#f8fafc'; // Silver/white metallic stripes
+            ctx.beginPath();
+            ctx.moveTo(hw * 0.1, -hh * 0.82);
+            ctx.lineTo(hw * 0.5, -hh * 0.55);
+            ctx.lineTo(hw * 0.3, -hh * 0.5);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.moveTo(hw * 0.1, hh * 0.82);
+            ctx.lineTo(hw * 0.5, hh * 0.55);
+            ctx.lineTo(hw * 0.3, hh * 0.5);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'train_seat' || lbl.includes('TRAIN SEAT') || lbl.includes('航空座椅') || lbl.includes('PASSENGER SEAT'))) {
+            // High-fidelity Train Passenger Airline Seat Pair
+            ctx.save();
+            // Drop shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            const isFacingRight = p.facing === 'right' || (!p.facing && p.w >= p.h);
+            const isFacingLeft = p.facing === 'left';
+            const isFacingDown = p.facing === 'down';
+
+            // Base frame / seat cushion
+            const seatGrad = ctx.createLinearGradient(p.x, p.y, p.x, p.y + p.h);
+            seatGrad.addColorStop(0, '#334155');
+            seatGrad.addColorStop(1, '#1e293b');
+            ctx.fillStyle = seatGrad;
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 3);
+            ctx.fill();
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1.0;
+            ctx.stroke();
+
+            if (isFacingRight || isFacingLeft) {
+                // Horizontal orientation: 2 seats stacked along height (Y-axis)
+                const halfH = p.h / 2;
+                for (let s = 0; s < 2; s++) {
+                    const sy = p.y + s * halfH;
+                    ctx.fillStyle = '#1e3a8a';
+                    ctx.beginPath();
+                    ctx.roundRect(
+                        isFacingRight ? p.x + 7 : p.x + 2,
+                        sy + 2,
+                        p.w - 9,
+                        halfH - 4,
+                        2
+                    );
+                    ctx.fill();
+                    ctx.strokeStyle = '#3b82f6';
+                    ctx.lineWidth = 0.6;
+                    ctx.stroke();
+
+                    // Headrest / Backrest (white cover #f8fafc)
+                    if (isFacingRight) {
+                        // Facing right: Backrest and white headrest cloth on the LEFT (x: p.x + 1..5)
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(p.x + 1, sy + 1, 5, halfH - 2);
+                        ctx.fillStyle = '#f8fafc';
+                        ctx.fillRect(p.x + 2, sy + 2, 4, halfH - 4);
+                    } else {
+                        // Facing left: Backrest and white headrest cloth on the RIGHT
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(p.x + p.w - 6, sy + 1, 5, halfH - 2);
+                        ctx.fillStyle = '#f8fafc';
+                        ctx.fillRect(p.x + p.w - 6, sy + 2, 4, halfH - 4);
+                    }
+
+                    // Safety buckle
+                    ctx.fillStyle = '#f59e0b';
+                    ctx.fillRect(p.x + p.w * 0.5 - 1.5, sy + halfH / 2 - 1.5, 3, 3);
+                }
+
+                // Armrests (Top, Middle, Bottom)
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(p.x + 4, p.y, p.w - 6, 2.5);
+                ctx.fillRect(p.x + 4, p.y + halfH - 1.25, p.w - 6, 2.5);
+                ctx.fillRect(p.x + 4, p.y + p.h - 2.5, p.w - 6, 2.5);
+            } else {
+                // Two individual seats divide (vertical orientation)
+                const halfW = p.w / 2;
+                for (let s = 0; s < 2; s++) {
+                    const sx = p.x + s * halfW;
+                    ctx.fillStyle = '#1e3a8a';
+                    ctx.beginPath();
+                    ctx.roundRect(sx + 2, p.y + 2, halfW - 4, p.h - 4, 2);
+                    ctx.fill();
+                    ctx.strokeStyle = '#3b82f6';
+                    ctx.lineWidth = 0.6;
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#f8fafc';
+                    if (isFacingDown) {
+                        ctx.fillRect(sx + 3, p.y + 1, halfW - 6, 4);
+                    } else {
+                        ctx.fillRect(sx + 3, p.y + p.h - 5, halfW - 6, 4);
+                    }
+
+                    ctx.fillStyle = '#f59e0b';
+                    ctx.fillRect(sx + halfW / 2 - 1.5, p.y + p.h / 2 - 1.5, 3, 3);
+                }
+
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(p.x, p.y + 2, 2.5, p.h - 4);
+                ctx.fillRect(p.x + halfW - 1.25, p.y + 2, 2.5, p.h - 4);
+                ctx.fillRect(p.x + p.w - 2.5, p.y + 2, 2.5, p.h - 4);
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'water_dispenser' || lbl.includes('WATER DISPENSER') || lbl.includes('WATER') || lbl.includes('饮水机'))) {
+            // Cabin Water Cooler & Hot Dispenser (车厢立式饮水机)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            // Brushed Metallic Base Body Cabinet
+            ctx.fillStyle = '#e2e8f0';
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 3);
+            ctx.fill();
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Translucent Blue Water Jug / Reservoir in middle
+            const bottleRadius = Math.min(p.w, p.h) * 0.32;
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h * 0.42;
+
+            const waterGrad = ctx.createRadialGradient(cx, cy, 1, cx, cy, bottleRadius);
+            waterGrad.addColorStop(0, '#7dd3fc');
+            waterGrad.addColorStop(0.7, '#0284c7');
+            waterGrad.addColorStop(1, '#0369a1');
+
+            ctx.fillStyle = waterGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, bottleRadius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // Inverted water bottle cap detail / water lines inside
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.arc(cx, cy, bottleRadius * 0.5, 0, Math.PI);
+            ctx.stroke();
+
+            // Hot & Cold Taps & Drip Tray Area
+            const trayY = p.y + p.h - 6;
+            ctx.fillStyle = '#334155'; // Dark drip tray
+            ctx.fillRect(p.x + 3, trayY, p.w - 6, 4);
+
+            // Hot Water Tap (Red) & Cold Water Tap (Blue)
+            ctx.fillStyle = '#ef4444'; // Hot tap
+            ctx.fillRect(cx - 4, trayY - 3, 2.5, 2.5);
+            ctx.fillStyle = '#38bdf8'; // Cold tap
+            ctx.fillRect(cx + 1.5, trayY - 3, 2.5, 2.5);
+
+            // Green Power LED
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(p.x + 3, p.y + 3, 2, 2);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'luggage_stack' || lbl.includes('LUGGAGE') || lbl.includes('BAGGAGE') || lbl.includes('行李'))) {
+            // High-Speed Train Tiered Luggage Rack & Suitcases (客舱多层行李架与拉杆箱)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Metal Frame Base Structure
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Multiple Stored Luggage Suitcases & Travel Bags
+            // Suitcase 1: Red Hard-shell Spinner (Left)
+            ctx.fillStyle = '#991b1b'; // Crimson Red
+            ctx.beginPath();
+            ctx.roundRect(p.x + 3, p.y + 3, p.w * 0.42, p.h - 6, 3);
+            ctx.fill();
+            ctx.strokeStyle = '#f87171';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // Corner protectors & Handle for Suitcase 1
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 2, p.y + p.h / 2 - 3, 2, 6); // Handle
+            ctx.fillStyle = '#cbd5e1'; // Silver corner caps
+            ctx.fillRect(p.x + 4, p.y + 4, 3, 3);
+            ctx.fillRect(p.x + 4, p.y + p.h - 7, 3, 3);
+
+            // Suitcase 2: Navy Tactical Duffel / Leather Bag (Right)
+            ctx.fillStyle = '#1e3a8a'; // Deep Navy
+            ctx.beginPath();
+            ctx.roundRect(p.x + p.w * 0.48, p.y + 3, p.w * 0.48, p.h - 6, 4);
+            ctx.fill();
+            ctx.strokeStyle = '#60a5fa';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // Leather straps across duffel
+            ctx.strokeStyle = '#b45309'; // Tan leather straps
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w * 0.62, p.y + 3);
+            ctx.lineTo(p.x + p.w * 0.62, p.y + p.h - 3);
+            ctx.moveTo(p.x + p.w * 0.82, p.y + 3);
+            ctx.lineTo(p.x + p.w * 0.82, p.y + p.h - 3);
+            ctx.stroke();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'train_cart' || lbl.includes('TRAIN CART') || lbl.includes('TROLLEY') || lbl.includes('乘务推车'))) {
+            // Train Cabin Food & Beverage Service Trolley (乘务员不锈钢送餐推车)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            // Stainless steel body
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Metal end push-handles
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x - 2, p.y + 2, 2, p.h - 4);
+            ctx.fillRect(p.x + p.w, p.y + 2, 2, p.h - 4);
+
+            // Drink cans / snack boxes on top tray
+            const canColors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b'];
+            for (let i = 0; i < 4; i++) {
+                const cx = p.x + 4 + i * ((p.w - 8) / 4);
+                ctx.fillStyle = canColors[i % canColors.length];
+                ctx.beginPath();
+                ctx.arc(cx + 2.5, p.y + p.h / 2, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 0.5;
+                ctx.stroke();
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'leather_lounge' || lbl.includes('LEATHER LOUNGE') || lbl.includes('VIP SOFA') || lbl.includes('真皮沙发'))) {
+            // VIP Salon Curved Italian Leather Sofa (VIP商务真皮沙发)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Deep Espresso Brown Leather
+            ctx.fillStyle = '#271006';
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 6);
+            ctx.fill();
+            ctx.strokeStyle = '#78350f';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Padded cushion indentations
+            const cushionCount = Math.max(2, Math.floor(p.w / 20));
+            const cW = p.w / cushionCount;
+            ctx.fillStyle = '#3c1a0c';
+            for (let c = 0; c < cushionCount; c++) {
+                ctx.beginPath();
+                ctx.roundRect(p.x + c * cW + 2, p.y + 4, cW - 4, p.h - 8, 3);
+                ctx.fill();
+                ctx.strokeStyle = '#d97706';
+                ctx.lineWidth = 0.5;
+                ctx.stroke();
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'safe_box' || lbl.includes('SAFE') || lbl.includes('VAULT BOX') || lbl.includes('保险箱'))) {
+            // High-Security Mechanical & Biometric Vault Safe Box (重型机械/电子密码保险箱)
+            ctx.save();
+            const isFacingUp = p.facing === 'up' || (!p.facing && p.y > 100);
+
+            // 1. Drop shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 2. Heavy reinforced steel vault body (Dark slate steel)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 4 Metallic Corner Armor Plates with rivets
+            const cornerSize = 4;
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(p.x, p.y, cornerSize, cornerSize);
+            ctx.fillRect(p.x + p.w - cornerSize, p.y, cornerSize, cornerSize);
+            ctx.fillRect(p.x, p.y + p.h - cornerSize, cornerSize, cornerSize);
+            ctx.fillRect(p.x + p.w - cornerSize, p.y + p.h - cornerSize, cornerSize, cornerSize);
+
+            // Metallic rivet dots
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(p.x + 1, p.y + 1, 1.5, 1.5);
+            ctx.fillRect(p.x + p.w - 2.5, p.y + 1, 1.5, 1.5);
+            ctx.fillRect(p.x + 1, p.y + p.h - 2.5, 1.5, 1.5);
+            ctx.fillRect(p.x + p.w - 2.5, p.y + p.h - 2.5, 1.5, 1.5);
+
+            // 3. Steel vault door panel (Recessed face)
+            // If isFacingUp: Door front face is at TOP (North)
+            // If !isFacingUp: Door front face is at BOTTOM (South)
+            const doorY = isFacingUp ? (p.y + 2) : (p.y + 5);
+            const doorH = p.h - 7;
+            const doorX = p.x + 3;
+            const doorW = p.w - 6;
+
+            ctx.fillStyle = '#1e293b'; // Brushed dark steel door
+            ctx.fillRect(doorX, doorY, doorW, doorH);
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(doorX, doorY, doorW, doorH);
+
+            // Back wall / mounting hinge side (opposite of door front)
+            ctx.fillStyle = '#020617';
+            if (isFacingUp) {
+                // Hinge / wall mount backing at bottom
+                ctx.fillRect(p.x + 1, p.y + p.h - 4, p.w - 2, 3);
+            } else {
+                // Hinge / wall mount backing at top
+                ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, 3);
+            }
+
+            // 4. Biometric Keypad & LED Status Panel
+            // Positioned near top edge if isFacingUp, or near bottom edge if !isFacingUp
+            const controlY = isFacingUp ? (doorY + 3) : (doorY + doorH - 9);
+
+            // Electronic LCD Screen & Status LEDs
+            ctx.fillStyle = '#020617'; // LCD dark screen
+            ctx.fillRect(p.x + 6, controlY, 12, 5);
+            ctx.fillStyle = '#22c55e'; // Green locked/active status light
+            ctx.fillRect(p.x + 8, controlY + 1, 4, 3);
+            ctx.fillStyle = '#38bdf8'; // Cyan digital code readout
+            ctx.fillRect(p.x + 13, controlY + 1.5, 3, 2);
+
+            // 5. Heavy Circular Mechanical Dial & 3-Spoke Turning Wheel Handle
+            const dialX = p.x + p.w - 11;
+            const dialY = doorY + doorH / 2;
+            const dialR = Math.min(doorW, doorH) * 0.28;
+
+            // Brass combination dial ring
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath();
+            ctx.arc(dialX, dialY, dialR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#b45309';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // Inner brass dial cap
+            ctx.fillStyle = '#fef08a';
+            ctx.beginPath();
+            ctx.arc(dialX, dialY, dialR * 0.45, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 3-Spoke Chrome Turn Handle
+            ctx.strokeStyle = '#f8fafc';
+            ctx.lineWidth = 1.2;
+            for (let sp = 0; sp < 3; sp++) {
+                const ang = (sp * Math.PI * 2) / 3 + (isFacingUp ? Math.PI : 0);
+                ctx.beginPath();
+                ctx.moveTo(dialX, dialY);
+                ctx.lineTo(dialX + Math.cos(ang) * (dialR + 2.5), dialY + Math.sin(ang) * (dialR + 2.5));
+                ctx.stroke();
+            }
+
+            // Door Opening Front Lip & Brass Edge facing room
+            ctx.fillStyle = '#fbbf24';
+            if (isFacingUp) {
+                // Door front edge at TOP
+                ctx.fillRect(p.x + 2, p.y, p.w - 4, 1.8);
+            } else {
+                // Door front edge at BOTTOM
+                ctx.fillRect(p.x + 2, p.y + p.h - 1.8, p.w - 4, 1.8);
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'hologram_table' || lbl.includes('HOLOGRAM') || lbl.includes('全息沙盘') || lbl.includes('RADAR TABLE'))) {
+            // 3D Tactical Holographic Projection Sandtable (3D列车运行全息沙盘投影台)
+            ctx.save();
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+            const r = Math.min(p.w, p.h) / 2;
+
+            // Ambient holographic cyan glow field
+            const holoGlow = ctx.createRadialGradient(cx, cy, 5, cx, cy, r * 1.6);
+            holoGlow.addColorStop(0, 'rgba(6, 182, 212, 0.45)');
+            holoGlow.addColorStop(0.5, 'rgba(6, 182, 212, 0.15)');
+            holoGlow.addColorStop(1, 'rgba(6, 182, 212, 0)');
+            ctx.fillStyle = holoGlow;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 1.6, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Heavy octagonal base platform
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#06b6d4';
+            ctx.lineWidth = 2.0;
+            ctx.stroke();
+
+            // Concentric rotating projection rings
+            const time = Date.now() / 800;
+            ctx.strokeStyle = 'rgba(34, 211, 238, 0.8)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 0.7, time, time + Math.PI * 1.4);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 0.45, -time * 1.3, -time * 1.3 + Math.PI * 1.2);
+            ctx.stroke();
+
+            // Mini 3D Train Hologram Wireframe in center
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(cx - 8, cy - 2.5, 16, 5);
+            ctx.strokeStyle = '#22d3ee';
+            ctx.strokeRect(cx - 8, cy - 2.5, 16, 5);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'control_bridge' || lbl.includes('CONTROL BRIDGE') || lbl.includes('PILOT CONSOLE') || lbl.includes('主控驾驶台'))) {
+            // Master Train Bridge Cockpit Multi-Monitor Console (列车主控驾驶台)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Ergonomic matte carbon base
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#06b6d4';
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 3 Multi-screen tactical avionics displays
+            const screenW = (p.w - 16) / 3;
+            for (let sc = 0; sc < 3; sc++) {
+                const sx = p.x + 4 + sc * (screenW + 4);
+                // Bezel
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(sx, p.y + 3, screenW, p.h - 6);
+                // High-tech Screen (Radar / Speedometer / Route graph)
+                ctx.fillStyle = sc === 1 ? '#0369a1' : '#042f2e';
+                ctx.fillRect(sx + 1.5, p.y + 4.5, screenW - 3, p.h - 9);
+                ctx.strokeStyle = '#38bdf8';
+                ctx.lineWidth = 0.5;
+                ctx.strokeRect(sx + 1.5, p.y + 4.5, screenW - 3, p.h - 9);
+
+                // Waveform / gauge line
+                ctx.strokeStyle = '#22d3ee';
+                ctx.lineWidth = 0.8;
+                ctx.beginPath();
+                ctx.moveTo(sx + 3, p.y + p.h / 2);
+                ctx.lineTo(sx + screenW / 2, p.y + p.h / 2 - 2);
+                ctx.lineTo(sx + screenW - 3, p.y + p.h / 2 + 1);
+                ctx.stroke();
+            }
+
+            // Dual Throttle Handles & Emergency Stop Flap
+            ctx.fillStyle = '#ef4444'; // Red emergency brake button
+            ctx.beginPath();
+            ctx.arc(p.x + p.w - 8, p.y + p.h - 6, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'server_rack' || lbl.includes('SERVER RACK') || lbl.includes('COMMS RACK') || lbl.includes('服务器机柜'))) {
+            // Data Server & Comms Cabinet with Blinking LEDs (通信服务器机柜)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Cold-rolled steel rack frame
+            ctx.fillStyle = '#090d16';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 1U/2U Blade Server Units stacked
+            const units = Math.max(3, Math.floor(p.h / 7));
+            const uH = (p.h - 4) / units;
+            const now = Date.now();
+            for (let u = 0; u < units; u++) {
+                const uy = p.y + 2 + u * uH;
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(p.x + 2, uy, p.w - 4, uH - 1);
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 0.4;
+                ctx.strokeRect(p.x + 2, uy, p.w - 4, uH - 1);
+
+                // LED activity lights
+                for (let led = 0; led < 4; led++) {
+                    const ledX = p.x + 5 + led * 4;
+                    const isBlinking = ((now + u * 170 + led * 330) % 600) < 300;
+                    ctx.fillStyle = isBlinking ? (led === 0 ? '#ef4444' : '#22c55e') : '#0f172a';
+                    ctx.fillRect(ledX, uy + uH / 2 - 1, 1.8, 1.8);
+                }
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'gun_turret' || p.type === 'turret' || lbl.includes('TURRET') || lbl.includes('炮台'))) {
+            // Realistic Heavy Military Cannon Turret with Integrated Circular Rotary Ammo Drum (真实军工重型炮台与圆盘弹药架)
+            ctx.save();
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+            const outerR = Math.min(p.w, p.h) / 2;
+            const ammoR = outerR * 0.88; // Circular Ammo Rack Radius
+            const trackR = outerR * 0.68; // Base Turret Ring
+            const domeR = outerR * 0.48;  // Inner Dome
+
+            // Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+            ctx.beginPath();
+            ctx.arc(cx + 3, cy + 3, outerR, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 1. Outermost Heavy Armor Base Plate (Dark Gunmetal Steel)
+            ctx.fillStyle = '#18181b';
+            ctx.beginPath();
+            ctx.arc(cx, cy, outerR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#3f3f46';
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+
+            // 2. Circular Rotary Ammo Rack Drum (圆盘形弹药架结构 - 军工暗色合金)
+            ctx.fillStyle = '#27272a';
+            ctx.beginPath();
+            ctx.arc(cx, cy, ammoR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#52525b';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Radially-arranged Real Brass Artillery Shells loaded around the Circular Rack Ring
+            const shellCount = 14;
+            for (let i = 0; i < shellCount; i++) {
+                const sAng = (i * Math.PI * 2) / shellCount;
+                const shellDist = (trackR + ammoR) / 2;
+                const sx = cx + Math.cos(sAng) * shellDist;
+                const sy = cy + Math.sin(sAng) * shellDist;
+
+                ctx.save();
+                ctx.translate(sx, sy);
+                ctx.rotate(sAng + Math.PI / 2);
+
+                // Brass Casing (Authentic military brass tone)
+                ctx.fillStyle = '#b45309';
+                ctx.fillRect(-2, -4, 4, 8);
+                // Brass Highlight
+                ctx.fillStyle = '#d97706';
+                ctx.fillRect(-1.5, -4, 1.5, 8);
+                // Heavy Armor-Piercing Projectile Head (Olive Drab / Gunmetal with Red Band)
+                ctx.fillStyle = '#3f4236';
+                ctx.beginPath();
+                ctx.moveTo(-2, -4);
+                ctx.lineTo(0, -7.5);
+                ctx.lineTo(2, -4);
+                ctx.closePath();
+                ctx.fill();
+                // Red HE Ordnance Band
+                ctx.fillStyle = '#dc2626';
+                ctx.fillRect(-1.8, -5, 3.6, 1.2);
+
+                ctx.restore();
+            }
+
+            // 5. Dual Heavy Cannon Barrels & Rotating Mantlet Assembly (支持小幅弧度旋转扫描)
+            const isNorth = p.y < 120;
+            const baseAngle = p.facing === 'up' ? -Math.PI / 2 : (p.facing === 'down' ? Math.PI / 2 : (isNorth ? -Math.PI / 2 : Math.PI / 2));
+            // Oscillation angle: back-and-forth scanning within +/-22 degrees (+/- 0.38 rad)
+            const rotSweep = Math.sin(Date.now() / 1400 + (cx * 0.03 + cy * 0.02)) * 0.38;
+            const barrelAng = baseAngle + rotSweep;
+
+            // Dual Steel Auto-Feeder Guide Rails (oriented with turret angle)
+            const feederAng = barrelAng + Math.PI / 2;
+            ctx.strokeStyle = '#71717a';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.moveTo(cx - Math.cos(feederAng) * domeR, cy - Math.sin(feederAng) * domeR);
+            ctx.lineTo(cx - Math.cos(feederAng) * ammoR, cy - Math.sin(feederAng) * ammoR);
+            ctx.moveTo(cx + Math.cos(feederAng) * domeR, cy + Math.sin(feederAng) * domeR);
+            ctx.lineTo(cx + Math.cos(feederAng) * ammoR, cy + Math.sin(feederAng) * ammoR);
+            ctx.stroke();
+
+            // 3. Middle Rotary Race Ring (Bearing Race)
+            const ringGrad = ctx.createRadialGradient(cx, cy, domeR, cx, cy, trackR);
+            ringGrad.addColorStop(0, '#52525b');
+            ringGrad.addColorStop(0.7, '#27272a');
+            ringGrad.addColorStop(1, '#18181b');
+            ctx.fillStyle = ringGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, trackR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#a1a1aa'; // Metallic steel track edge
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Steel Bearing Ball Rivets (rotates slightly with bearing race)
+            ctx.fillStyle = '#e4e4e7';
+            for (let i = 0; i < 8; i++) {
+                const rang = (i * Math.PI) / 4 + rotSweep * 0.5;
+                const rx = cx + Math.cos(rang) * (trackR - 3);
+                const ry = cy + Math.sin(rang) * (trackR - 3);
+                ctx.beginPath();
+                ctx.arc(rx, ry, 1.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // 4. Rotating Armored Turret Mantlet & Main Dome (Gunmetal Titanium)
+            const domeGrad = ctx.createRadialGradient(cx, cy, 2, cx, cy, domeR);
+            domeGrad.addColorStop(0, '#52525b');
+            domeGrad.addColorStop(0.6, '#27272a');
+            domeGrad.addColorStop(1, '#09090b');
+            ctx.fillStyle = domeGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, domeR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#71717a';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Angular Mantlet Armor Plate
+            ctx.fillStyle = '#3f3f46';
+            ctx.beginPath();
+            ctx.arc(cx, cy, domeR * 0.75, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#27272a';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Dual Heavy Cannon Barrels & Muzzle Brakes (Rigidly unified rotation)
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(barrelAng);
+
+            const bLen = outerR + 14;
+            const perpOff = 5;
+
+            // Outer Gun Tube Barrels (Dark Gunmetal Steel)
+            ctx.strokeStyle = '#09090b';
+            ctx.lineWidth = 4.8;
+            ctx.beginPath();
+            ctx.moveTo(0, -perpOff);
+            ctx.lineTo(bLen, -perpOff);
+            ctx.moveTo(0, perpOff);
+            ctx.lineTo(bLen, perpOff);
+            ctx.stroke();
+
+            // Inner Metallic Steel Barrel Highlights
+            ctx.strokeStyle = '#3f3f46';
+            ctx.lineWidth = 1.8;
+            ctx.beginPath();
+            ctx.moveTo(0, -perpOff);
+            ctx.lineTo(bLen - 5, -perpOff);
+            ctx.moveTo(0, perpOff);
+            ctx.lineTo(bLen - 5, perpOff);
+            ctx.stroke();
+
+            // Integrated Steel Muzzle Brakes at tips (100% rigid with barrel angle - zero wobble)
+            const mbLen = 7.5;
+            const mbH = 6;
+            
+            // Left Barrel Muzzle Brake
+            ctx.fillStyle = '#27272a';
+            ctx.fillRect(bLen - 3, -perpOff - mbH / 2, mbLen, mbH);
+            ctx.strokeStyle = '#a1a1aa';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(bLen - 3, -perpOff - mbH / 2, mbLen, mbH);
+
+            // Right Barrel Muzzle Brake
+            ctx.fillStyle = '#27272a';
+            ctx.fillRect(bLen - 3, perpOff - mbH / 2, mbLen, mbH);
+            ctx.strokeStyle = '#a1a1aa';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(bLen - 3, perpOff - mbH / 2, mbLen, mbH);
+
+            // Muzzle Brake Gas Ventilation Slots
+            ctx.fillStyle = '#09090b';
+            ctx.fillRect(bLen - 1, -perpOff - mbH / 2 + 1, 1.5, mbH - 2);
+            ctx.fillRect(bLen + 2, -perpOff - mbH / 2 + 1, 1.5, mbH - 2);
+            ctx.fillRect(bLen - 1, perpOff - mbH / 2 + 1, 1.5, mbH - 2);
+            ctx.fillRect(bLen + 2, perpOff - mbH / 2 + 1, 1.5, mbH - 2);
+
+            ctx.restore();
+
+            // 6. Center Targeting Sight Optics Lens & Status LED
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#ca8a04'; // Tactical Amber Lens Rim
+            ctx.lineWidth = 1.0;
+            ctx.stroke();
+
+            ctx.fillStyle = '#22c55e'; // Operational Green Indicator
+            ctx.beginPath();
+            ctx.arc(cx, cy, 1.8, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'wheel_motor' || p.type === 'bogie_wheel' || lbl.includes('WHEEL') || lbl.includes('MOTOR') || lbl.includes('车轮'))) {
+            // Highly Detailed Heavy Train Bogie Wheel Set & Central Electric Traction Motor (精细工业级中置电动机与动态转动车轮组)
+            ctx.save();
+            const now = performance.now() / 1000;
+            const trainSpeed = 520; // 对应列车巡航时速
+            const isNorthBogie = (p.y < 100);
+
+            // 阴影底衬
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+
+            // 1. Parallel Steel Rails Underneath (真实钢轨与微光)
+            ctx.fillStyle = '#27272a';
+            ctx.fillRect(p.x, p.y + 3, p.w, 3.5);
+            ctx.fillRect(p.x, p.y + p.h - 6.5, p.w, 3.5);
+            ctx.fillStyle = '#a1a1aa'; // Shiny polished steel rail crown
+            ctx.fillRect(p.x, p.y + 4, p.w, 1.2);
+            ctx.fillRect(p.x, p.y + p.h - 5.2, p.w, 1.2);
+
+            // 钢轨反光滑动流光 (随列车平稳高速巡航优雅掠过)
+            const railGleamOffset = (now * 120) % (p.w + 30);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.fillRect(p.x + p.w - railGleamOffset, p.y + 4, 10, 1.2);
+            ctx.fillRect(p.x + p.w - railGleamOffset, p.y + p.h - 5.2, 10, 1.2);
+
+            // 2. Heavy Cast-Iron Bogie Frame Crossbeams
+            ctx.fillStyle = '#18181b';
+            ctx.fillRect(p.x + 4, p.y + 6, p.w - 8, p.h - 12);
+            ctx.strokeStyle = '#3f3f46';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x + 4, p.y + 6, p.w - 8, p.h - 12);
+
+            // 3. Flanged Steel Train Wheels (Left & Right) - 动力转向架旋转车轮组 (精准匹配车速，消除视觉频闪)
+            const w1x = p.x + 16;
+            const w2x = p.x + p.w - 16;
+            const wy = p.y + p.h / 2;
+            const wRadius = Math.min(13, p.h / 2 - 2);
+            // 经过人眼刷新率光学优化的角速度 (顺时针平滑转动，与外部向左飞掠的雪景与大地完美吻合)
+            const wheelRot = now * 6.8;
+
+            [w1x, w2x].forEach((wx, wIdx) => {
+                // Steel Flange Rim
+                ctx.fillStyle = '#3f3f46';
+                ctx.beginPath();
+                ctx.arc(wx, wy, wRadius, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Wheel Tread (Polished Metallic Steel)
+                const wGrad = ctx.createRadialGradient(wx - 2, wy - 2, 1, wx, wy, wRadius - 2);
+                wGrad.addColorStop(0, '#e4e4e7');
+                wGrad.addColorStop(0.7, '#a1a1aa');
+                wGrad.addColorStop(1, '#52525b');
+                ctx.fillStyle = wGrad;
+                ctx.beginPath();
+                ctx.arc(wx, wy, wRadius - 2.5, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Heavy Brake Disc Ring (刹车制动盘底圈)
+                ctx.strokeStyle = '#991b1b';
+                ctx.lineWidth = 1.4;
+                ctx.beginPath();
+                ctx.arc(wx, wy, wRadius - 5.5, 0, Math.PI * 2);
+                ctx.stroke();
+
+                // 旋转轮盘辐条与散热通风孔 (动态转动核心 - 采用清晰的重型三角对称辐条，杜绝频闪混叠)
+                ctx.save();
+                ctx.translate(wx, wy);
+                // 两只轮子稍有微相位差，更加生动自然
+                ctx.rotate(wheelRot + wIdx * 0.95);
+
+                // 3 条重型锻造传动辐条
+                ctx.strokeStyle = '#18181b';
+                ctx.lineWidth = 2.0;
+                for (let a = 0; a < 3; a++) {
+                    const ang = ((Math.PI * 2) / 3) * a;
+                    ctx.beginPath();
+                    ctx.moveTo(Math.cos(ang) * 3.8, Math.sin(ang) * 3.8);
+                    ctx.lineTo(Math.cos(ang) * (wRadius - 3.2), Math.sin(ang) * (wRadius - 3.2));
+                    ctx.stroke();
+                }
+
+                // 3 颗高强度合金固定螺栓 (随轮同步旋转)
+                ctx.fillStyle = '#f59e0b';
+                for (let a = 0; a < 3; a++) {
+                    const ang = ((Math.PI * 2) / 3) * a + Math.PI / 3;
+                    const bx = Math.cos(ang) * 6.8;
+                    const by = Math.sin(ang) * 6.8;
+                    ctx.fillRect(bx - 1, by - 1, 2, 2);
+                }
+
+                // 轮面旋转动态金属反光切线 (环形掠影)
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.arc(0, 0, wRadius - 3.8, 0, Math.PI * 0.5);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(0, 0, wRadius - 3.8, Math.PI, Math.PI * 1.5);
+                ctx.stroke();
+
+                ctx.restore();
+
+                // 轴箱中心固定的重型防尘盖与高亮黄铜轴端
+                ctx.fillStyle = '#18181b';
+                ctx.beginPath();
+                ctx.arc(wx, wy, 4.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#d97706'; // Heavy brass center bolt cap
+                ctx.beginPath();
+                ctx.arc(wx, wy, 2, 0, Math.PI * 2);
+                ctx.fill();
+
+                // 偶发轮轨接触微弱摩擦电弧微光 (极具重工业质感)
+                if (Math.sin(now * 15 + wx * 1.7) > 0.94) {
+                    const sparkY = isNorthBogie ? (wy - wRadius + 1) : (wy + wRadius - 1);
+                    ctx.fillStyle = '#67e8f9';
+                    ctx.fillRect(wx - 1, sparkY - 1, 2, 2);
+                }
+
+                // Heavy Helical Suspension Springs (重型减震弹簧)
+                ctx.fillStyle = '#ca8a04';
+                ctx.fillRect(wx - 4, p.y + 3, 8, 3);
+                ctx.fillRect(wx - 4, p.y + p.h - 6, 8, 3);
+            });
+
+            // 4. Detailed Central Electric Traction Motor Assembly (精细工业中置电动机组)
+            const mWidth = p.w - 52;
+            const mHeight = p.h - 10;
+            const mX = p.x + 26;
+            // 运行机械微震颤 (0.2px 沉稳工业微颤)
+            const motorHum = Math.sin(now * 22 + p.x) * 0.2;
+            const mY = p.y + 5 + motorHum;
+
+            // 4a. Gearbox Housings (减速齿轮箱)
+            ctx.fillStyle = '#27272a';
+            ctx.fillRect(mX - 6, mY + 2, 6, mHeight - 4);
+            ctx.fillRect(mX + mWidth, mY + 2, 6, mHeight - 4);
+            ctx.strokeStyle = '#52525b';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(mX - 6, mY + 2, 6, mHeight - 4);
+            ctx.strokeRect(mX + mWidth, mY + 2, 6, mHeight - 4);
+
+            // Drive Axle Coupling Shafts (高转速旋转传动轴 - 纹理旋转平滑匹配)
+            ctx.fillStyle = '#52525b';
+            ctx.fillRect(w1x + 4, wy - 2, mX - 10 - w1x, 4);
+            ctx.fillRect(mX + mWidth + 6, wy - 2, w2x - 4 - (mX + mWidth + 6), 4);
+
+            // 传动轴旋转切槽流光
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(w1x + 4, wy - 2, mX - 10 - w1x, 4);
+            ctx.rect(mX + mWidth + 6, wy - 2, w2x - 4 - (mX + mWidth + 6), 4);
+            ctx.clip();
+            const shaftStripeOffset = (now * 28) % 8;
+            ctx.strokeStyle = '#d4d4d8';
+            ctx.lineWidth = 1.2;
+            for (let sx = p.x - 10 + shaftStripeOffset; sx < p.x + p.w + 10; sx += 6) {
+                ctx.beginPath();
+                ctx.moveTo(sx, wy - 3);
+                ctx.lineTo(sx + 3, wy + 3);
+                ctx.stroke();
+            }
+            ctx.restore();
+
+            // 4b. Main Cylindrical Motor Stator Housing (3D Metallic Gradient)
+            const mGrad = ctx.createLinearGradient(mX, mY, mX, mY + mHeight);
+            mGrad.addColorStop(0, '#18181b');
+            mGrad.addColorStop(0.25, '#3f3f46');
+            mGrad.addColorStop(0.5, '#52525b');
+            mGrad.addColorStop(0.75, '#27272a');
+            mGrad.addColorStop(1, '#09090b');
+            ctx.fillStyle = mGrad;
+            ctx.fillRect(mX, mY, mWidth, mHeight);
+            ctx.strokeStyle = '#71717a'; // Industrial dark steel frame
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(mX, mY, mWidth, mHeight);
+
+            // 4c. Motor End-Bell Flanges & Ring Bolts
+            ctx.fillStyle = '#27272a';
+            ctx.fillRect(mX, mY, 3, mHeight);
+            ctx.fillRect(mX + mWidth - 3, mY, 3, mHeight);
+            ctx.fillStyle = '#a1a1aa';
+            for (let bY = mY + 3; bY <= mY + mHeight - 3; bY += 4) {
+                ctx.fillRect(mX + 1, bY, 1, 1.5);
+                ctx.fillRect(mX + mWidth - 2, bY, 1, 1.5);
+            }
+
+            // 4d. Heavy Heat Sink Cooling Ribs & Electromagnetic Pulse (电机定子散热片与电磁磁通脉冲)
+            const pulsePhase = now * 3.5;
+            for (let fx = mX + 6; fx < mX + mWidth - 4; fx += 3.5) {
+                // 槽口暗线
+                ctx.strokeStyle = '#18181b';
+                ctx.lineWidth = 1;
+                ctx.beginPath(); ctx.moveTo(fx, mY + 1.5); ctx.lineTo(fx, mY + mHeight - 1.5); ctx.stroke();
+                // 鳍片金属高光
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.8;
+                ctx.beginPath(); ctx.moveTo(fx + 1, mY + 1.5); ctx.lineTo(fx + 1, mY + mHeight - 1.5); ctx.stroke();
+
+                // 电机电磁工作光晕 (磁通沿定子平稳流转)
+                const flux = Math.sin((fx - mX) * 0.35 - pulsePhase);
+                if (flux > 0.45) {
+                    ctx.strokeStyle = `rgba(56, 189, 248, ${(flux - 0.45) * 0.7})`;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath(); ctx.moveTo(fx + 0.5, mY + 2); ctx.lineTo(fx + 0.5, mY + mHeight - 2); ctx.stroke();
+                }
+            }
+
+            // 4e. Top Junction Terminal Box (顶置防爆接线盒)
+            const jBoxW = 16;
+            const jBoxH = 6;
+            const jBoxX = mX + (mWidth - jBoxW) / 2;
+            const jBoxY = mY + 2;
+            ctx.fillStyle = '#18181b';
+            ctx.fillRect(jBoxX, jBoxY, jBoxW, jBoxH);
+            ctx.strokeStyle = '#d97706'; // Warning brass/amber border
+            ctx.lineWidth = 1;
+            ctx.strokeRect(jBoxX, jBoxY, jBoxW, jBoxH);
+            // Junction Box Bolts
+            ctx.fillStyle = '#e4e4e7';
+            ctx.fillRect(jBoxX + 1, jBoxY + 1, 1.5, 1.5);
+            ctx.fillRect(jBoxX + jBoxW - 2.5, jBoxY + 1, 1.5, 1.5);
+            ctx.fillRect(jBoxX + 1, jBoxY + jBoxH - 2.5, 1.5, 1.5);
+            ctx.fillRect(jBoxX + jBoxW - 2.5, jBoxY + jBoxH - 2.5, 1.5, 1.5);
+
+            // 4f. High-Voltage Conduit Cables (动态高压供电电缆微光)
+            ctx.strokeStyle = '#ca8a04';
+            ctx.lineWidth = 1.8;
+            ctx.beginPath();
+            ctx.moveTo(jBoxX + jBoxW, jBoxY + 3);
+            ctx.lineTo(mX + mWidth - 2, mY + 3);
+            ctx.stroke();
+
+            // 电缆能量脉冲小亮点
+            const cablePacket = (now * 10) % Math.max(1, (mX + mWidth - 2) - (jBoxX + jBoxW));
+            ctx.fillStyle = '#fde047';
+            ctx.fillRect(jBoxX + jBoxW + cablePacket, jBoxY + 2.2, 2.5, 1.6);
+
+            // 4g. Status LED Indicator (电机运行状态指示灯平稳呼吸脉动)
+            const ledPulse = (Math.sin(now * 3) + 1) * 0.5;
+            ctx.fillStyle = ledPulse > 0.4 ? '#4ade80' : '#16a34a';
+            ctx.beginPath();
+            ctx.arc(mX + mWidth / 2, mY + mHeight - 4, 1.6, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'diesel_engine' || lbl.includes('DIESEL') || lbl.includes('柴油机'))) {
+            // Highly Realistic Industrial V16 Heavy Diesel Generator Unit (真实工业柴油发电机组)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+            ctx.fillRect(p.x + 5, p.y + 5, p.w, p.h);
+
+            // 1. Heavy Base Skid Frame (Dark Industrial Graphite Steel)
+            ctx.fillStyle = '#18181b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#3f3f46';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Black & Yellow Industrial Hazard Stripes on Corners
+            ctx.fillStyle = '#ca8a04';
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + 10, p.y); ctx.lineTo(p.x, p.y + 10); ctx.closePath(); ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w, p.y); ctx.lineTo(p.x + p.w - 10, p.y); ctx.lineTo(p.x + p.w, p.y + 10); ctx.closePath(); ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y + p.h); ctx.lineTo(p.x + 10, p.y + p.h); ctx.lineTo(p.x, p.y + p.h - 10); ctx.closePath(); ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w, p.y + p.h); ctx.lineTo(p.x + p.w - 10, p.y + p.h); ctx.lineTo(p.x + p.w, p.y + p.h - 10); ctx.closePath(); ctx.fill();
+
+            // Anti-Vibration Mounts
+            ctx.fillStyle = '#52525b';
+            [p.x + 16, p.x + p.w / 2, p.x + p.w - 16].forEach(dx => {
+                ctx.fillRect(dx - 5, p.y + 1, 10, 3);
+                ctx.fillRect(dx - 5, p.y + p.h - 4, 10, 3);
+            });
+
+            // 2. Front Radiator Module (Left Section)
+            const radX = p.x + 6;
+            const radY = p.y + 6;
+            const radW = 24;
+            const radH = p.h - 12;
+
+            ctx.fillStyle = '#09090b';
+            ctx.fillRect(radX, radY, radW, radH);
+            ctx.strokeStyle = '#52525b'; // Industrial steel shroud
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(radX, radY, radW, radH);
+
+            // Radiator Mesh Fins
+            ctx.strokeStyle = '#3f3f46';
+            ctx.lineWidth = 1;
+            for (let ry = radY + 3; ry < radY + radH - 2; ry += 3) {
+                ctx.beginPath(); ctx.moveTo(radX + 2, ry); ctx.lineTo(radX + radW - 2, ry); ctx.stroke();
+            }
+
+            // Twin Radiator Cooling Fan Blades
+            const fanR = radH / 4 - 1;
+            [radY + radH / 4 + 1, radY + (radH * 3) / 4 - 1].forEach(fcy => {
+                const fcx = radX + radW / 2;
+                ctx.fillStyle = '#18181b';
+                ctx.beginPath(); ctx.arc(fcx, fcy, fanR, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#52525b'; ctx.lineWidth = 0.8; ctx.stroke();
+
+                // Spinning Blade Animation
+                const spin = Date.now() / 200;
+                ctx.strokeStyle = '#a1a1aa';
+                ctx.lineWidth = 1.4;
+                for (let b = 0; b < 4; b++) {
+                    const ba = spin + (b * Math.PI) / 2;
+                    ctx.beginPath();
+                    ctx.moveTo(fcx, fcy);
+                    ctx.lineTo(fcx + Math.cos(ba) * (fanR - 1.5), fcy + Math.sin(ba) * (fanR - 1.5));
+                    ctx.stroke();
+                }
+                ctx.fillStyle = '#b91c1c'; // Dark red center hub
+                ctx.beginPath(); ctx.arc(fcx, fcy, 2, 0, Math.PI * 2); ctx.fill();
+            });
+
+            // 3. Central V16 Engine Block & Dual Cylinder Valve Covers (Dark Mechanical Olive/Slate)
+            const engX = p.x + 32;
+            const engW = p.w - 72;
+            const bankH = (p.h - 22) / 2;
+
+            // Crankcase Block
+            ctx.fillStyle = '#1c1917';
+            ctx.fillRect(engX, p.y + 6, engW, p.h - 12);
+            ctx.strokeStyle = '#44403c';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(engX, p.y + 6, engW, p.h - 12);
+
+            // North & South Cylinder Head Valve Covers
+            const coverN_Y = p.y + 7;
+            const coverS_Y = p.y + p.h - 7 - bankH;
+
+            [coverN_Y, coverS_Y].forEach((cyPos, idx) => {
+                const coverGrad = ctx.createLinearGradient(engX, cyPos, engX, cyPos + bankH);
+                coverGrad.addColorStop(0, '#2d3029');
+                coverGrad.addColorStop(0.5, '#45483f');
+                coverGrad.addColorStop(1, '#1c1d19');
+                ctx.fillStyle = coverGrad;
+                ctx.fillRect(engX + 4, cyPos, engW - 8, bankH);
+                ctx.strokeStyle = '#575a50';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(engX + 4, cyPos, engW - 8, bankH);
+
+                // High Pressure Fuel Injector Plugs
+                ctx.fillStyle = '#ca8a04'; // Brass injector caps
+                for (let ix = engX + 12; ix < engX + engW - 12; ix += 12) {
+                    const plugY = idx === 0 ? cyPos + bankH - 3 : cyPos + 1;
+                    ctx.fillRect(ix, plugY, 4, 2);
+                }
+            });
+
+            // Twin Turbochargers & Exhaust Manifolds (Center Valley)
+            const turboX = engX + engW / 2;
+            const turboY = p.y + p.h / 2;
+            ctx.fillStyle = '#09090b';
+            ctx.beginPath(); ctx.arc(turboX - 16, turboY, 8, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(turboX + 16, turboY, 8, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#b45309'; // Oxidized copper/bronze heat pipes
+            ctx.lineWidth = 1.4;
+            ctx.stroke();
+
+            // Twin Vertical Exhaust Stacks
+            ctx.fillStyle = '#3f3f46';
+            ctx.fillRect(turboX - 19, turboY - 3, 6, 6);
+            ctx.fillRect(turboX + 13, turboY - 3, 6, 6);
+            ctx.fillStyle = '#09090b'; // Soot tips
+            ctx.fillRect(turboX - 18, turboY - 2, 4, 4);
+            ctx.fillRect(turboX + 14, turboY - 2, 4, 4);
+
+            // 4. Rear Generator Head (Heavy Slate Navy/Dark Alloy)
+            const genX = p.x + p.w - 36;
+            const genY = p.y + 6;
+            const genW = 30;
+            const genH = p.h - 12;
+
+            const genGrad = ctx.createLinearGradient(genX, genY, genX, genY + genH);
+            genGrad.addColorStop(0, '#1e293b');
+            genGrad.addColorStop(0.5, '#334155');
+            genGrad.addColorStop(1, '#0f172a');
+            ctx.fillStyle = genGrad;
+            ctx.fillRect(genX, genY, genW, genH);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(genX, genY, genW, genH);
+
+            // Crankshaft Coupling
+            ctx.fillStyle = '#18181b';
+            ctx.fillRect(genX - 4, p.y + p.h / 2 - 8, 4, 16);
+
+            // Control Box & Meters
+            ctx.fillStyle = '#09090b';
+            ctx.fillRect(genX + 6, genY + 4, 18, 12);
+            ctx.strokeStyle = '#475569'; ctx.lineWidth = 0.8; ctx.strokeRect(genX + 6, genY + 4, 18, 12);
+
+            // LEDs
+            ctx.fillStyle = '#22c55e'; ctx.fillRect(genX + 8, genY + 6, 3, 3);
+            ctx.fillStyle = '#ca8a04'; ctx.fillRect(genX + 13, genY + 6, 3, 3);
+            ctx.fillStyle = '#38bdf8'; ctx.fillRect(genX + 18, genY + 6, 3, 3);
+
+            // Emergency Stop Button
+            ctx.fillStyle = '#dc2626';
+            ctx.beginPath(); ctx.arc(genX + genW - 6, genY + genH - 6, 3, 0, Math.PI * 2); ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'ammo_rack' || lbl.includes('AMMO') || lbl.includes('弹药架') || lbl.includes('SHELL RACK'))) {
+            // Heavy Armored Artillery Shell & Ammo Rack (重型炮弹与弹药架)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 1. Heavy Armor Frame
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 2. Rows of Artillery Shells
+            const shellW = 6;
+            const shellH = p.h - 8;
+            const shellY = p.y + 4;
+            const spacing = 8;
+
+            for (let sx = p.x + 6; sx < p.x + p.w - 6; sx += spacing) {
+                ctx.fillStyle = '#d97706';
+                ctx.fillRect(sx, shellY + 4, shellW, shellH - 4);
+                ctx.fillStyle = '#ef4444';
+                ctx.beginPath();
+                ctx.moveTo(sx, shellY + 4);
+                ctx.lineTo(sx + shellW / 2, shellY);
+                ctx.lineTo(sx + shellW, shellY + 4);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            // 3. Locking Steel Strap
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+            ctx.fillRect(p.x, p.y + p.h / 2 - 2, p.w, 4);
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(p.x, p.y + p.h / 2 - 2, p.w, 4);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'turbine_engine' || lbl.includes('TURBINE') || lbl.includes('REACTOR') || lbl.includes('动力引擎') || lbl.includes('涡轮'))) {
+            // Heavy Magnetohydrodynamic Power Turbine Engine (重型动力涡轮反应堆)
+            ctx.save();
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+            const r = Math.min(p.w, p.h) / 2;
+
+            // Heat glow halo
+            const engineHeat = ctx.createRadialGradient(cx, cy, 6, cx, cy, r * 1.5);
+            engineHeat.addColorStop(0, 'rgba(239, 68, 68, 0.45)');
+            engineHeat.addColorStop(0.4, 'rgba(249, 115, 22, 0.25)');
+            engineHeat.addColorStop(1, 'rgba(249, 115, 22, 0)');
+            ctx.fillStyle = engineHeat;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 1.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Heavy Octagonal Cast Iron Housing
+            ctx.fillStyle = '#1e1b18';
+            ctx.beginPath();
+            for (let i = 0; i < 8; i++) {
+                const ang = (i * Math.PI) / 4;
+                const ox = cx + Math.cos(ang) * r;
+                const oy = cy + Math.sin(ang) * r;
+                if (i === 0) ctx.moveTo(ox, oy);
+                else ctx.lineTo(ox, oy);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#f97316'; // Glowing orange frame
+            ctx.lineWidth = 2.0;
+            ctx.stroke();
+
+            // Turbine Stator Core & Spinning Rotor Blades
+            const spin = Date.now() / 300;
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 0.65, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#ea580c';
+            ctx.lineWidth = 1.4;
+            ctx.stroke();
+
+            // Turbine multi-blades
+            ctx.strokeStyle = '#f97316';
+            ctx.lineWidth = 1.8;
+            for (let b = 0; b < 6; b++) {
+                const bAng = spin + (b * Math.PI) / 3;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx + Math.cos(bAng) * (r * 0.6), cy + Math.sin(bAng) * (r * 0.6));
+                ctx.stroke();
+            }
+
+            // Core Energy Plasma Singularity in Center
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#fef08a';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'power_generator' || lbl.includes('GENERATOR') || lbl.includes('POWER TRANSFORMER') || lbl.includes('配电柜') || lbl.includes('变电'))) {
+            // High Voltage Electrical Transformer & Distribution Unit (380V高压配电变电柜)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Industrial dark armor steel
+            ctx.fillStyle = '#1c1917';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#eab308'; // High-voltage yellow warning frame
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // High Voltage Warning Triangle in Center
+            const triCX = p.x + p.w / 2;
+            const triCY = p.y + p.h / 2;
+            ctx.fillStyle = '#eab308';
+            ctx.beginPath();
+            ctx.moveTo(triCX, triCY - 6);
+            ctx.lineTo(triCX - 6, triCY + 5);
+            ctx.lineTo(triCX + 6, triCY + 5);
+            ctx.closePath();
+            ctx.fill();
+            // Black lightning bolt inside triangle
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.moveTo(triCX, triCY - 4);
+            ctx.lineTo(triCX - 2, triCY + 1);
+            ctx.lineTo(triCX + 1, triCY + 1);
+            ctx.lineTo(triCX - 1, triCY + 4);
+            ctx.lineTo(triCX + 2, triCY);
+            ctx.lineTo(triCX - 1, triCY);
+            ctx.closePath();
+            ctx.fill();
+
+            // Analog Dial Voltmeters
+            ctx.fillStyle = '#f8fafc';
+            ctx.beginPath();
+            ctx.arc(p.x + 8, p.y + 7, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#ef4444'; // Red meter needle
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 8, p.y + 7);
+            ctx.lineTo(p.x + 9.5, p.y + 5.5);
+            ctx.stroke();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'shipping_container' || lbl.includes('CONTAINER') || lbl.includes('集装箱')) && !lbl.includes('CARGO CRATE') && p.type !== 'military_cargo_box') {
+            // Heavy Intermodal Freight Shipping Container (重型标准化货运集装箱)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Container Colors: Military Olive, Hazard Orange, or Deep Navy Blue
+            let contColor = '#2e3a24'; // Military olive
+            let trimColor = '#4d5d3e';
+            if (lbl.includes('HAZARD') || lbl.includes('DANGER') || p.x % 3 === 0) {
+                contColor = '#7c2d12'; // Rust Orange/Red
+                trimColor = '#ea580c';
+            } else if (lbl.includes('CRYO') || p.x % 2 === 0) {
+                contColor = '#1e3a5f'; // Cold Chain Navy
+                trimColor = '#3b82f6';
+            }
+
+            ctx.fillStyle = contColor;
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = trimColor;
+            ctx.lineWidth = 2.0;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Corrugated steel vertical ribs (瓦楞钢板波纹)
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.lineWidth = 1.2;
+            const ribStep = 8;
+            for (let rx = p.x + 8; rx < p.x + p.w - 8; rx += ribStep) {
+                ctx.beginPath();
+                ctx.moveTo(rx, p.y + 2);
+                ctx.lineTo(rx, p.y + p.h - 2);
+                ctx.stroke();
+            }
+
+            // Heavy Locking Bars on container doors
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(p.x + 3, p.y + 4, 3, p.h - 8);
+            ctx.fillRect(p.x + p.w - 6, p.y + 4, 3, p.h - 8);
+
+            // Stenciled Hazard Warning / ID Label in center
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(p.x + p.w / 2 - 8, p.y + p.h / 2 - 4, 16, 8);
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + p.w / 2 - 6, p.y + p.h / 2 - 2, 12, 4);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'forklift' || lbl.includes('FORKLIFT') || lbl.includes('叉车'))) {
+            // Industrial Hydraulic Warehouse Forklift (工业液压叉车)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // High-visibility Industrial Yellow Chassis
+            ctx.fillStyle = '#eab308';
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w - 12, p.h, 4);
+            ctx.fill();
+            ctx.strokeStyle = '#ca8a04';
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+
+            // Overhead Operator Protective Roll Cage
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x + 8, p.y + 4, p.w - 26, p.h - 8);
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(p.x + 8, p.y + 4, p.w - 26, p.h - 8);
+
+            // Driver Steering Wheel & Seat
+            ctx.fillStyle = '#451a03'; // Seat
+            ctx.fillRect(p.x + 12, p.y + p.h / 2 - 4, 8, 8);
+
+            // Front Steel Lifting Mast & Dual Heavy Forks (前置门架与货叉)
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + p.w - 12, p.y + 3, 4, p.h - 6); // Mast
+            // Dual forks extending right
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(p.x + p.w - 8, p.y + 5, 8, 2.5);
+            ctx.fillRect(p.x + p.w - 8, p.y + p.h - 7.5, 8, 2.5);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'pallet_stack' || lbl.includes('PALLET') || lbl.includes('木托盘') || lbl.includes('CARGO PALLET'))) {
+            // Wooden Cargo Pallet with Strapped Goods (带尼龙绑带的木托盘货物)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // Base wood pallet planks
+            ctx.fillStyle = '#b45309';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#78350f';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // Boxed goods / tarpaulin cover
+            ctx.fillStyle = '#d97706';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w - 6, p.h - 6);
+
+            // Cross nylon cargo securing straps (黄黑防坠尼龙拉紧带)
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 3, p.y + 3);
+            ctx.lineTo(p.x + p.w - 3, p.y + p.h - 3);
+            ctx.moveTo(p.x + p.w - 3, p.y + 3);
+            ctx.lineTo(p.x + 3, p.y + p.h - 3);
+            ctx.stroke();
+
+            // Center steel buckle
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(p.x + p.w / 2 - 2, p.y + p.h / 2 - 2, 4, 4);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'infantry_fighting_vehicle' || lbl.includes('INFANTRY FIGHTING VEHICLE') || lbl.includes('步战车') || lbl.includes('IFV'))) {
+            // =========================================================================
+            // 步战车 (Infantry Fighting Vehicle - 重写为极其逼真、科学比例的并列双管现代步战车)
+            // 100% 还原真实步战车（例如 04A / BMP-3 系列）的顶部透视图比例与硬核外形细节
+            // =========================================================================
+            ctx.save();
+            
+            // 地面阴影 (柔和环境光遮蔽)
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w + 2, p.h + 2);
+
+            const bodyW = p.w; // 260
+            const bodyH = p.h; // 110
+
+            // 1. 写实连续金属履带 (两侧仅端部露出，中间受侧裙保护)
+            const trackH = 15;
+            const topTrackY = p.y + 2;
+            const botTrackY = p.y + p.h - 17;
+
+            [topTrackY, botTrackY].forEach((ty, tIdx) => {
+                // 黑色重型连续履带带
+                ctx.fillStyle = '#0f1420';
+                ctx.fillRect(p.x + 10, ty, bodyW - 20, trackH);
+                ctx.strokeStyle = '#1e293b';
+                ctx.lineWidth = 1.2;
+                ctx.strokeRect(p.x + 10, ty, bodyW - 20, trackH);
+
+                // 履带板节销细节与人字形防滑块 (仅在露出的前后端明显)
+                for (let tx = p.x + 12; tx < p.x + bodyW - 12; tx += 6) {
+                    if (tx < p.x + 35 || tx > p.x + bodyW - 35) {
+                        ctx.strokeStyle = '#334155';
+                        ctx.lineWidth = 0.8;
+                        ctx.beginPath();
+                        ctx.moveTo(tx, ty);
+                        ctx.lineTo(tx, ty + trackH);
+                        ctx.stroke();
+
+                        // 橡胶减震防滑块
+                        ctx.fillStyle = '#090a10';
+                        ctx.fillRect(tx + 1, ty + 1.5, 3.5, 3.5);
+                        ctx.fillRect(tx + 1, ty + trackH - 5, 3.5, 3.5);
+                    }
+                }
+
+                // 履带端部主动轮/诱导轮侧影
+                ctx.fillStyle = '#2d3748';
+                ctx.beginPath();
+                ctx.arc(p.x + 16, ty + trackH / 2, 5.5, 0, Math.PI * 2);
+                ctx.arc(p.x + bodyW - 16, ty + trackH / 2, 5.5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // 2. 重型模块化复合裙装甲 (Composite Side Skirts) - 覆盖在履带中段
+            const skirtW = bodyW - 48;
+            const skirtX = p.x + 24;
+            const topSkirtY = p.y + 2;
+            const botSkirtY = p.y + bodyH - 17;
+
+            // 北侧裙板
+            ctx.fillStyle = '#283548'; // 专业深钢甲灰色
+            ctx.fillRect(skirtX, topSkirtY, skirtW, 8);
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(skirtX, topSkirtY, skirtW, 8);
+
+            // 南侧裙板
+            ctx.fillStyle = '#222e3d';
+            ctx.fillRect(skirtX, botSkirtY + 7, skirtW, 8);
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(skirtX, botSkirtY + 7, skirtW, 8);
+
+            // 裙板上的模块化拼接线与铰链螺栓
+            ctx.strokeStyle = '#10170d';
+            ctx.lineWidth = 1.0;
+            for (let sx = skirtX + 30; sx < skirtX + skirtW - 15; sx += 32) {
+                // 北裙拼接线
+                ctx.beginPath();
+                ctx.moveTo(sx, topSkirtY);
+                ctx.lineTo(sx, topSkirtY + 8);
+                ctx.stroke();
+                // 铰链
+                ctx.fillStyle = '#4a5568';
+                ctx.fillRect(sx - 2, topSkirtY + 1, 4, 1.8);
+
+                // 南裙拼接线
+                ctx.beginPath();
+                ctx.moveTo(sx, botSkirtY + 7);
+                ctx.lineTo(sx, botSkirtY + 15);
+                ctx.stroke();
+                // 铰链
+                ctx.fillStyle = '#4a5568';
+                ctx.fillRect(sx - 2, botSkirtY + 12, 4, 1.8);
+            }
+
+            // 3. 车体主装甲壳体 (Main Armored Hull) - 黄金长宽比 2.25:1 视觉比例
+            const hullX = p.x + 12;
+            const hullY = p.y + 14;
+            const hullW = bodyW - 24; // 236
+            const hullH = bodyH - 28; // 82
+
+            // 斜角楔形车体轮廓
+            ctx.fillStyle = '#2a3b25';
+            ctx.beginPath();
+            ctx.moveTo(hullX, hullY); // 左上角
+            ctx.lineTo(hullX + hullW - 25, hullY); // 前斜装甲上侧切线起角
+            ctx.lineTo(hullX + hullW, hullY + 14); // 尖端右上切角
+            ctx.lineTo(hullX + hullW, hullY + hullH - 14); // 尖端右下切角
+            ctx.lineTo(hullX + hullW - 25, hullY + hullH); // 前斜装甲下侧切线落角
+            ctx.lineTo(hullX, hullY + hullH); // 左下角
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#10180d';
+            ctx.lineWidth = 2.0;
+            ctx.stroke();
+
+            // 倾斜表面裁剪保护，添加战术数码三色迷彩
+            ctx.save();
+            ctx.clip();
+
+            // 迷彩块 1 - 碳素黑斑块 (Carbon Black Camo Patch)
+            ctx.fillStyle = '#181f14';
+            ctx.beginPath();
+            ctx.ellipse(hullX + 45, hullY + 20, 36, 16, 0.4, 0, Math.PI * 2);
+            ctx.ellipse(hullX + 155, hullY + hullH - 15, 45, 18, -0.2, 0, Math.PI * 2);
+            ctx.ellipse(hullX + hullW - 35, hullY + 15, 25, 12, 0.3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 迷彩块 2 - 荒漠狼棕斑块 (Field Brown Camo Patch)
+            ctx.fillStyle = '#3f3123';
+            ctx.beginPath();
+            ctx.ellipse(hullX + 110, hullY + hullH - 18, 38, 14, 0.15, 0, Math.PI * 2);
+            ctx.ellipse(hullX + hullW - 55, hullY + hullH - 15, 28, 12, -0.25, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 迷彩块 3 - 橄榄亮绿斑块 (Light Olive Camo Patch)
+            ctx.fillStyle = '#3a5133';
+            ctx.beginPath();
+            ctx.ellipse(hullX + 100, hullY + 18, 28, 12, -0.1, 0, Math.PI * 2);
+            ctx.ellipse(hullX + 190, hullY + hullH / 2, 32, 14, 0.3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 车身表面防滑细砂网纹
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.lineWidth = 0.8;
+            for (let lx = hullX + 15; lx < hullX + hullW - 20; lx += 12) {
+                ctx.beginPath();
+                ctx.moveTo(lx, hullY);
+                ctx.lineTo(lx + 10, hullY + hullH);
+                ctx.stroke();
+            }
+
+            // 发动机排气与散热格栅 (位于车身右前部动力舱)
+            const engX = hullX + hullW - 68;
+            const engY = hullY + 6;
+            const engW = 24;
+            const engH = hullH - 12;
+
+            ctx.fillStyle = '#0d0f14';
+            ctx.fillRect(engX, engY, engW, engH);
+            ctx.strokeStyle = '#2d3748';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(engX, engY, engW, engH);
+
+            // 金属排气叶片与百叶窗网孔
+            ctx.strokeStyle = '#4a5568';
+            ctx.lineWidth = 1.0;
+            for (let ey = engY + 4; ey < engY + engH - 4; ey += 4) {
+                ctx.beginPath();
+                ctx.moveTo(engX + 2, ey);
+                ctx.lineTo(engX + engW - 2, ey);
+                ctx.stroke();
+            }
+
+            // 车辆折叠防浪板 (Trim Vane) - 车头最前端
+            const vaneX = hullX + hullW - 14;
+            ctx.fillStyle = '#22301e';
+            ctx.beginPath();
+            ctx.moveTo(vaneX, hullY + 4);
+            ctx.lineTo(hullX + hullW - 2, hullY + 12);
+            ctx.lineTo(hullX + hullW - 2, hullY + hullH - 12);
+            ctx.lineTo(vaneX, hullY + hullH - 4);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#10160d';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // 驾驶舱舱盖与三周反射潜望镜
+            const dHatchX = hullX + hullW - 35;
+            const dHatchY = hullY + 14;
+            ctx.fillStyle = '#1e291b';
+            ctx.beginPath();
+            ctx.arc(dHatchX, dHatchY, 7, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#000';
+            ctx.stroke();
+            // 三联装蓝色反光镜
+            ctx.fillStyle = '#0ea5e9';
+            ctx.fillRect(dHatchX + 2, dHatchY - 4, 2.5, 2);
+            ctx.fillRect(dHatchX + 4, dHatchY - 1, 2.5, 2);
+            ctx.fillRect(dHatchX + 2, dHatchY + 2, 2.5, 2);
+
+            // 车尾载员舱双扇液压安全门
+            const rearDoorX = hullX + 1;
+            const rearDoorY = hullY + 10;
+            const rDoorW = 8;
+            const rDoorH = hullH - 20;
+
+            ctx.fillStyle = '#161f13';
+            ctx.fillRect(rearDoorX, rearDoorY, rDoorW, rDoorH);
+            ctx.strokeStyle = '#0a0d09';
+            ctx.strokeRect(rearDoorX, rearDoorY, rDoorW, rDoorH);
+            // 车门中缝
+            ctx.strokeStyle = '#050705';
+            ctx.beginPath();
+            ctx.moveTo(rearDoorX, rearDoorY + rDoorH / 2);
+            ctx.lineTo(rearDoorX + rDoorW, rearDoorY + rDoorH / 2);
+            ctx.stroke();
+
+            // 车身战术识别符
+            ctx.font = 'bold 8px Courier New';
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.fillText('★04A-IFV', hullX + 22, hullY + hullH / 2 + 3);
+
+            ctx.restore(); // 结束车体clip
+
+            // 4. 写实比例焊接式多面体炮塔 (Proportioned Angular Armored Turret)
+            // 真实比例：炮塔底座外径恰当，位于车身中后部，符合发动机前置布局
+            const turCenterX = p.x + bodyW * 0.44; // ~114 像素处
+            const turCenterY = p.y + bodyH / 2;
+            const turRadius = 26; // 炮塔最大回转半径，完美适配
+
+            // 炮塔阴影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.beginPath();
+            ctx.arc(turCenterX + 2, turCenterY + 2, turRadius + 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 多面体倾斜焊接装甲线条
+            ctx.fillStyle = '#1e291a';
+            ctx.beginPath();
+            ctx.moveTo(turCenterX - 28, turCenterY - 20); // 后
+            ctx.lineTo(turCenterX + 12, turCenterY - 22); // 前削角起
+            ctx.lineTo(turCenterX + 26, turCenterY - 11); // 炮盾右侧北角
+            ctx.lineTo(turCenterX + 26, turCenterY + 11); // 炮盾右侧南角
+            ctx.lineTo(turCenterX + 12, turCenterY + 22); // 前削角终
+            ctx.lineTo(turCenterX - 28, turCenterY + 20); // 后
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#0b100a';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+
+            // 炮塔表面迷彩斑块
+            ctx.fillStyle = '#344530';
+            ctx.beginPath();
+            ctx.ellipse(turCenterX + 6, turCenterY - 10, 15, 8, 0.2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#10150e';
+            ctx.beginPath();
+            ctx.ellipse(turCenterX - 14, turCenterY + 10, 10, 6, -0.3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 炮塔后置储物挂格 (Bustle Basket)
+            ctx.strokeStyle = '#4a5568';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(turCenterX - 36, turCenterY - 14, 8, 28);
+            ctx.fillStyle = '#0f141a';
+            ctx.fillRect(turCenterX - 36, turCenterY - 14, 8, 28);
+            for (let by = turCenterY - 10; by < turCenterY + 14; by += 5) {
+                ctx.beginPath();
+                ctx.moveTo(turCenterX - 36, by);
+                ctx.lineTo(turCenterX - 28, by);
+                ctx.stroke();
+            }
+
+            // 5. 黄金比例并列双武器系统 (Coaxial Weapons - 04A式主武器：100mm低压炮 + 30mm高压机炮)
+            // 真实比例：两门炮并列排放，长度自然适中，仅稍微伸出车头，威严而不累赘
+            const mantletX = turCenterX + 24;
+            const mantletY = turCenterY;
+
+            // 装甲炮盾 (Gun Mantlet with Coaxial Shroud)
+            ctx.fillStyle = '#0f131a';
+            ctx.fillRect(mantletX, mantletY - 9, 10, 18);
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(mantletX, mantletY - 9, 10, 18);
+
+            // A) 100mm 低压滑膛炮 (粗且较短，主要发射反坦克导弹和高爆弹)
+            const lowGunH = 5.0;
+            const lowGunW = 55; // 伸出到车体前部，不超出
+            ctx.fillStyle = '#2d3748';
+            ctx.fillRect(mantletX + 10, mantletY - 5.5, lowGunW, lowGunH);
+            ctx.strokeStyle = '#0f131a';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(mantletX + 10, mantletY - 5.5, lowGunW, lowGunH);
+            // 粗根排烟器装置 (Fume Extractor)
+            ctx.fillStyle = '#1a202c';
+            ctx.fillRect(mantletX + 22, mantletY - 6.5, 14, lowGunH + 2);
+
+            // B) 30mm 高压机炮 (细且较长，炮身伸出车头 8 像素)
+            // 真实火炮炮口坐标刚好在 p.x + bodyW + 8
+            const autocannonEndX = p.x + bodyW + 8;
+            const autocannonStartX = mantletX + 10;
+            const autocannonY = mantletY + 2.0; // 与 100 炮并列
+            const autocannonW = autocannonEndX - autocannonStartX;
+
+            ctx.fillStyle = '#111827';
+            ctx.fillRect(autocannonStartX, autocannonY - 1.5, autocannonW, 3.0);
+
+            // 30mm 炮身多孔散热套筒
+            ctx.fillStyle = '#1f2937';
+            ctx.fillRect(autocannonStartX, autocannonY - 2.5, 28, 5.0);
+            ctx.strokeStyle = '#111827';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(autocannonStartX, autocannonY - 2.5, 28, 5.0);
+            // 散热孔
+            ctx.fillStyle = '#4b5563';
+            for (let hx = autocannonStartX + 4; hx < autocannonStartX + 24; hx += 4) {
+                ctx.fillRect(hx, autocannonY - 1.5, 1.2, 1.2);
+                ctx.fillRect(hx, autocannonY + 0.5, 1.2, 1.2);
+            }
+
+            // 炮口双室退缩制退器 (Muzzle Brake)
+            ctx.fillStyle = '#030712';
+            ctx.fillRect(autocannonEndX - 8, autocannonY - 2.5, 8, 5.0);
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(autocannonEndX - 8, autocannonY - 2.5, 8, 5.0);
+
+            // C) 7.62毫米并列机枪 (Coaxial MG)
+            ctx.fillStyle = '#000';
+            ctx.fillRect(mantletX + 10, mantletY - 8.5, 15, 1.5);
+
+            // 6. 炮塔附具：双联装反坦克导弹发射箱与观瞄
+            // A) 侧置重型反坦克导弹发射箱 (HJ-8 / HJ-10 红箭系列双联发射架)
+            const podX = turCenterX - 10;
+            const podY = turCenterY - 32;
+            const podW = 32;
+            const podH = 10;
+            
+            ctx.fillStyle = '#1e291b';
+            ctx.fillRect(podX, podY, podW, podH);
+            ctx.strokeStyle = '#050705';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(podX, podY, podW, podH);
+            // 双筒导弹前防尘红盖
+            ctx.fillStyle = '#e11d48';
+            ctx.fillRect(podX + podW - 2, podY + 1.5, 3, 2.5);
+            ctx.fillRect(podX + podW - 2, podY + 6.0, 3, 2.5);
+
+            // B) 车长周视镜 (CITV) 与 炮长多通道观瞄镜
+            const citvX = turCenterX - 10;
+            const citvY = turCenterY + 10;
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(citvX, citvY, 5.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#475569';
+            ctx.stroke();
+            // 潜望镜头镀膜
+            ctx.fillStyle = '#6366f1';
+            ctx.beginPath();
+            ctx.arc(citvX + 1.5, citvY, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 炮长微光电视/红外测距复合瞄准仪 (在右前方)
+            const gpsX = turCenterX + 10;
+            const gpsY = turCenterY - 15;
+            ctx.fillStyle = '#111827';
+            ctx.fillRect(gpsX, gpsY, 10, 8);
+            ctx.strokeStyle = '#4b5563';
+            ctx.strokeRect(gpsX, gpsY, 10, 8);
+            // 蓝色反射物镜
+            ctx.fillStyle = '#06b6d4';
+            ctx.fillRect(gpsX + 6, gpsY + 1.5, 3.5, 5.0);
+
+            // C) 4 联装烟幕弹电控抛射器 (两侧倾斜排列，共 8 具)
+            for (let i = 0; i < 4; i++) {
+                // 北侧
+                ctx.fillStyle = '#374151';
+                ctx.fillRect(turCenterX + 2 + i * 5, turCenterY - 21, 3, 3);
+                ctx.fillStyle = '#111827';
+                ctx.fillRect(turCenterX + 2 + i * 5 + 1, turCenterY - 22, 1, 1.5);
+                // 南侧
+                ctx.fillStyle = '#374151';
+                ctx.fillRect(turCenterX + 2 + i * 5, turCenterY + 18, 3, 3);
+                ctx.fillStyle = '#111827';
+                ctx.fillRect(turCenterX + 2 + i * 5 + 1, turCenterY + 20.5, 1, 1.5);
+            }
+
+            // 7. 装载约束：重型紧线拉链和地锚捆扎 (Rashing Chains & Tensioners)
+            // 四个角落绘制拉力拉紧链条，倾斜固定在平板车厢甲板的地锚上
+            const drawAnchorChain = (sx, sy, tx, ty) => {
+                ctx.strokeStyle = 'rgba(71, 85, 105, 0.75)'; // 高碳钢链条色
+                ctx.lineWidth = 1.6;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath();
+                ctx.moveTo(sx, sy);
+                ctx.lineTo(tx, ty);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // 链条中央的棘轮手动拉紧双向调节阀 (Ratchet Tensioner Buckle)
+                const mx = (sx + tx) / 2;
+                const my = (sy + ty) / 2;
+                ctx.fillStyle = '#334155';
+                ctx.fillRect(mx - 4, my - 2.5, 8, 5.0);
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(mx - 4, my - 2.5, 8, 5.0);
+            };
+
+            // 分别拉向平板车的固定地锚位置 (精准对齐甲板上的实体固定环中央 y: 27 和 y: 213)
+            drawAnchorChain(p.x + 25, p.y + 16, p.x + 12, 27); // 前左
+            drawAnchorChain(p.x + bodyW - 25, p.y + 16, p.x + bodyW - 12, 27); // 前右
+            drawAnchorChain(p.x + 25, p.y + bodyH - 16, p.x + 12, 213); // 后左
+            drawAnchorChain(p.x + bodyW - 25, p.y + bodyH - 16, p.x + bodyW - 12, 213); // 后右
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'military_cargo_box' || lbl.includes('SUPPLY CRATE') || lbl.includes('物资箱') || lbl.includes('物资') || lbl.includes('CARGO CRATE'))) {
+            // =========================================================================
+            // 真实军用物资箱 (Mil-Spec Heavy-Duty Tactical Polymer & Aluminum Cargo Cases)
+            // =========================================================================
+            ctx.save();
+            // Drop shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+
+            // 区分不同物资箱的战术军用配色 (Olive Drab 哑光橄榄绿 / Tan 荒漠沙色)
+            const isOlive = p.x % 2 === 0;
+            const bodyFill = isOlive ? '#2b3620' : '#453a29'; // 哑光战术军绿 / 荒漠狼棕
+            const ribFill = isOlive ? '#39472d' : '#574a36';  // 凸起加强筋高光
+            const grooveFill = isOlive ? '#1a2213' : '#2b2318'; // 加强筋深槽阴影
+            const borderStroke = isOlive ? '#13190e' : '#1e1810';
+
+            // 主箱体 (高分子耐冲击工程塑料聚乙烯外壳)
+            ctx.fillStyle = bodyFill;
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 4);
+            ctx.fill();
+            ctx.strokeStyle = borderStroke;
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+
+            // 模压十字/横向互锁防滑加强筋 (Molded Interlocking Stacking Ribs)
+            for (let ry = p.y + 10; ry < p.y + p.h - 10; ry += 12) {
+                // 凸起高光边
+                ctx.fillStyle = ribFill;
+                ctx.fillRect(p.x + 4, ry - 1.5, p.w - 8, 3);
+                // 凹槽投影边
+                ctx.fillStyle = grooveFill;
+                ctx.fillRect(p.x + 4, ry + 1.5, p.w - 8, 1.5);
+            }
+            // 纵向居中加强筋
+            ctx.fillStyle = ribFill;
+            ctx.fillRect(p.x + p.w / 2 - 3, p.y + 6, 6, p.h - 12);
+            ctx.fillStyle = grooveFill;
+            ctx.fillRect(p.x + p.w / 2 + 1.5, p.y + 6, 1.5, p.h - 12);
+
+            // 黑色重型模压防撞包角 (Molded Shock-Absorbing Corner Bosses)
+            const cbW = 8;
+            const cbH = 8;
+            ctx.fillStyle = '#111827';
+            ctx.fillRect(p.x, p.y, cbW, cbH);
+            ctx.fillRect(p.x + p.w - cbW, p.y, cbW, cbH);
+            ctx.fillRect(p.x, p.y + p.h - cbH, cbW, cbH);
+            ctx.fillRect(p.x + p.w - cbW, p.y + p.h - cbH, cbW, cbH);
+            // 镀锌钢制加固铆钉
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(p.x + 2, p.y + 2, 2, 2);
+            ctx.fillRect(p.x + p.w - 4, p.y + 2, 2, 2);
+            ctx.fillRect(p.x + 2, p.y + p.h - 4, 2, 2);
+            ctx.fillRect(p.x + p.w - 4, p.y + p.h - 4, 2, 2);
+
+            // 嵌入式不锈钢旋转蝶形锁扣 (Recessed Butterfly Twist Latches)
+            const drawTwistLatch = (lx, ly) => {
+                ctx.fillStyle = '#0f172a'; // 凹槽底座
+                ctx.fillRect(lx - 4, ly - 4, 8, 8);
+                ctx.fillStyle = '#cbd5e1'; // 不锈钢蝶形旋转翅片
+                ctx.fillRect(lx - 3, ly - 1.5, 6, 3);
+                ctx.fillRect(lx - 1.5, ly - 3, 3, 6);
+                ctx.strokeStyle = '#334155';
+                ctx.lineWidth = 0.6;
+                ctx.strokeRect(lx - 3, ly - 1.5, 6, 3);
+            };
+            drawTwistLatch(p.x + 2, p.y + p.h * 0.28);
+            drawTwistLatch(p.x + 2, p.y + p.h * 0.72);
+            drawTwistLatch(p.x + p.w - 2, p.y + p.h * 0.28);
+            drawTwistLatch(p.x + p.w - 2, p.y + p.h * 0.72);
+
+            // 弹簧回位重型包胶提手 (Spring-Loaded Heavy-Duty Drop Handles)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + p.w / 2 - 9, p.y + 1, 18, 4);
+            ctx.fillRect(p.x + p.w / 2 - 9, p.y + p.h - 5, 18, 4);
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + p.w / 2 - 7, p.y + 2, 14, 2);
+            ctx.fillRect(p.x + p.w / 2 - 7, p.y + p.h - 4, 14, 2);
+
+            // 自动微孔气压平衡阀 (Automatic Gore-Tex Purge Valve)
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(p.x + p.w - 11, p.y + 11, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#eab308';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            // 军用标准油墨喷涂技术标识 (Military Stencil Markings & Placards)
+            // 国际危险品 1.1 类火工品/弹药橙黄菱形标
+            const hx = p.x + p.w / 2;
+            const hy = p.y + 22;
+            ctx.fillStyle = '#ea580c';
+            ctx.beginPath();
+            ctx.moveTo(hx, hy - 6);
+            ctx.lineTo(hx + 6, hy);
+            ctx.lineTo(hx, hy + 6);
+            ctx.lineTo(hx - 6, hy);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(hx - 1.5, hy - 1.5, 3, 3);
+
+            // 白/灰军用模板字
+            ctx.font = 'bold 6.5px monospace';
+            ctx.fillStyle = isOlive ? '#cbd5e1' : '#f1f5f9';
+            ctx.fillText(isOlive ? '30MM APFSDS' : 'NATO 120MM', p.x + 8, p.y + p.h / 2 + 8);
+            ctx.font = 'bold 5.5px monospace';
+            ctx.fillStyle = isOlive ? '#94a3b8' : '#d1d5db';
+            ctx.fillText('LOT 4819-B', p.x + 8, p.y + p.h / 2 + 18);
+            ctx.fillText('WT: 260KG', p.x + 8, p.y + p.h / 2 + 27);
+
+            // "THIS SIDE UP" 朝上箭头标识
+            ctx.font = 'bold 8px monospace';
+            ctx.fillStyle = '#e2e8f0';
+            ctx.fillText('↑↑', p.x + p.w - 16, p.y + p.h - 10);
+
+            // 高强度工业尼龙棘轮拉紧带 (Heavy-Duty Ratchet Tie-Down Strap)
+            ctx.strokeStyle = '#ca8a04';
+            ctx.lineWidth = 2.4;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 4, p.y + 14);
+            ctx.lineTo(p.x + p.w - 4, p.y + p.h - 14);
+            ctx.stroke();
+            // 锻钢棘轮收紧器 (Steel Ratchet Tensioner Mechanism)
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(p.x + p.w / 2 - 4.5, p.y + p.h / 2 - 4.5, 9, 9);
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(p.x + p.w / 2 - 4.5, p.y + p.h / 2 - 4.5, 9, 9);
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(p.x + p.w / 2 - 1.5, p.y + p.h / 2 - 3.5, 3, 7);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'deck_tie_down' || lbl.includes('TIE-DOWN') || lbl.includes('地锚') || (lbl.includes('ANCHOR') && lbl.includes('固定')))) {
+            // =========================================================================
+            // 固定 - 重型D型甲板系固地锚 (Flush-Mounted D-Ring Deck Anchor Lashing Cleat)
+            // （高可见性安全警示黄铜/重防腐黄锌表面，绝不与战车军绿混淆）
+            // =========================================================================
+            ctx.save();
+            const cx = p.x + p.w / 2;
+            const cy = p.y + p.h / 2;
+            const rad = Math.min(p.w, p.h) / 2;
+
+            // 1. 凹入式铸钢底座圆井 (Recessed Circular Steel Deck Pan)
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#334155'; // 标准工业暗钢外缘
+            ctx.lineWidth = 1.4;
+            ctx.stroke();
+
+            // 4颗防腐镀锌外六角底座紧固螺栓 (Heavy Galvanized Hex Bolts)
+            ctx.fillStyle = '#cbd5e1'; // 亮银白色
+            for (let a = Math.PI / 4; a < Math.PI * 2; a += Math.PI / 2) {
+                const bx = cx + Math.cos(a) * (rad - 3);
+                const by = cy + Math.sin(a) * (rad - 3);
+                ctx.fillRect(bx - 1, by - 1, 2, 2);
+            }
+
+            // 2. 锻钢D型卸扣环 (Heavy Forged Steel D-Ring Shackle)
+            // 采用标准的工业不锈钢/镀锌色
+            const isNorth = p.y < 120;
+            ctx.strokeStyle = '#e2e8f0'; // 标准亮钢色
+            ctx.lineWidth = 2.6; // 标准工业粗细
+            ctx.beginPath();
+            if (isNorth) {
+                // 朝南开口的D环
+                ctx.moveTo(cx - 5.5, cy - 3);
+                ctx.lineTo(cx + 5.5, cy - 3);
+                ctx.arc(cx, cy - 3, 5.5, 0, Math.PI);
+            } else {
+                // 朝北开口的D环
+                ctx.moveTo(cx - 5.5, cy + 3);
+                ctx.lineTo(cx + 5.5, cy + 3);
+                ctx.arc(cx, cy + 3, 5.5, Math.PI, 0);
+            }
+            ctx.stroke();
+
+            // 锻造枢轴压板 (Heavy Weld-On Retaining Pivot Strap)
+            // 采用深炭灰不锈钢材质
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(cx - 4.5, cy - 2.5, 9, 5);
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(cx - 4.5, cy - 2.5, 9, 5);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'vehicle_deck_chock' || lbl.includes('VEHICLE CHOCK') || lbl.includes('止轮') || (lbl.includes('CHOCK') && lbl.includes('固定')))) {
+            // =========================================================================
+            // 固定 - 履带重型铸钢止轮锁止器 [口] (Heavy Cast-Steel Track Chock & Deck Anchor Plate)
+            // （纯正工业重装风格：深炭灰铸钢底座、加固筋与镀锌锁止销，绝无花哨斜纹）
+            // =========================================================================
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(p.x + 2, p.y + 2, p.w, p.h);
+
+            // 1. 重型锻钢底座 (草图中的 [口] 方框安装板)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            // 2. 嵌入式铸铁止轮楔形槽 (Recessed Chock Well)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(p.x + 3, p.y + 3, p.w - 6, p.h - 6);
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(p.x + 3, p.y + 3, p.w - 6, p.h - 6);
+
+            // 3. 锻钢防滑双向止退齿 (Serrated Chock Grips)
+            ctx.fillStyle = '#475569';
+            const toothW = 4;
+            for (let tx = p.x + 5; tx < p.x + p.w - 6; tx += toothW + 3) {
+                ctx.fillRect(tx, p.y + 4, toothW, p.h - 8);
+                ctx.fillStyle = '#64748b';
+                ctx.fillRect(tx, p.y + 4, 1.2, p.h - 8);
+                ctx.fillStyle = '#475569';
+            }
+
+            // 4. 中心重型锁止销轴与不锈钢拉环 (Heavy Turnbuckle Anchor Pin & Steel Shackle)
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(p.x + p.w / 2 - 4.5, p.y + p.h / 2 - 4.5, 9, 9);
+            ctx.strokeStyle = '#e2e8f0';
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(p.x + p.w / 2 - 4.5, p.y + p.h / 2 - 4.5, 9, 9);
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(p.x + p.w / 2 - 1.5, p.y + p.h / 2 - 1.5, 3, 3);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (isTrainLevel && (p.type === 'flatcar_steel_rails' || lbl.includes('STEEL RAILS') || lbl.includes('WELDED RAILS') || lbl.includes('工字钢轨'))) {
+            // =========================================================================
+            // 【100%真实铁道长轨装载】：沿平板车纵向平铺的真实工字钢轨与横向承托防腐木枕
+            // （绝无托盘包裹，横向多根真实木枕，纵向平铺真实蓝灰/银亮工字钢轨与固定卡钳）
+            // =========================================================================
+            ctx.save();
+
+            // 1. 横向承托防腐木枕 (横向分布在甲板上的真实木枕，让甲板从中间完全露出)
+            const sleeperYs = [p.y + 12, p.y + 44, p.y + 76];
+            sleeperYs.forEach(sy => {
+                // 木枕投影
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+                ctx.fillRect(p.x + 3, sy + 2, p.w - 6, 12);
+
+                // 杂酚油焦油深褐木色
+                let sGrad = ctx.createLinearGradient(p.x, sy, p.x, sy + 12);
+                sGrad.addColorStop(0, '#5c3a21');
+                sGrad.addColorStop(0.5, '#3d2413');
+                sGrad.addColorStop(1, '#4e301a');
+                ctx.fillStyle = sGrad;
+                ctx.beginPath();
+                ctx.roundRect(p.x + 2, sy, p.w - 4, 12, 1.5);
+                ctx.fill();
+
+                ctx.strokeStyle = '#26150a';
+                ctx.lineWidth = 1.0;
+                ctx.stroke();
+
+                // 木纹裂痕 (Checks)
+                ctx.strokeStyle = '#24140a';
+                ctx.lineWidth = 0.8;
+                ctx.beginPath();
+                ctx.moveTo(p.x + 10, sy + 3.5); ctx.lineTo(p.x + p.w - 12, sy + 3.5);
+                ctx.moveTo(p.x + 22, sy + 8.5); ctx.lineTo(p.x + p.w - 20, sy + 8.5);
+                ctx.stroke();
+
+                // 两端银亮镀锌S型防裂铁钉
+                ctx.fillStyle = '#cbd5e1';
+                ctx.fillRect(p.x + 4, sy + 3, 2, 6);
+                ctx.fillRect(p.x + p.w - 6, sy + 3, 2, 6);
+            });
+
+            // 2. 纵向长钢轨 (2条主轨 + 2条备轨，真实的工字钢截面与银白轮轨磨耗镜面光泽)
+            const railXs = [p.x + 18, p.x + 42, p.x + 66, p.x + 90];
+            railXs.forEach((rx, idx) => {
+                // (A) 宽展轨底板 (Base Flange - 轧制深蓝灰 #334155)
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(rx - 7, p.y - 4, 14, p.h + 8);
+                ctx.strokeStyle = '#0f172a';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(rx - 7, p.y - 4, 14, p.h + 8);
+
+                // (B) 竖向轨腰 (Web - 工业钢灰 #475569)
+                ctx.fillStyle = '#475569';
+                ctx.fillRect(rx - 3, p.y - 4, 6, p.h + 8);
+
+                // (C) 轨头顶面镜面磨光接触带 (Polished Rail Crown - 顶部银亮高光 #cbd5e1 / #ffffff)
+                ctx.fillStyle = '#cbd5e1';
+                ctx.fillRect(rx - 1.8, p.y - 4, 3.6, p.h + 8);
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(rx - 0.7, p.y - 4, 1.4, p.h + 8);
+
+                // (D) 钢轨端头冲孔与倒角
+                [p.y + 2, p.y + p.h - 2].forEach(pyHole => {
+                    ctx.fillStyle = '#020617';
+                    ctx.beginPath();
+                    ctx.arc(rx, pyHole, 1.6, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            });
+
+            // 3. 重型锻钢轨底弹条固定扣件 (Pandrol Rail Fasteners & Tie Plates)
+            sleeperYs.forEach(sy => {
+                railXs.forEach(rx => {
+                    // 铸铁垫板 (Tie Plate)
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(rx - 9, sy + 1, 18, 10);
+                    ctx.strokeStyle = '#0f172a';
+                    ctx.lineWidth = 0.6;
+                    ctx.strokeRect(rx - 9, sy + 1, 18, 10);
+
+                    // 镀锌弹条与方头螺栓 (E-Clip & Spike)
+                    ctx.fillStyle = '#e2e8f0';
+                    ctx.fillRect(rx - 8, sy + 3, 2.5, 6);
+                    ctx.fillRect(rx + 5.5, sy + 3, 2.5, 6);
+                });
+            });
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'rail_maintenance_bars' || lbl.includes('CLAW BARS') || lbl.includes('TOOL CHEST') || lbl.includes('起钉爪') || lbl.includes('工具箱')) {
+            // =========================================================================
+            // 【列车特装：超写实一体化应急工具备品箱】(Train Emergency Tool Chest & Cabinet)
+            // （高物理质感不锈钢包角、重度磨损防锈漆、双侧机械张紧锁扣、黄黑斜纹警示以及五格EVA精细工具凹槽）
+            // =========================================================================
+            ctx.save();
+            
+            // 1. 地面重工业环境阴影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+
+            // 2. 备品箱钢质外壳 (Heavy Duty Corrugated Industrial Steel Shell)
+            // 采用经典的防锈重工业安全红及防潮涂层，拉丝质感
+            let boxGrad = ctx.createLinearGradient(p.x, p.y, p.x + p.w, p.y);
+            boxGrad.addColorStop(0, '#7f1d1d');   // 左侧阴影
+            boxGrad.addColorStop(0.2, '#dc2626'); // 受光面高反光红
+            boxGrad.addColorStop(0.5, '#b91c1c'); // 中部红
+            boxGrad.addColorStop(0.8, '#991b1b'); // 右侧过渡
+            boxGrad.addColorStop(1, '#450a0a');   // 右侧深色折角
+            ctx.fillStyle = boxGrad;
+            ctx.beginPath();
+            ctx.roundRect(p.x, p.y, p.w, p.h, 3);
+            ctx.fill();
+
+            // 3. 门扉冲压防变形折筋 (Pressed Steel Reinforcement Ridges)
+            ctx.lineWidth = 2.0;
+            const ribSpacing = p.w / 10;
+            for (let rx = p.x + ribSpacing; rx < p.x + p.w - 5; rx += ribSpacing) {
+                // 暗面折痕
+                ctx.strokeStyle = '#3b0712';
+                ctx.beginPath();
+                ctx.moveTo(rx, p.y + 2);
+                ctx.lineTo(rx, p.y + p.h - 2);
+                ctx.stroke();
+                // 亮面反射高光线
+                ctx.strokeStyle = '#fca5a5';
+                ctx.beginPath();
+                ctx.moveTo(rx - 1.0, p.y + 2);
+                ctx.lineTo(rx - 1.0, p.y + p.h - 2);
+                ctx.stroke();
+            }
+
+            // 4. 黄黑相间高能见度安全警戒带 (Railway-Grade Warning Chevrons)
+            const stripeW = 10;
+            const drawWarningBand = (bx) => {
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(bx, p.y + 3, stripeW, p.h - 6);
+                ctx.clip();
+                ctx.fillStyle = '#facc15'; // 亮警示黄
+                ctx.fillRect(bx, p.y + 3, stripeW, p.h - 6);
+                ctx.strokeStyle = '#18181b'; // 工业黑
+                ctx.lineWidth = 3.0;
+                for (let offset = -10; offset < p.h + 10; offset += 7) {
+                    ctx.beginPath();
+                    ctx.moveTo(bx, p.y + offset);
+                    ctx.lineTo(bx + stripeW, p.y + offset + stripeW);
+                    ctx.stroke();
+                }
+                ctx.restore();
+            };
+            drawWarningBand(p.x + 5);
+            drawWarningBand(p.x + p.w - 15);
+
+            // 5. 铸铁不锈钢固定包角与定位钢栓 (Reinforced Steel Corner Brackets & Rivets)
+            ctx.strokeStyle = '#374151'; 
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x + 1.5, p.y + 1.5, p.w - 3, p.h - 3);
+
+            // 四角不锈钢防撞铆钉
+            const rivets = [
+                {x: p.x + 7, y: p.y + 7}, {x: p.x + 7, y: p.y + p.h - 7},
+                {x: p.x + p.w - 7, y: p.y + 7}, {x: p.x + p.w - 7, y: p.y + p.h - 7},
+                {x: p.x + p.w/2 - 20, y: p.y + 3.5}, {x: p.x + p.w/2 + 20, y: p.y + 3.5},
+                {x: p.x + p.w/2 - 20, y: p.y + p.h - 3.5}, {x: p.x + p.w/2 + 20, y: p.y + p.h - 3.5}
+            ];
+            ctx.fillStyle = '#e2e8f0'; // 银色金属光泽
+            ctx.strokeStyle = '#020617';
+            ctx.lineWidth = 0.5;
+            rivets.forEach(r => {
+                ctx.beginPath();
+                ctx.arc(r.x, r.y, 1.4, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+            });
+
+            // 6. 箱门中央双金属紧固锁扣 (Toggle Latch Assemblies)
+            const latchPositions = [p.x + p.w * 0.32, p.x + p.w * 0.68];
+            latchPositions.forEach(lx => {
+                // 底座扣板
+                ctx.fillStyle = '#4b5563';
+                ctx.fillRect(lx - 4, p.y - 1, 8, 3.5);
+                ctx.strokeRect(lx - 4, p.y - 1, 8, 3.5);
+                // 挂锁吊环
+                ctx.strokeStyle = '#9ca3af';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(lx - 2, p.y - 3, 4, 3);
+                // 下锁舌
+                ctx.fillStyle = '#1f2937';
+                ctx.fillRect(lx - 4, p.y + p.h - 3, 8, 4.5);
+                ctx.strokeRect(lx - 4, p.y + p.h - 3, 8, 4.5);
+            });
+
+            // 7. 做旧：重度铁路焦煤粉尘、油污痕迹 (Grease, Dirt & Rust Scrapes)
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.5)'; // 深色泥煤油渍
+            ctx.beginPath();
+            ctx.arc(p.x + p.w * 0.25, p.y + p.h * 0.3, 6, 0, Math.PI * 2);
+            ctx.arc(p.x + p.w * 0.75, p.y + p.h * 0.7, 7, 0, Math.PI * 2);
+            ctx.fill();
+            // 刮擦露出银白金属底色
+            ctx.strokeStyle = '#f1f5f9';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(p.x + p.w * 0.48, p.y + 10);
+            ctx.lineTo(p.x + p.w * 0.52, p.y + 14);
+            ctx.moveTo(p.x + p.w * 0.15, p.y + p.h - 12);
+            ctx.lineTo(p.x + p.w * 0.18, p.y + p.h - 15);
+            ctx.stroke();
+
+            // 8. 钢制铭牌标识文字 (Industrial Equipment Label removed to prevent overflow)
+
+            // =========================================================================
+            // 9. 内部高精度五格模切高密度 EVA 泡棉工具收纳托盘 (5-Slot Precision Molded Shadow Tray)
+            // =========================================================================
+            const ty = p.y + 11;
+            const th = p.h - 20;
+            const tx = p.x + 18;
+            const tw = p.w - 36;
+            
+            ctx.fillStyle = '#09090b'; // EVA 泡棉深黑底色
+            ctx.fillRect(tx, ty, tw, th);
+            // 托盘下凹立体暗影
+            let trayShad = ctx.createLinearGradient(tx, ty, tx, ty + 4);
+            trayShad.addColorStop(0, 'rgba(0,0,0,0.9)');
+            trayShad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = trayShad;
+            ctx.fillRect(tx, ty, tw, 4);
+
+            // =========================================================================
+            // 10. 五格备品工具微缩绘制
+            // =========================================================================
+            const slotCount = 5;
+            const slotW = tw / slotCount;
+
+            for (let i = 0; i < slotCount; i++) {
+                const sx = tx + i * slotW;
+                const sy = ty;
+                const sw = slotW;
+                const sh = th;
+
+                // 绘制卡槽内切暗角
+                ctx.fillStyle = '#020617';
+                ctx.fillRect(sx + 3, sy + 3, sw - 6, sh - 6);
+
+                if (i === 0) {
+                    // -----------------------------------------------------------------
+                    // [1/5 撬棍格 (Carbon Steel Railroad Claw Bar)]
+                    // -----------------------------------------------------------------
+                    const barX = sx + sw/2;
+                    // 起钉撬棍主体 (重型发蓝碳钢涂层)
+                    let barGrad = ctx.createLinearGradient(barX - 2, sy, barX + 2, sy);
+                    barGrad.addColorStop(0, '#1e3a8a');
+                    barGrad.addColorStop(0.3, '#3b82f6');
+                    barGrad.addColorStop(1, '#172554');
+                    ctx.fillStyle = barGrad;
+                    ctx.fillRect(barX - 1.5, sy + 6, 3, sh - 14);
+
+                    // 撬棍高光折边
+                    ctx.fillStyle = '#93c5fd';
+                    ctx.fillRect(barX - 0.7, sy + 6, 0.7, sh - 14);
+
+                    // 尾部扁平斜向起钉爪 (Beveled Claw Tip)
+                    let tipGrad = ctx.createLinearGradient(barX - 2, sy, barX + 2, sy);
+                    tipGrad.addColorStop(0, '#64748b');
+                    tipGrad.addColorStop(1, '#cbd5e1');
+                    ctx.fillStyle = tipGrad;
+                    ctx.beginPath();
+                    ctx.moveTo(barX - 2.5, sy + sh - 8);
+                    ctx.lineTo(barX + 2.5, sy + sh - 8);
+                    ctx.lineTo(barX + 1.2, sy + sh - 3);
+                    ctx.lineTo(barX - 1.2, sy + sh - 3);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    // 顶端鹅颈弯头双爪 (Gooseneck Hammer Head End)
+                    ctx.strokeStyle = '#94a3b8';
+                    ctx.lineWidth = 2.0;
+                    ctx.beginPath();
+                    ctx.moveTo(barX, sy + 8);
+                    ctx.quadraticCurveTo(barX - 2.5, sy + 4, barX - 1.5, sy + 2);
+                    ctx.stroke();
+
+                } else if (i === 1) {
+                    // -----------------------------------------------------------------
+                    // [2/5 千斤顶格 (Miniature Simplex Mechanical Rack Jack)]
+                    // -----------------------------------------------------------------
+                    const jx = sx + sw/2;
+                    // 千斤顶黑色高硬度淬火齿条
+                    ctx.fillStyle = '#1e293b';
+                    ctx.fillRect(jx - 2, sy + 4, 4, sh - 10);
+                    // 齿条棘齿细节
+                    ctx.fillStyle = '#0f172a';
+                    for (let gy = sy + 6; gy < sy + sh - 8; gy += 3) {
+                        ctx.fillRect(jx - 1.5, gy, 3, 1.0);
+                    }
+
+                    // 铸铁暗黄主油缸/齿条外壳
+                    let bodyGrad = ctx.createLinearGradient(jx - 5, sy, jx + 5, sy);
+                    bodyGrad.addColorStop(0, '#d97706'); // 铸铁暗黄
+                    bodyGrad.addColorStop(0.5, '#f59e0b');
+                    bodyGrad.addColorStop(1, '#78350f');
+                    ctx.fillStyle = bodyGrad;
+                    ctx.beginPath();
+                    ctx.roundRect(jx - 4.5, sy + 10, 9, sh - 16, 1.5);
+                    ctx.fill();
+                    ctx.strokeStyle = '#451a03';
+                    ctx.lineWidth = 0.5;
+                    ctx.stroke();
+
+                    // 下底承重托爪 (Lifting Toe)
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillRect(jx - 6, sy + sh - 10, 3, 4);
+
+                } else if (i === 2) {
+                    // -----------------------------------------------------------------
+                    // [3/5 工兵铲格 (NATO Tactical Tri-fold Shovel)]
+                    // -----------------------------------------------------------------
+                    const sx_c = sx + sw/2;
+                    // 哑光橄榄绿折叠铲面 (Spade Blade)
+                    let spadeGrad = ctx.createLinearGradient(sx_c - 6, sy, sx_c + 6, sy);
+                    spadeGrad.addColorStop(0, '#2d3a2c');
+                    spadeGrad.addColorStop(0.5, '#4c5f4a');
+                    spadeGrad.addColorStop(1, '#1b241a');
+                    ctx.fillStyle = spadeGrad;
+                    ctx.beginPath();
+                    ctx.moveTo(sx_c - 5, sy + 4);
+                    ctx.lineTo(sx_c + 5, sy + 4);
+                    ctx.lineTo(sx_c + 6, sy + 11);
+                    ctx.lineTo(sx_c, sy + 16); // 铲尖
+                    ctx.lineTo(sx_c - 6, sy + 11);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    // 铲面凹凸加强筋线
+                    ctx.strokeStyle = '#141a13';
+                    ctx.lineWidth = 0.6;
+                    ctx.beginPath();
+                    ctx.moveTo(sx_c - 2.5, sy + 5);
+                    ctx.lineTo(sx_c - 2.5, sy + 11);
+                    ctx.moveTo(sx_c + 2.5, sy + 5);
+                    ctx.lineTo(sx_c + 2.5, sy + 11);
+                    ctx.stroke();
+
+                    // 铲柄固定套管
+                    ctx.fillStyle = '#94a3b8';
+                    ctx.fillRect(sx_c - 2, sy + 16, 4, 3.5);
+
+                    // 折叠铝制手柄 (Handle Base)
+                    ctx.strokeStyle = '#475569';
+                    ctx.lineWidth = 1.4;
+                    ctx.beginPath();
+                    ctx.moveTo(sx_c, sy + 19);
+                    ctx.lineTo(sx_c, sy + sh - 5);
+                    ctx.stroke();
+
+                } else if (i === 3) {
+                    // -----------------------------------------------------------------
+                    // [4/5 大锤与备用铁钉格 (Spike Maul & Extra Track Spikes)]
+                    // -----------------------------------------------------------------
+                    const mx = sx + sw/2;
+                    // 山核桃木大锤柄 (Hickory Handle)
+                    let hndGrad = ctx.createLinearGradient(mx - 1, sy, mx + 1, sy);
+                    hndGrad.addColorStop(0, '#78350f');
+                    hndGrad.addColorStop(0.5, '#f59e0b');
+                    hndGrad.addColorStop(1, '#451a03');
+                    ctx.fillStyle = hndGrad;
+                    ctx.fillRect(mx - 0.9, sy + 12, 1.8, sh - 17);
+
+                    // 狭长铸钢大锤头 (AREMA Narrow Forged Maul Head)
+                    let headGrad = ctx.createLinearGradient(mx - 6, sy, mx + 6, sy);
+                    headGrad.addColorStop(0, '#334155');
+                    headGrad.addColorStop(0.5, '#64748b');
+                    headGrad.addColorStop(1, '#0f172a');
+                    ctx.fillStyle = headGrad;
+                    ctx.fillRect(mx - 5.5, sy + 5, 11, 4.5);
+                    ctx.strokeStyle = '#020617';
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(mx - 5.5, sy + 5, 11, 4.5);
+
+                    // 备用长道钉槽 (Extra Heavy Spikes in slot)
+                    ctx.fillStyle = '#334155';
+                    ctx.fillRect(mx - 5, sy + sh - 8, 2, 4);
+                    ctx.fillRect(mx - 1, sy + sh - 8, 2, 4);
+                    ctx.fillRect(mx + 3, sy + sh - 8, 2, 4);
+
+                } else if (i === 4) {
+                    // -----------------------------------------------------------------
+                    // [5/5 双头棘轮/梅花扳手格 (Chrome Vanadium Wrenches)]
+                    // -----------------------------------------------------------------
+                    const wx = sx + sw/2;
+                    // 镜面金属质感柄身 (Mirror Finish Shaft)
+                    let wGrad = ctx.createLinearGradient(wx - 1, sy, wx + 1, sy);
+                    wGrad.addColorStop(0, '#f8fafc');
+                    wGrad.addColorStop(0.4, '#cbd5e1');
+                    wGrad.addColorStop(1, '#64748b');
+                    ctx.fillStyle = wGrad;
+                    ctx.fillRect(wx - 1.0, sy + 6, 2.0, sh - 13);
+
+                    // 两头咬合开口 (Polished Wrench Ends)
+                    ctx.fillStyle = '#94a3b8';
+                    ctx.strokeStyle = '#1e293b';
+                    ctx.lineWidth = 0.5;
+
+                    // 顶部开口端
+                    ctx.beginPath();
+                    ctx.arc(wx, sy + 6, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.fillStyle = '#020617';
+                    ctx.beginPath();
+                    ctx.arc(wx, sy + 5.0, 1.2, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // 底部梅花端
+                    ctx.fillStyle = '#cbd5e1';
+                    ctx.beginPath();
+                    ctx.arc(wx, sy + sh - 7, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.fillStyle = '#020617';
+                    ctx.beginPath();
+                    ctx.arc(wx, sy + sh - 7, 1.2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'maintenance_supplies' || lbl.includes('MAINTENANCE SUPPLIES') || lbl.includes('整备物资') || lbl.includes('备品物资')) {
+            // =========================================================================
+            // 【列车特装：超写实工程整备备品物资组】 (Railway Maintenance Supplies & Spares Pack)
+            // （包含：不锈钢高压气体阻燃瓶、重型高压液压管卷盘、防爆安全储存油桶、道砟轨枕垫木组）
+            // =========================================================================
+            ctx.save();
+            // 地面阴影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+            ctx.fillRect(p.x + 4, p.y + 4, p.w, p.h);
+
+            // A) 1个重型高压气体钢瓶 (Steel Gas Cylinder - 卧式摆放并由木制鞍座托架固定)
+            const cylX = p.x + 8;
+            const cylY = p.y + 6;
+            const cylW = p.w * 0.45;
+            const cylH = 15;
+            
+            // 木质托架鞍座 (Saddle Cribbing)
+            ctx.fillStyle = '#78350f';
+            ctx.fillRect(cylX + 4, cylY + cylH - 2, 8, 4);
+            ctx.fillRect(cylX + cylW - 12, cylY + cylH - 2, 8, 4);
+
+            // 钢瓶瓶身 (高强度合金灰)
+            let cylGrad = ctx.createLinearGradient(cylX, cylY, cylX, cylY + cylH);
+            cylGrad.addColorStop(0, '#64748b');
+            cylGrad.addColorStop(0.3, '#94a3b8');
+            cylGrad.addColorStop(1, '#334155');
+            ctx.fillStyle = cylGrad;
+            ctx.beginPath();
+            ctx.roundRect(cylX, cylY, cylW, cylH, 3);
+            ctx.fill();
+
+            // 瓶身防撞加强圈与压力表 (Cylinder Rings & Dial Gauge)
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(cylX, cylY, cylW, cylH);
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(cylX + 8, cylY - 0.5, 2, cylH + 1);
+            ctx.fillRect(cylX + cylW - 10, cylY - 0.5, 2, cylH + 1);
+
+            // 纯铜控制阀门与调节器 (Brass Valve Assembly)
+            let brassGrad = ctx.createLinearGradient(cylX + cylW, cylY + 4, cylX + cylW + 4, cylY + 12);
+            brassGrad.addColorStop(0, '#f59e0b');
+            brassGrad.addColorStop(1, '#b45309');
+            ctx.fillStyle = brassGrad;
+            ctx.fillRect(cylX + cylW, cylY + 5, 4, 6);
+            ctx.beginPath();
+            ctx.arc(cylX + cylW + 4, cylY + 8, 2, 0, Math.PI*2);
+            ctx.fill();
+
+            // B) 重型高压液压软管卷盘 (Heavy Hydraulic Hose Reel)
+            const reelX = p.x + p.w * 0.55;
+            const reelY = p.y + 4;
+            const reelSize = p.h - 8;
+
+            // 卷盘钢架底座
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 2.0;
+            ctx.beginPath();
+            ctx.moveTo(reelX, reelY + reelSize);
+            ctx.lineTo(reelX + reelSize, reelY + reelSize);
+            ctx.moveTo(reelX + reelSize / 2, reelY + reelSize);
+            ctx.lineTo(reelX + reelSize / 2, reelY + reelSize / 2);
+            ctx.stroke();
+
+            // 黑色耐油液压软管圈束 (Coiled Rubber Hoses)
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(reelX + reelSize / 2, reelY + reelSize / 2, reelSize / 2 - 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // 软管层叠同心螺旋纹
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1.0;
+            for (let r = 4; r < reelSize / 2 - 2; r += 3.5) {
+                ctx.beginPath();
+                ctx.arc(reelX + reelSize / 2, reelY + reelSize / 2, r, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // 镀锌锁紧分配阀阀头 (Polished Fittings)
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(reelX + reelSize/2 - 2, reelY + 1, 4, 3);
+            ctx.fillStyle = '#ef4444'; // 红色截止旋钮
+            ctx.beginPath();
+            ctx.arc(reelX + reelSize/2, reelY + 1, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // C) 1个重工业防爆机修储油桶 (Heavy Industrial Explosion-Proof Jerrycan)
+            const canX = p.x + 8;
+            const canY = p.y + 26;
+            const canW = 18;
+            const canH = p.h - 32;
+
+            // 鲜红防爆防锈涂装 (Safety Red Paint)
+            let canGrad = ctx.createLinearGradient(canX, canY, canX + canW, canY);
+            canGrad.addColorStop(0, '#b91c1c');
+            canGrad.addColorStop(0.3, '#ef4444');
+            canGrad.addColorStop(1, '#7f1d1d');
+            ctx.fillStyle = canGrad;
+            ctx.beginPath();
+            ctx.roundRect(canX, canY, canW, canH, 2);
+            ctx.fill();
+            ctx.strokeStyle = '#450a0a';
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(canX, canY, canW, canH);
+
+            // 冲压十字筋 (Stamped Cross-X Ridge)
+            ctx.strokeStyle = '#991b1b';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(canX + 3, canY + 3);
+            ctx.lineTo(canX + canW - 3, canY + canH - 3);
+            ctx.moveTo(canX + canW - 3, canY + 3);
+            ctx.lineTo(canX + 3, canY + canH - 3);
+            ctx.stroke();
+
+            // 镀铬提手与金属排气孔螺塞 (Chrome Handles & Breather Cap)
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.moveTo(canX + 4, canY);
+            ctx.lineTo(canX + 4, canY - 2);
+            ctx.lineTo(canX + canW - 4, canY - 2);
+            ctx.lineTo(canX + canW - 4, canY);
+            ctx.stroke();
+            // 黄色加油口塞 (Yellow Brass Spout Cap)
+            ctx.fillStyle = '#eab308';
+            ctx.fillRect(canX + canW - 6, canY - 3.5, 3.5, 2);
+
+            // D) 实木重型轨枕缓冲垫木组 (Heavy Wooden Cribbing Blocks)
+            const blockX = p.x + 30;
+            const blockY = p.y + 28;
+            const blockW = p.w * 0.20;
+            const blockH = 14;
+
+            let woodGrad = ctx.createLinearGradient(blockX, blockY, blockX, blockY + blockH);
+            woodGrad.addColorStop(0, '#d97706');
+            woodGrad.addColorStop(0.5, '#b45309');
+            woodGrad.addColorStop(1, '#78350f');
+            ctx.fillStyle = woodGrad;
+            ctx.beginPath();
+            ctx.roundRect(blockX, blockY, blockW, blockH, 1.5);
+            ctx.fill();
+            ctx.strokeStyle = '#451a03';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(blockX, blockY, blockW, blockH);
+
+            // 木材横向年轮纤维纹理
+            ctx.strokeStyle = '#78350f';
+            ctx.lineWidth = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(blockX + 2, blockY + 4); ctx.lineTo(blockX + blockW - 2, blockY + 4);
+            ctx.moveTo(blockX + 2, blockY + 10); ctx.lineTo(blockX + blockW - 2, blockY + 10);
+            ctx.stroke();
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'rail_track_jacks' || lbl.includes('TRACK JACKS') || lbl.includes('起道机')) {
+            // =========================================================================
+            // 【100%真实铁道起重设备】：写实单体起道机（Simplex 齿条起道机 + 工业便携液压起道机）
+            // （绝无托盘包裹，真实硬核工业设备单体，沉稳工业暗黄色与深红色）
+            // =========================================================================
+            ctx.save();
+
+            // --- (A) 真实 Simplex 机械齿条式起道机 (Simplex Mechanical Rack Jack) ---
+            // 工业暗黄/铸铁黑机体 + 黑色淬火齿条 + 底部低位轨底托爪
+            const rjX = p.x + 4;
+            const rjY = p.y + 6;
+
+            // 投影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(rjX + 2, rjY + 2, 20, 42);
+
+            // 黑色淬火方齿条立柱 (Hardened Notch Rack)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(rjX + 7, rjY - 4, 7, 12);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(rjX + 7, rjY - 4, 7, 12);
+            // 顶端承重托盘
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(rjX + 5, rjY - 6, 11, 2.5);
+
+            // 工业安全暗黄铸铁机体 (Industrial Ochre Cast Iron Body)
+            let yGrad = ctx.createLinearGradient(rjX, rjY, rjX + 20, rjY);
+            yGrad.addColorStop(0, '#eab308');
+            yGrad.addColorStop(0.5, '#ca8a04');
+            yGrad.addColorStop(1, '#a16207');
+            ctx.fillStyle = yGrad;
+            ctx.beginPath();
+            ctx.roundRect(rjX + 2, rjY + 6, 17, 34, 2);
+            ctx.fill();
+            ctx.strokeStyle = '#713f12';
+            ctx.lineWidth = 1.0;
+            ctx.stroke();
+
+            // 底部伸出的低位轨底托爪 (Lifting Toe)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(rjX - 3, rjY + 32, 6, 8);
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(rjX - 3, rjY + 32, 6, 8);
+
+            // 侧向插杆棘轮套筒 (Ratchet Lever Socket)
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(rjX + 18, rjY + 16, 5, 6);
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(rjX + 18, rjY + 16, 5, 6);
+
+            // 机身标牌 (SIMPLEX 5-TON)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(rjX + 5, rjY + 13, 11, 4.5);
+
+            // --- (B) 真实便携液压立式起道机 (Hydraulic Railroad Toe Jack) ---
+            // 工业深红圆柱油缸 + 镀铬镜面活塞杆 + 黄铜旋钮
+            const hjX = p.x + 32;
+            const hjY = p.y + 8;
+
+            // 投影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(hjX + 2, hjY + 2, 18, 40);
+
+            // 镜面镀铬银白活塞杆 (Chrome Piston)
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(hjX + 5, hjY - 3, 8, 9);
+            ctx.strokeStyle = '#cbd5e1';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(hjX + 5, hjY - 3, 8, 9);
+
+            // 工业深红主油缸 (Red Cylindrical Body)
+            let rGrad = ctx.createLinearGradient(hjX, hjY, hjX + 18, hjY);
+            rGrad.addColorStop(0, '#ef4444');
+            rGrad.addColorStop(0.3, '#dc2626');
+            rGrad.addColorStop(1, '#991b1b');
+            ctx.fillStyle = rGrad;
+            ctx.beginPath();
+            ctx.roundRect(hjX + 2, hjY + 6, 14, 32, 2);
+            ctx.fill();
+            ctx.strokeStyle = '#7f1d1d';
+            ctx.lineWidth = 1.0;
+            ctx.stroke();
+
+            // 底部起道爪
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(hjX - 2, hjY + 30, 5, 8);
+
+            // 黄铜泄压旋钮 (Brass Release Valve)
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(hjX + 15, hjY + 20, 4, 4);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else if (p.type === 'tactical_entrenching_shovels' || lbl.includes('E-TOOLS') || lbl.includes('工兵铲')) {
+            // =========================================================================
+            // 【100%真实铁道工装】：写实单兵三折工兵铲 + 铁道方头道钉补给桶
+            // （绝无托盘包裹，真实工兵铲折叠结构与黑铁铸造道钉）
+            // =========================================================================
+            ctx.save();
+
+            // --- (A) 真实北约军规三折便携工兵铲 (NATO Tri-Fold Entrenching Tool) ---
+            const etX = p.x + 4;
+            const etY = p.y + 10;
+
+            // 投影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(etX + 2, etY + 2, 22, 36);
+
+            // 战术哑光橄榄绿铲头 (Olive Drab Spade Head)
+            ctx.fillStyle = '#3f4f3e';
+            ctx.beginPath();
+            ctx.moveTo(etX + 3, etY + 2);
+            ctx.lineTo(etX + 19, etY + 2);
+            ctx.lineTo(etX + 22, etY + 12);
+            ctx.lineTo(etX + 19, etY + 19);
+            ctx.lineTo(etX + 3, etY + 19);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#1e281d';
+            ctx.lineWidth = 1.0;
+            ctx.stroke();
+
+            // 单侧根锯齿割刀 (Silver Root-Saw Serrations)
+            ctx.fillStyle = '#cbd5e1';
+            for (let sx = etX + 5; sx < etX + 18; sx += 3) {
+                ctx.fillRect(sx, etY + 1, 1.4, 2);
+            }
+
+            // 铝合金滚花折叠锁紧套管 (Knurled Locking Collar)
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(etX + 8, etY + 19, 6, 5);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(etX + 8, etY + 19, 6, 5);
+
+            // 黑色钢管三角形折叠握把 (Triangular D-Grip)
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 2.4;
+            ctx.beginPath();
+            ctx.moveTo(etX + 11, etY + 24);
+            ctx.lineTo(etX + 4, etY + 30);
+            ctx.lineTo(etX + 4, etY + 42);
+            ctx.lineTo(etX + 18, etY + 42);
+            ctx.lineTo(etX + 18, etY + 30);
+            ctx.closePath();
+            ctx.stroke();
+
+            // --- (B) 真实铁道方头道钉收纳金属桶 (Spike Keg / Bucket) ---
+            const kegX = p.x + 32;
+            const kegY = p.y + 14;
+
+            // 投影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.beginPath();
+            ctx.arc(kegX + 10, kegY + 16, 11, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 镀锌钢桶圆形桶身
+            let kGrad = ctx.createRadialGradient(kegX + 8, kegY + 12, 2, kegX + 10, kegY + 14, 11);
+            kGrad.addColorStop(0, '#94a3b8');
+            kGrad.addColorStop(0.7, '#64748b');
+            kGrad.addColorStop(1, '#334155');
+            ctx.fillStyle = kGrad;
+            ctx.beginPath();
+            ctx.arc(kegX + 10, kegY + 14, 10, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1.0;
+            ctx.stroke();
+
+            // 桶内堆满的真实铁道黑铁方头道钉 (Track Spikes)
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(kegX + 5, kegY + 8, 3, 7);
+            ctx.fillRect(kegX + 10, kegY + 7, 3, 7);
+            ctx.fillRect(kegX + 7, kegY + 12, 7, 3);
+            ctx.fillRect(kegX + 12, kegY + 13, 3, 6);
+            // 道钉方凸头银光
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(kegX + 4, kegY + 8, 4, 2.5);
+            ctx.fillRect(kegX + 9, kegY + 7, 4, 2.5);
+            ctx.fillRect(kegX + 6, kegY + 13, 2.5, 4);
+
+            ctx.restore();
+            drawPropTagLabel(p);
+
+        } else {
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(p.x, p.y, p.w, p.h);
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+            drawPropTagLabel(p);
+        }
+        ctx.restore();
+    });
+}
+
+function drawTraps() {
+    traps.forEach(t => {
+        if (typeof isObjectRevealed === 'function' && !isObjectRevealed(t.x, t.y, 1, 1)) {
+            return;
+        }
+        ctx.save();
+        // Outer pulsing ring
+        t.pulseTimer += 0.08;
+        const pulseRadius = 10 + Math.sin(t.pulseTimer) * 5;
+        ctx.strokeStyle = 'rgba(255, 102, 0, 0.7)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, pulseRadius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Inner solid core
+        ctx.fillStyle = '#FF6600';
+        ctx.shadowColor = '#FF6600';
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    });
+}
+
+function drawRealisticVolcano(ctx, obs) {
+    const time = Date.now() * 0.001;
+    let cx = 0, cy = 0;
+    if (obs.points && obs.points.length > 0) {
+        obs.points.forEach(p => { cx += p.x; cy += p.y; });
+        cx /= obs.points.length;
+        cy /= obs.points.length;
+    } else {
+        cx = 1580; cy = 480;
+    }
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 1. 山体黑曜石崖壁与剖面多边形底座 (Obsidian Basalt Mountain Base)
+    ctx.fillStyle = '#0a0d14';
+    ctx.strokeStyle = '#dc2626';
+    ctx.lineWidth = 2.5;
+
+    ctx.beginPath();
+    const pts = obs.points || [];
+    if (pts.length > 0) {
+        ctx.moveTo(pts[0].x - cx, pts[0].y - cy);
+        for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x - cx, pts[i].y - cy);
+        }
+    } else {
+        ctx.arc(0, 0, 110, 0, Math.PI * 2);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // 2. 山体黑曜石崖壁与剖面山脊线 (Obsidian Basalt Ridges & Facets)
+    if (pts.length > 0) {
+        ctx.strokeStyle = 'rgba(120, 53, 15, 0.65)';
+        ctx.lineWidth = 1.8;
+        pts.forEach((p) => {
+            const relX = p.x - cx;
+            const relY = p.y - cy;
+            ctx.beginPath();
+            ctx.moveTo(relX, relY);
+            ctx.quadraticCurveTo(relX * 0.5, relY * 0.5, relX * 0.2, relY * 0.2);
+            ctx.stroke();
+        });
+    }
+
+    // 3. 5条从火山口向山脚蜿蜒流淌的炽热岩浆河 (Cascading Magma Rivers Down Slopes)
+    for (let i = 0; i < 5; i++) {
+        const ang = (i * Math.PI * 2) / 5 + 0.2;
+        const wave = Math.sin(time * 2.5 + i * 1.4) * 7;
+        const startR = 32;
+        const endR = 95;
+        const sx = Math.cos(ang) * startR;
+        const sy = Math.sin(ang) * startR;
+        const ex = Math.cos(ang + 0.25) * endR + wave;
+        const ey = Math.sin(ang + 0.25) * endR + wave;
+
+        // Magma stream outer glow
+        ctx.strokeStyle = 'rgba(249, 115, 22, 0.4)';
+        ctx.lineWidth = 8;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.quadraticCurveTo((sx + ex) * 0.5 + wave, (sy + ey) * 0.5 - wave, ex, ey);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.quadraticCurveTo((sx + ex) * 0.5 + wave, (sy + ey) * 0.5 - wave, ex, ey);
+        ctx.stroke();
+
+        // Inner incandescent liquid core
+        ctx.strokeStyle = '#fef08a';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Dripping lava drop animation along river
+        const progress = (time * 0.45 + i * 0.2) % 1.0;
+        const dropX = sx + (ex - sx) * progress;
+        const dropY = sy + (ey - sy) * progress;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(dropX, dropY, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // 4. 火山喷发口齿状黑曜石壁 (Crater Rim)
+    ctx.fillStyle = '#1c1917';
+    ctx.strokeStyle = '#991b1b';
+    ctx.lineWidth = 2.8;
+    ctx.beginPath();
+    ctx.arc(0, 0, 38, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // 5. 火山深处沸腾熔岩湖 (Boiling Magma Caldera)
+    const magmaPulse = 0.85 + Math.sin(time * 3) * 0.15;
+    ctx.fillStyle = `rgba(239, 68, 68, ${magmaPulse})`;
+    ctx.beginPath();
+    ctx.arc(0, 0, 28, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = `rgba(254, 240, 138, ${magmaPulse})`;
+    ctx.beginPath();
+    ctx.arc(0, 0, 14, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Magma bubbles popping inside crater
+    for (let b = 0; b < 3; b++) {
+        const bubbleAng = time * (1.6 + b) + b * 2;
+        const bubbleR = 5 + (b * 7) % 16;
+        const bx = Math.cos(bubbleAng) * bubbleR;
+        const by = Math.sin(bubbleAng) * bubbleR;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(bx, by, 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // 6. 动态喷发火山灰烟云与炽热火花 (Dynamic Erupting Ash Plume & Ember Sparks)
+    for (let e = 0; e < 6; e++) {
+        const emberProgress = (time * 0.8 + e * 0.16) % 1.0;
+        const emberAng = (e * Math.PI) / 3 + time * 0.2;
+        const emberDist = emberProgress * 55;
+        const ex = Math.cos(emberAng) * emberDist;
+        const ey = Math.sin(emberAng) * emberDist - emberProgress * 25; // float upward
+
+        // Smoke puff
+        const smokeR = 8 + emberProgress * 18;
+        const smokeAlpha = (1.0 - emberProgress) * 0.35;
+        ctx.fillStyle = `rgba(30, 41, 59, ${smokeAlpha})`;
+        ctx.beginPath();
+        ctx.arc(ex, ey, smokeR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Glowing spark particle
+        const sparkAlpha = (1.0 - emberProgress);
+        ctx.fillStyle = `rgba(254, 240, 138, ${sparkAlpha})`;
+        ctx.beginPath();
+        ctx.arc(ex, ey, 2.5 * (1.0 - emberProgress * 0.5), 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.restore();
+}
+
+function drawInfernalMonolith(ctx, obs) {
+    const time = Date.now() * 0.001;
+    let cx = 0, cy = 0;
+    if (obs.points && obs.points.length > 0) {
+        obs.points.forEach(p => { cx += p.x; cy += p.y; });
+        cx /= obs.points.length;
+        cy /= obs.points.length;
+    } else {
+        cx = obs.x || 0; cy = obs.y || 0;
+    }
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 0. 地面加固石碑符文基圈 (Runic Base Anchor Circle)
+    const baseGlow = 0.6 + Math.sin(time * 2.5 + cx) * 0.25;
+    ctx.strokeStyle = `rgba(244, 63, 94, ${baseGlow * 0.8})`;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(0, 0, 40, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 8 Border Rune ticks
+    for (let k = 0; k < 8; k++) {
+        const a = (k * Math.PI) / 4 + time * 0.15;
+        const x1 = Math.cos(a) * 37, y1 = Math.sin(a) * 37;
+        const x2 = Math.cos(a) * 43, y2 = Math.sin(a) * 43;
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+
+    // 1. 黑曜石方尖碑基座多边形 (Dark Basalt Pillar)
+    ctx.fillStyle = '#090d16';
+    ctx.strokeStyle = '#ea580c';
+    ctx.lineWidth = 2.8;
+
+    ctx.beginPath();
+    const pts = obs.points || [];
+    if (pts.length > 0) {
+        ctx.moveTo(pts[0].x - cx, pts[0].y - cy);
+        for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x - cx, pts[i].y - cy);
+        }
+    } else {
+        ctx.arc(0, 0, 30, 0, Math.PI * 2);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // 2. 3D 晶体斜面切角 (Crystalline Bevels & Facets)
+    if (pts.length > 0) {
+        ctx.strokeStyle = 'rgba(251, 146, 60, 0.5)';
+        ctx.lineWidth = 1.5;
+        pts.forEach(p => {
+            ctx.beginPath();
+            ctx.moveTo(p.x - cx, p.y - cy);
+            ctx.lineTo(0, 0);
+            ctx.stroke();
+        });
+    }
+
+    // 3. 雕刻发光地狱熔岩符文 (Glowing Infernal Magma Runes)
+    const runePulse = 0.7 + Math.sin(time * 3 + cx) * 0.3;
+    ctx.strokeStyle = `rgba(254, 240, 138, ${runePulse})`;
+    ctx.lineWidth = 2;
+
+    // Center vertical rune spine with cross-hatching
+    ctx.beginPath();
+    ctx.moveTo(0, -22); ctx.lineTo(0, 22);
+    ctx.moveTo(-12, -8); ctx.lineTo(12, 8);
+    ctx.moveTo(-10, 10); ctx.lineTo(10, -10);
+    ctx.stroke();
+
+    // Corner sigils
+    ctx.fillStyle = `rgba(249, 115, 22, ${runePulse})`;
+    for (let angle = 0; angle < Math.PI * 2; angle += Math.PI * 0.5) {
+        const rx = Math.cos(angle) * 16;
+        const ry = Math.sin(angle) * 16;
+        ctx.beginPath();
+        ctx.arc(rx, ry, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // 4. 悬浮悬空火魔精核 (Floating Apex Power Crystal Flame)
+    const floatY = Math.sin(time * 3.5 + cx) * 2;
+    ctx.shadowColor = '#f43f5e';
+    ctx.shadowBlur = 12;
+
+    ctx.fillStyle = '#ff2200';
+    ctx.beginPath();
+    ctx.arc(0, floatY, 6.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(0, floatY, 2.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+}
+
+function drawAbyssalAltar(ctx, obs) {
+    const time = Date.now() * 0.001;
+    let cx = 0, cy = 0;
+    if (obs.points && obs.points.length > 0) {
+        obs.points.forEach(p => { cx += p.x; cy += p.y; });
+        cx /= obs.points.length;
+        cy /= obs.points.length;
+    } else {
+        cx = obs.x || 0; cy = obs.y || 0;
+    }
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 0. 祭坛基底超大型血红魔阵外环 (Grand Blood Sanctum Perimeter Ring)
+    const grandGlow = 0.7 + Math.sin(time * 2.2) * 0.3;
+    ctx.save();
+    ctx.strokeStyle = `rgba(244, 63, 94, ${grandGlow * 0.75})`;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(0, 0, 78, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 12 Perimeter Rune Nodes
+    ctx.fillStyle = `rgba(251, 146, 60, ${grandGlow})`;
+    for (let i = 0; i < 12; i++) {
+        const ang = (i * Math.PI * 2) / 12 + time * 0.08;
+        const rx = Math.cos(ang) * 78;
+        const ry = Math.sin(ang) * 78;
+        ctx.beginPath();
+        ctx.arc(rx, ry, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.restore();
+
+    // 1. 六角祭台黑曜石阶梯与深红边缘 (Tiered Hexagonal Altar Base)
+    ctx.fillStyle = '#080101';
+    ctx.strokeStyle = '#dc2626';
+    ctx.lineWidth = 3.5;
+
+    ctx.beginPath();
+    const pts = obs.points || [];
+    if (pts.length > 0) {
+        ctx.moveTo(pts[0].x - cx, pts[0].y - cy);
+        for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x - cx, pts[i].y - cy);
+        }
+    } else {
+        ctx.arc(0, 0, 65, 0, Math.PI * 2);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // 2. 祭台内层金红金属烫印衬圈 (Gold & Crimson Inner Metal Filigree)
+    ctx.strokeStyle = '#fbbf24';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    if (pts.length > 0) {
+        pts.forEach((p, idx) => {
+            const rx = (p.x - cx) * 0.82;
+            const ry = (p.y - cy) * 0.82;
+            if (idx === 0) ctx.moveTo(rx, ry);
+            else ctx.lineTo(rx, ry);
+        });
+    } else {
+        ctx.arc(0, 0, 52, 0, Math.PI * 2);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    // 3. 祭坛地面蚀刻发光恶魔召唤法阵/双交错符文印记 (Inscribed Infernal Hexagram Ritual Circle)
+    const starGlow = 0.75 + Math.sin(time * 2.8) * 0.25;
+    ctx.strokeStyle = `rgba(239, 68, 68, ${starGlow})`;
+    ctx.lineWidth = 2;
+
+    // Outer ritual circle
+    ctx.beginPath(); ctx.arc(0, 0, 42, 0, Math.PI * 2); ctx.stroke();
+
+    // Inner hexagram star
+    ctx.strokeStyle = `rgba(254, 240, 138, ${starGlow})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+        const a1 = (i * Math.PI * 2) / 3;
+        const a2 = a1 + (Math.PI * 2) / 3;
+        const x1 = Math.cos(a1) * 38, y1 = Math.sin(a1) * 38;
+        const x2 = Math.cos(a2) * 38, y2 = Math.sin(a2) * 38;
+        ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    }
+    for (let i = 0; i < 3; i++) {
+        const a1 = (i * Math.PI * 2) / 3 + Math.PI / 3;
+        const a2 = a1 + (Math.PI * 2) / 3;
+        const x1 = Math.cos(a1) * 38, y1 = Math.sin(a1) * 38;
+        const x2 = Math.cos(a2) * 38, y2 = Math.sin(a2) * 38;
+        ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    }
+    ctx.stroke();
+
+    // 4. 四角地狱圣火盆 (4 Corner Hellfire Braziers with Flickering Flames)
+    for (let i = 0; i < 4; i++) {
+        const brazierAng = (i * Math.PI) / 2 + Math.PI / 4;
+        const bx = Math.cos(brazierAng) * 48;
+        const by = Math.sin(brazierAng) * 48;
+
+        // Stone bowl
+        ctx.fillStyle = '#1c1917';
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+        // Flickering fire
+        const flameHeight = 6 + Math.random() * 5;
+        ctx.fillStyle = '#ff3300';
+        ctx.beginPath();
+        ctx.moveTo(bx - 4, by);
+        ctx.quadraticCurveTo(bx, by - flameHeight - 3, bx + 4, by);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#fef08a';
+        ctx.beginPath();
+        ctx.arc(bx, by - 2, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // 5. 祭坛核心魔眼 (Sanctum Core Eye with pulsating pulse)
+    ctx.shadowColor = '#ff2200';
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = '#ff0000';
+    ctx.beginPath(); ctx.arc(0, 0, 8.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // 6. 连接祭坛与四角方尖碑的魔符封印重型铁链 (Heavy Magma Sealing Chains connecting Altar to 4 Monoliths)
+    const chainTargets = [
+        { x: -110, y: -160 }, // Northwest Monolith
+        { x: -110, y: 160 },  // Southwest Monolith
+        { x: 110, y: -160 },  // Northeast Monolith
+        { x: 110, y: 160 }    // Southeast Monolith
+    ];
+
+    chainTargets.forEach(target => {
+        // Main dark chain core
+        ctx.strokeStyle = '#1e293b';
+        ctx.lineWidth = 4.5;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(target.x, target.y);
+        ctx.stroke();
+
+        // Inner glowing magma thread
+        ctx.strokeStyle = '#fb923c';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(target.x, target.y);
+        ctx.stroke();
+
+        // Detailed chain links along the chain line
+        const dist = Math.hypot(target.x, target.y);
+        const steps = Math.floor(dist / 12);
+        const dx = target.x / steps;
+        const dy = target.y / steps;
+
+        for (let s = 1; s < steps; s++) {
+            const lx = dx * s;
+            const ly = dy * s;
+            
+            ctx.save();
+            ctx.translate(lx, ly);
+            ctx.rotate(Math.atan2(dy, dx) + (s % 2 === 0 ? 0 : Math.PI / 2));
+            
+            // Link outer iron loop
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 5.5, 3.2, 0, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Link magma glow core
+            ctx.strokeStyle = '#f97316';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 4.5, 2.5, 0, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.restore();
+        }
+    });
+
+    ctx.restore();
+}
+
+function drawDetailedStalagmite(ctx, obs) {
+    const time = Date.now() * 0.001;
+    let cx = 0, cy = 0;
+    const pts = obs.points || [];
+    if (pts.length > 0) {
+        pts.forEach(p => { cx += p.x; cy += p.y; });
+        cx /= pts.length;
+        cy /= pts.length;
+    } else {
+        cx = obs.x || 0; cy = obs.y || 0;
+    }
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 1. Base dark basalt/cave stone fill & gradient
+    const grad = ctx.createRadialGradient(0, 0, 5, 0, 0, 50);
+    grad.addColorStop(0, '#2d2320');
+    grad.addColorStop(0.7, '#1c1917');
+    grad.addColorStop(1, '#0f0d0c');
+
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = '#e11d48';
+    ctx.lineWidth = 2.2;
+
+    ctx.beginPath();
+    if (pts.length > 0) {
+        ctx.moveTo(pts[0].x - cx, pts[0].y - cy);
+        for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x - cx, pts[i].y - cy);
+        }
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // 2. Internal 3D Crystalline Facets & Ridge Lines
+    if (pts.length > 0) {
+        const apexX = (pts[0].x - cx) * 0.25;
+        const apexY = (pts[0].y - cy) * 0.25;
+
+        ctx.strokeStyle = 'rgba(244, 63, 94, 0.45)';
+        ctx.lineWidth = 1.4;
+        pts.forEach((p, idx) => {
+            ctx.beginPath();
+            ctx.moveTo(p.x - cx, p.y - cy);
+            ctx.lineTo(apexX, apexY);
+            ctx.stroke();
+
+            if (idx % 2 === 0) {
+                const nextP = pts[(idx + 2) % pts.length];
+                ctx.strokeStyle = 'rgba(251, 113, 133, 0.25)';
+                ctx.beginPath();
+                ctx.moveTo(p.x - cx, p.y - cy);
+                ctx.lineTo((nextP.x - cx + apexX) * 0.5, (nextP.y - cy + apexY) * 0.5);
+                ctx.stroke();
+            }
+        });
+
+        // Glowing magma vein
+        const veinPulse = 0.6 + Math.sin(time * 2.5 + cx * 0.1) * 0.4;
+        ctx.strokeStyle = `rgba(251, 146, 60, ${veinPulse})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < pts.length; i += 2) {
+            const p1 = pts[i];
+            const p2 = pts[(i + 3) % pts.length];
+            ctx.moveTo((p1.x - cx) * 0.6, (p1.y - cy) * 0.6);
+            ctx.lineTo((p2.x - cx) * 0.3, (p2.y - cy) * 0.3);
+        }
+        ctx.stroke();
+    }
+
+    // 3. Sharp Crystalline Edge Glints
+    if (pts.length > 0) {
+        ctx.fillStyle = '#fef08a';
+        for (let i = 0; i < pts.length; i += 3) {
+            const p = pts[i];
+            ctx.beginPath();
+            ctx.arc(p.x - cx, p.y - cy, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+}
+
+function drawDetailedRock(ctx, obs) {
+    const time = Date.now() * 0.001;
+    let cx = 0, cy = 0;
+    const pts = obs.points || [];
+    if (pts.length > 0) {
+        pts.forEach(p => { cx += p.x; cy += p.y; });
+        cx /= pts.length;
+        cy /= pts.length;
+    } else {
+        cx = obs.x || 0; cy = obs.y || 0;
+    }
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 1. Dark Obsidian & Volcanic Basalt Base
+    const grad = ctx.createLinearGradient(-30, -30, 30, 30);
+    grad.addColorStop(0, '#1e293b');
+    grad.addColorStop(0.5, '#0f172a');
+    grad.addColorStop(1, '#020617');
+
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = '#ea580c';
+    ctx.lineWidth = 2.5;
+
+    ctx.beginPath();
+    if (pts.length > 0) {
+        ctx.moveTo(pts[0].x - cx, pts[0].y - cy);
+        for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x - cx, pts[i].y - cy);
+        }
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // 2. Jagged Fracture Planes
+    if (pts.length > 0) {
+        ctx.strokeStyle = 'rgba(249, 115, 22, 0.4)';
+        ctx.lineWidth = 1.5;
+
+        for (let i = 0; i < pts.length; i++) {
+            const p1 = pts[i];
+            const p2 = pts[(i + Math.floor(pts.length / 2)) % pts.length];
+            ctx.beginPath();
+            ctx.moveTo((p1.x - cx) * 0.9, (p1.y - cy) * 0.9);
+            ctx.lineTo((p2.x - cx) * 0.3, (p2.y - cy) * 0.3);
+            ctx.stroke();
+        }
+
+        // Inner glowing lava fissure
+        const lavaGlow = 0.7 + Math.sin(time * 3 + cy * 0.05) * 0.3;
+        ctx.strokeStyle = `rgba(239, 68, 68, ${lavaGlow})`;
+        ctx.lineWidth = 2.2;
+
+        ctx.beginPath();
+        for (let i = 0; i < pts.length - 1; i += 2) {
+            const p1 = pts[i];
+            const p2 = pts[i + 1];
+            ctx.moveTo((p1.x - cx) * 0.7, (p1.y - cy) * 0.7);
+            ctx.lineTo((p2.x - cx) * 0.7, (p2.y - cy) * 0.7);
+        }
+        ctx.stroke();
+    }
+
+    // 3. Specular Obsidian Glass Highlights
+    if (pts.length > 0) {
+        ctx.strokeStyle = 'rgba(255, 237, 213, 0.6)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        const p0 = pts[0];
+        const p1 = pts[1];
+        ctx.moveTo(p0.x - cx, p0.y - cy);
+        ctx.lineTo(p1.x - cx, p1.y - cy);
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+function drawDetailedIceLake(ctx, obs) {
+    const time = Date.now() * 0.001;
+    let cx = 0, cy = 0;
+    const pts = obs.points || [];
+    if (pts.length > 0) {
+        pts.forEach(p => { cx += p.x; cy += p.y; });
+        cx /= pts.length;
+        cy /= pts.length;
+    } else {
+        cx = obs.x || 0; cy = obs.y || 0;
+    }
+
+    ctx.save();
+
+    // 1. Deep frosted ice blue fill with glowing radial aura
+    ctx.fillStyle = 'rgba(12, 74, 110, 0.55)';
+    ctx.fill();
+
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // 2. Animated ice crack lattice & glowing frost veins
+    if (pts.length > 0) {
+        const numCracks = Math.min(pts.length, 6);
+        for (let i = 0; i < numCracks; i += 2) {
+            const p1 = pts[i];
+            const p2 = pts[(i + Math.floor(pts.length / 2)) % pts.length];
+            const p3 = pts[(i + 1) % pts.length];
+
+            const crackGlow = 0.4 + Math.sin(time * 2.2 + i) * 0.35;
+            ctx.strokeStyle = `rgba(186, 230, 254, ${crackGlow})`;
+            ctx.lineWidth = 1.4;
+
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.quadraticCurveTo(cx + Math.sin(time + i) * 12, cy + Math.cos(time + i) * 12, p2.x, p2.y);
+            ctx.stroke();
+
+            // Branching crack line
+            ctx.beginPath();
+            ctx.moveTo((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
+            ctx.lineTo(p3.x, p3.y);
+            ctx.stroke();
+        }
+
+        // 3. Dynamic floating frost sparkles / ice crystals shimmering
+        for (let s = 0; s < 7; s++) {
+            const sparkleAng = time * 0.7 + s * 0.9;
+            const sparkleR = 40 + Math.sin(time * 1.5 + s) * 35;
+            const sx = cx + Math.cos(sparkleAng) * sparkleR;
+            const sy = cy + Math.sin(sparkleAng) * sparkleR * 0.6;
+
+            const alpha = 0.3 + Math.sin(time * 3 + s) * 0.3;
+            ctx.fillStyle = `rgba(186, 230, 254, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(sx, sy, 2 + Math.sin(time * 4 + s), 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+
+    // 4. Render Cocytus Satan at ice lake center (Culled if Satan is offscreen)
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    if (levelId === 'level0_test') {
+        const satanX = 500, satanY = 480, satanR = 240;
+        const camX = window.cameraX || 0;
+        const camY = window.cameraY || 0;
+        const viewL = camX - satanR;
+        const viewR = camX + (typeof width !== 'undefined' ? width : 1200) + satanR;
+        const viewT = -camY - satanR;
+        const viewB = -camY + (typeof height !== 'undefined' ? height : 720) + satanR;
+        if (satanX >= viewL && satanX <= viewR && satanY >= viewT && satanY <= viewB) {
+            drawFrozenSatan(ctx, satanX, satanY);
+        }
+    }
+}
+
+function drawDetailedLava(ctx, obs) {
+    const time = Date.now() * 0.001;
+    let cx = 0, cy = 0;
+    const pts = obs.points || [];
+    if (pts.length > 0) {
+        pts.forEach(p => { cx += p.x; cy += p.y; });
+        cx /= pts.length;
+        cy /= pts.length;
+    } else {
+        cx = obs.x || 0; cy = obs.y || 0;
+    }
+
+    ctx.save();
+
+    // 1. Molten magma fill with pulsing glowing core
+    const lavaPulse = 0.8 + Math.sin(time * 3.2 + cx * 0.02) * 0.18;
+    ctx.fillStyle = `rgba(220, 38, 38, ${lavaPulse})`;
+    ctx.fill();
+
+    // Incandescent magma bank stroke
+    ctx.strokeStyle = '#f97316';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Inner bright yellow crust outline
+    ctx.strokeStyle = '#fef08a';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // 2. Animated flowing magma current ripples
+    if (pts.length > 0) {
+        ctx.lineWidth = 2;
+        const numRipples = Math.min(pts.length, 8);
+        for (let i = 0; i < numRipples; i += 2) {
+            const p1 = pts[i];
+            const p2 = pts[(i + 1) % pts.length];
+
+            const flowAlpha = 0.5 + Math.sin(time * 4 + i) * 0.3;
+            ctx.strokeStyle = `rgba(254, 240, 138, ${flowAlpha})`;
+
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.quadraticCurveTo(
+                (p1.x + p2.x) * 0.5 + Math.sin(time * 2 + i) * 15,
+                (p1.y + p2.y) * 0.5 + Math.cos(time * 2 + i) * 15,
+                p2.x, p2.y
+            );
+            ctx.stroke();
+        }
+
+        // 3. Popping lava bubbles & floating embers
+        for (let b = 0; b < 5; b++) {
+            const bubbleProgress = (time * 1.5 + b * 0.4) % 1.0;
+            const bp1 = pts[b % pts.length];
+            const bp2 = pts[(b + 3) % pts.length];
+            const bx = bp1.x + (bp2.x - bp1.x) * bubbleProgress;
+            const by = bp1.y + (bp2.y - bp1.y) * bubbleProgress;
+
+            // Popping bubble ring
+            const bubbleR = 2 + bubbleProgress * 6;
+            const bubbleAlpha = 1.0 - bubbleProgress;
+
+            ctx.strokeStyle = `rgba(255, 255, 255, ${bubbleAlpha})`;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(bx, by, bubbleR, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.fillStyle = `rgba(254, 240, 138, ${bubbleAlpha})`;
+            ctx.beginPath();
+            ctx.arc(bx, by - bubbleProgress * 12, 1.8, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+}
+
+function applyObstacleTheme(obs) {
+    const time = Date.now() * 0.001;
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    if (obs.type === 'volcano') {
+        drawRealisticVolcano(ctx, obs);
+    } else if (obs.type === 'monolith') {
+        drawInfernalMonolith(ctx, obs);
+    } else if (obs.type === 'altar') {
+        drawAbyssalAltar(ctx, obs);
+    } else if (obs.type === 'lava') {
+        drawDetailedLava(ctx, obs);
+    } else if (obs.type === 'ice_lake' || obs.type === 'ice') {
+        drawDetailedIceLake(ctx, obs);
+    } else if (obs.type === 'stalagmite' || obs.type === 'stalactite') {
+        drawDetailedStalagmite(ctx, obs);
+    } else if (obs.type === 'rock' || obs.type === 'obsidian' || obs.type === 'nature') {
+        drawDetailedRock(ctx, obs);
+    } else if (obs.type === 'glass') {
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.18)';
+        ctx.fill();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.6;
+        ctx.setLineDash([6, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    } else {
+        ctx.fillStyle = '#0f172a';
+        ctx.fill();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+}
+
+function isWorldRectVisible(x, y, w, h, margin = 150) {
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    if (levelId !== 'level0_test' && levelId !== 'level4_yacht' && levelId !== 'level6_train' && levelId !== 'level7_lab') {
+        return true;
+    }
+    const camX = window.cameraX || 0;
+    const camY = window.cameraY || 0;
+    const viewL = camX - margin;
+    const viewR = camX + (typeof width !== 'undefined' ? width : 1200) + margin;
+    const viewT = -camY - margin;
+    const viewB = -camY + (typeof height !== 'undefined' ? height : 720) + margin;
+
+    return (x + w >= viewL && x <= viewR && y + h >= viewT && y <= viewB);
+}
+
+function drawObstacle(obs) {
+    const camX = window.cameraX || 0;
+    const camY = window.cameraY || 0;
+    const bb = ensureObstacleBBox(obs);
+
+    const margin = 150;
+    if (bb.maxX < camX - margin || bb.minX > camX + width + margin) return;
+    if (bb.maxY < -camY - margin || bb.minY > -camY + height + margin) return;
+
+    if (obs.points && Array.isArray(obs.points)) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        ctx.moveTo(obs.points[0].x + 3, obs.points[0].y + 3);
+        for (let i = 1; i < obs.points.length; i++) {
+            ctx.lineTo(obs.points[i].x + 3, obs.points[i].y + 3);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(obs.points[0].x, obs.points[0].y);
+        for (let i = 1; i < obs.points.length; i++) {
+            ctx.lineTo(obs.points[i].x, obs.points[i].y);
+        }
+        ctx.closePath();
+
+        applyObstacleTheme(obs);
+        ctx.restore();
+        return;
+    }
+
+    if (obs.arc) {
+        if (!obs._polyCache) obs._polyCache = arcToPolygon(obs.arc);
+        ctx.save();
+        const pts = obs._polyCache;
+
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x + 3, pts[0].y + 3);
+        for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x + 3, pts[i].y + 3);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x, pts[i].y);
+        }
+        ctx.closePath();
+
+        applyObstacleTheme(obs);
+        ctx.restore();
+        return;
+    }
+
+    if (obs.x + obs.w < camX - 150 || obs.x > camX + width + 150) {
+        return;
+    }
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+    if (levelId === 'level3_bank' && !obs.isOuterBorder) {
+        if (typeof isObjectRevealed === 'function' && !isObjectRevealed(obs.x, obs.y, obs.w, obs.h)) {
+            return;
+        }
+    }
+    if (obs.invisible) {
+        return;
+    }
+    if (obs.isOceanMask) {
+        ctx.save();
+        if ((levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level4_yacht') {
+            let isUpper = obs.y < 360;
+            let grad;
+            if (isUpper) {
+                grad = ctx.createLinearGradient(obs.x, obs.y + obs.h, obs.x, obs.y);
+            } else {
+                grad = ctx.createLinearGradient(obs.x, obs.y, obs.x, obs.y + obs.h);
+            }
+            
+            // Outer fade to deep night-sea blue
+            grad.addColorStop(0, 'rgba(34, 211, 238, 0.45)'); // Intense cyan at the hull edge
+            grad.addColorStop(0.15, 'rgba(13, 148, 136, 0.28)'); // Rich teal
+            grad.addColorStop(0.45, 'rgba(6, 182, 212, 0.12)'); // Soft glow
+            grad.addColorStop(1, '#051429'); // Deep sea background
+            
+            ctx.fillStyle = grad;
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+            
+            // Draw an extremely bright neon line along the inner jagged edge
+            ctx.shadowColor = '#22d3ee';
+            ctx.shadowBlur = 15;
+            
+            // 1. Layer of thick cyan glow line
+            ctx.strokeStyle = 'rgba(6, 182, 212, 0.85)';
+            ctx.lineWidth = 10;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            if (isUpper) {
+                ctx.moveTo(obs.x, obs.y + obs.h);
+                ctx.lineTo(obs.x + obs.w, obs.y + obs.h);
+                if (obs.x < 2250) {
+                    ctx.lineTo(obs.x + obs.w, obs.y + obs.h + 80);
+                } else if (obs.x === 2250) {
+                    ctx.lineTo(obs.x + obs.w, 360);
+                }
+            } else {
+                ctx.moveTo(obs.x, obs.y);
+                ctx.lineTo(obs.x + obs.w, obs.y);
+                if (obs.x < 2250) {
+                    ctx.lineTo(obs.x + obs.w, obs.y - 80);
+                } else if (obs.x === 2250) {
+                    ctx.lineTo(obs.x + obs.w, 360);
+                }
+            }
+            ctx.stroke();
+
+            // 2. Layer of intense white-cyan core line for superb brightness (发光感)
+            ctx.save();
+            ctx.strokeStyle = '#E0F7FA';
+            ctx.lineWidth = 3.5;
+            ctx.shadowBlur = 5;
+            ctx.stroke();
+            ctx.restore();
+        } else {
+            // Keep original level4 behavior (solid ocean mask)
+            ctx.fillStyle = '#051429';
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+        }
+        ctx.restore();
+        return;
+    }
+    ctx.save();
+
+    if (obs.type === 'solid' || obs.type === 'pool') {
+        const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+        
+        // 实体墙：阴影 + 渐变墙体
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.fillRect(obs.x + 4, obs.y + 4, obs.w, obs.h);
+
+        let grad = ctx.createLinearGradient(obs.x, obs.y, obs.x, obs.y + obs.h);
+        let wallStroke, gridStroke;
+        
+        if (obs.type === 'pool' || obs.label === 'SWIMMING POOL') {
+            grad.addColorStop(0, '#0284c7'); // 湛蓝水体
+            grad.addColorStop(1, '#0c4a6e'); // 深蓝底
+            wallStroke = '#00e5ff'; // 亮青高光池边
+            gridStroke = 'rgba(0, 229, 255, 0.25)'; // 水波网格线
+        } else if (levelId === 'level7_lab') {
+            // 顶石科研综合体：高科钛金装甲墙 + 翡翠生化荧光战术描边
+            grad.addColorStop(0, '#0f172a');
+            grad.addColorStop(1, '#022c22');
+            wallStroke = '#10b981';
+            gridStroke = 'rgba(16, 185, 129, 0.25)';
+        } else if ((levelId === 'level0_test' || levelId === 'level6_train')) {
+            // 军用特别快车装甲车体外壳：暗黑装甲钢 + 冰蓝战术描边
+            grad.addColorStop(0, '#1c1917');
+            grad.addColorStop(1, '#0f172a');
+            wallStroke = '#38bdf8';
+            gridStroke = 'rgba(56, 189, 248, 0.2)';
+        } else if (levelId === 'level5_hotel') {
+            // 闪灵红酒店大堂：奢华暗红色实心墙（深度极高，极易辨识）
+            grad.addColorStop(0, '#360407'); // 深绛红色/红褐玛瑙
+            grad.addColorStop(1, '#1A0102'); // 深沉血影红
+            wallStroke = '#A81C21'; // 高饱和红色霓虹感轮廓，清晰脱俗
+            gridStroke = 'rgba(168, 28, 33, 0.24)'; // 对应红线暗隔缝
+        } else if (levelId === 'level1_airport') {
+            // 机场关卡：亮白色/浅灰色实墙，搭配深灰高光描边与精致灰色网格纹
+            grad.addColorStop(0, '#FFFFFF');
+            grad.addColorStop(1, '#EAECEF');
+            wallStroke = 'rgba(107, 114, 128, 0.85)'; // 深灰色描边
+            gridStroke = 'rgba(156, 163, 175, 0.18)'; // 灰色网格缝隙
+        } else if (levelId === 'level3_bank') {
+            // 金库关卡：夜间战术装甲墙，深海夜蓝与高硬度钛钢底色，搭配皇家夜蓝高亮描边
+            grad.addColorStop(0, '#1E293B'); // 深钛金灰
+            grad.addColorStop(1, '#0F172A'); // 暗夜炭黑
+            wallStroke = 'rgba(59, 130, 246, 0.85)'; // 皇家夜蓝高亮描边
+            gridStroke = 'rgba(59, 130, 246, 0.2)'; // 深蓝拼接缝
+        } else if (levelId === 'level4_yacht') {
+            // 豪华游艇关卡：船身外框和全船实体墙改为尊贵亮白色（豪华游艇烤漆质感）
+            grad.addColorStop(0, '#ffffff'); // 顶级亮白钢琴烤漆（游艇白）
+            grad.addColorStop(1, '#f1f5f9'); // 渐变浅灰白色，增加立体光影
+            wallStroke = '#cbd5e1'; // 钢银高精描边
+            gridStroke = 'rgba(148, 163, 184, 0.12)'; // 船舱板拼缝
+        } else {
+            // 地铁关卡：深褐色/暗棕色车站实墙，搭配浅褐/暖沙高光与细腻褐棕色网格
+            grad.addColorStop(0, '#543F33'); // 饱满的战术褐
+            grad.addColorStop(1, '#271B16'); // 哑光暗沙褐
+            wallStroke = 'rgba(140, 110, 90, 0.85)'; // 浅棕/沙色高光描边
+            gridStroke = 'rgba(140, 110, 90, 0.18)'; // 褐棕色网格缝隙
+        }
+        
+        ctx.fillStyle = grad;
+        ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+        // 墙面混凝土网格纹理
+        ctx.strokeStyle = gridStroke;
+        ctx.lineWidth = 1;
+        const tileSize = 16;
+        for (let x = obs.x; x < obs.x + obs.w; x += tileSize) {
+            for (let y = obs.y; y < obs.y + obs.h; y += tileSize) {
+                ctx.strokeRect(x, y, Math.min(tileSize, obs.x + obs.w - x), Math.min(tileSize, obs.y + obs.h - y));
+            }
+        }
+
+        // 高光描边
+        ctx.strokeStyle = wallStroke;
+        ctx.lineWidth = 1.8;
+        ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+
+        // 银行关卡额外细节：在边角绘制防爆铆钉
+        if (levelId === 'level3_bank' && obs.w >= 16 && obs.h >= 16) {
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.6)';
+            const rSize = 2.5;
+            ctx.fillRect(obs.x + 3, obs.y + 3, rSize, rSize);
+            ctx.fillRect(obs.x + obs.w - 3 - rSize, obs.y + 3, rSize, rSize);
+            ctx.fillRect(obs.x + 3, obs.y + obs.h - 3 - rSize, rSize, rSize);
+            ctx.fillRect(obs.x + obs.w - 3 - rSize, obs.y + obs.h - 3 - rSize, rSize, rSize);
+        }
+
+    } else if (obs.type === 'glass') {
+        const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+        if ((levelId === 'level0_test' || levelId === 'level6_train')) {
+            // 装甲列车车厢观景强化防弹玻璃
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.12)';
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([6, 3]);
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+            ctx.setLineDash([]);
+        } else if (levelId === 'level5_hotel') {
+            // 闪灵红酒店大厅：高级拉丝钢/银灰色防弹玻璃屏风 (不遮挡视线/阻挡枪弹与玩家)
+            ctx.fillStyle = 'rgba(226, 232, 240, 0.16)'; // 银灰反光底色
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+            // 银灰色反光斜条纹
+            ctx.strokeStyle = 'rgba(203, 213, 225, 0.3)';
+            ctx.lineWidth = 1.2;
+            for (let sx = obs.x - obs.h; sx < obs.x + obs.w; sx += 12) {
+                ctx.beginPath();
+                ctx.moveTo(Math.max(obs.x, sx), obs.y);
+                ctx.lineTo(Math.min(obs.x + obs.w, sx + obs.h), obs.y + obs.h);
+                ctx.stroke();
+            }
+
+            ctx.strokeStyle = '#94A3B8'; // 银灰色高光边框
+            ctx.lineWidth = 1.6;
+            ctx.setLineDash([6, 3]);
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+            ctx.setLineDash([]);
+
+            // 四边不锈钢银灰色加固底夹
+            ctx.fillStyle = '#CBD5E1';
+            const cs = 4;
+            ctx.fillRect(obs.x - 1, obs.y - 1, cs, cs);
+            ctx.fillRect(obs.x + obs.w - cs + 1, obs.y - 1, cs, cs);
+            ctx.fillRect(obs.x - 1, obs.y + obs.h - cs + 1, cs, cs);
+            ctx.fillRect(obs.x + obs.w - cs + 1, obs.y + obs.h - cs + 1, cs, cs);
+        } else if (levelId === 'level3_bank') {
+            // 银行防弹安全玻璃：半透夜蓝色 + 透视金属竖条纹
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.14)';
+            ctx.lineWidth = 1;
+            for (let gx = obs.x + 10; gx < obs.x + obs.w; gx += 16) {
+                ctx.beginPath();
+                ctx.moveTo(gx, obs.y);
+                ctx.lineTo(gx, obs.y + obs.h);
+                ctx.stroke();
+            }
+
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.85)';
+            ctx.lineWidth = 1.6;
+            ctx.setLineDash([5, 3]);
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+            ctx.setLineDash([]);
+        } else {
+            // 玻璃墙：半透明底色 + 虚线框 + 四角加固件
+            ctx.fillStyle = 'rgba(0, 204, 255, 0.1)';
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+            ctx.strokeStyle = 'rgba(0, 204, 255, 0.8)';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([6, 3]);
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#00CCFF';
+            const cs = 4;
+            ctx.fillRect(obs.x - 1, obs.y - 1, cs, cs);
+            ctx.fillRect(obs.x + obs.w - cs + 1, obs.y - 1, cs, cs);
+            ctx.fillRect(obs.x - 1, obs.y + obs.h - cs + 1, cs, cs);
+            ctx.fillRect(obs.x + obs.w - cs + 1, obs.y + obs.h - cs + 1, cs, cs);
+        }
+
+    } else if (obs.type === 'low_wall') {
+        const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+        ctx.fillRect(obs.x + 3, obs.y + 3, obs.w, obs.h);
+
+        let counterGrad = ctx.createLinearGradient(obs.x, obs.y, obs.x, obs.y + obs.h);
+        if ((levelId === 'level0_test' || levelId === 'level6_train')) {
+            // 列车金库战术隔板矮墙
+            counterGrad.addColorStop(0, '#292524');
+            counterGrad.addColorStop(1, '#1c1917');
+            ctx.fillStyle = counterGrad;
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+        } else if (levelId === 'level5_hotel') {
+            // 闪灵红酒店大堂：高级古典实木胡桃色矮墙/前台 (视线遮挡/阻挡枪弹/可抛越手雷)
+            counterGrad.addColorStop(0, '#5A3825'); // 暖调胡桃木
+            counterGrad.addColorStop(1, '#341D12'); // 深黑古董红木
+            ctx.fillStyle = counterGrad;
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+            // 仿木质年轮年纹雕刻拉丝理
+            ctx.strokeStyle = 'rgba(28, 14, 8, 0.45)';
+            ctx.lineWidth = 1.2;
+            if (obs.w > obs.h) {
+                // 横向木纹
+                for (let wy = obs.y + 2; wy < obs.y + obs.h; wy += 4) {
+                    ctx.beginPath();
+                    ctx.moveTo(obs.x, wy);
+                    ctx.lineTo(obs.x + obs.w, wy);
+                    ctx.stroke();
+                }
+            } else {
+                // 纵向木纹
+                for (let wx = obs.x + 2; wx < obs.x + obs.w; wx += 4) {
+                    ctx.beginPath();
+                    ctx.moveTo(wx, obs.y);
+                    ctx.lineTo(wx, obs.y + obs.h);
+                    ctx.stroke();
+                }
+            }
+
+            // 精美实木哑光金边包边
+            ctx.strokeStyle = '#8E5E3C'; // 饱满的黄花梨/橡木棕
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+        } else if (levelId === 'level3_bank') {
+            // 银行关卡：战术琥珀橙底色，明确标注橙色物理属性！（视线被遮挡、枪支被阻挡、手雷可抛越）
+            counterGrad.addColorStop(0, '#D97706'); // 琥珀橙
+            counterGrad.addColorStop(1, '#78350F'); // 深褐橙
+            ctx.fillStyle = counterGrad;
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+            ctx.strokeStyle = '#F59E0B'; // 战术亮橙高光包边
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+
+            // 橙色战术斜线条纹
+            ctx.strokeStyle = 'rgba(251, 191, 36, 0.35)';
+            ctx.lineWidth = 1;
+            for (let sx = obs.x - obs.h; sx < obs.x + obs.w; sx += 8) {
+                ctx.beginPath();
+                ctx.moveTo(Math.max(obs.x, sx), obs.y);
+                ctx.lineTo(Math.min(obs.x + obs.w, sx + obs.h), obs.y + obs.h);
+                ctx.stroke();
+            }
+        } else if (levelId === 'level4_yacht') {
+            // 豪华游艇特殊属性低墙/护栏：深邃钛合金银灰，搭配精细拉丝钢格栅与极地冰蓝LED发光指示线
+            counterGrad.addColorStop(0, '#334155'); // 磨砂钢灰 (Slate 700)
+            counterGrad.addColorStop(1, '#0f172a'); // 深邃钛黑 (Slate 900)
+            ctx.fillStyle = counterGrad;
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+            // 亮银钢边包围
+            ctx.strokeStyle = '#94a3b8'; // 尊贵不锈钢银灰
+            ctx.lineWidth = 2.5;
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+
+            // 绘制精细的拉丝格栅肋条与铆钉，提供明显的工业外观和深度区分
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 1.2;
+            if (obs.w > obs.h) {
+                // 横向板：绘制密集纵向金属格栅
+                for (let px = obs.x + 10; px < obs.x + obs.w - 5; px += 20) {
+                    ctx.beginPath();
+                    ctx.moveTo(px, obs.y + 2);
+                    ctx.lineTo(px, obs.y + obs.h - 2);
+                    ctx.stroke();
+
+                    // 顶部与底部小铆钉点缀
+                    ctx.fillStyle = '#cbd5e1';
+                    ctx.fillRect(px - 1, obs.y + 1, 2, 2);
+                    ctx.fillRect(px - 1, obs.y + obs.h - 3, 2, 2);
+                }
+            } else {
+                // 纵向板：绘制密集横向金属格栅
+                for (let py = obs.y + 10; py < obs.y + obs.h - 5; py += 20) {
+                    ctx.beginPath();
+                    ctx.moveTo(obs.x + 2, py);
+                    ctx.lineTo(obs.x + obs.w - 2, py);
+                    ctx.stroke();
+
+                    // 左侧与右侧小铆钉点缀
+                    ctx.fillStyle = '#cbd5e1';
+                    ctx.fillRect(obs.x + 1, py - 1, 2, 2);
+                    ctx.fillRect(obs.x + obs.w - 3, py - 1, 2, 2);
+                }
+            }
+
+            // 绘制极地冰蓝LED指示发光条，凸显这是一个有“特殊物理属性（可抛雷/视线遮挡/阻挡枪弹）”的战术隔断
+            ctx.save();
+            ctx.shadowColor = '#00e5ff';
+            ctx.shadowBlur = 4;
+            ctx.strokeStyle = '#00e5ff'; // 极地亮青发光
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            if (obs.w > obs.h) {
+                ctx.moveTo(obs.x + 4, obs.y + obs.h / 2);
+                ctx.lineTo(obs.x + obs.w - 4, obs.y + obs.h / 2);
+            } else {
+                ctx.moveTo(obs.x + obs.w / 2, obs.y + 4);
+                ctx.lineTo(obs.x + obs.w / 2, obs.y + obs.h - 4);
+            }
+            ctx.stroke();
+            ctx.restore();
+        } else {
+            // 战术橙色低矮掩体 (原版经典战术橙：视线遮挡 / 阻挡枪弹 / 可抛越手雷)
+            const orangeGrad = ctx.createLinearGradient(obs.x, obs.y, obs.x, obs.y + obs.h);
+            orangeGrad.addColorStop(0, 'rgba(249, 115, 22, 0.28)'); // 亮橙
+            orangeGrad.addColorStop(1, 'rgba(194, 65, 12, 0.38)'); // 深橙
+            ctx.fillStyle = orangeGrad;
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+            // 橙色战术斜线条纹
+            ctx.strokeStyle = 'rgba(251, 146, 60, 0.32)';
+            ctx.lineWidth = 1;
+            for (let sx = obs.x - obs.h; sx < obs.x + obs.w; sx += 8) {
+                ctx.beginPath();
+                ctx.moveTo(Math.max(obs.x, sx), obs.y);
+                ctx.lineTo(Math.min(obs.x + obs.w, sx + obs.h), obs.y + obs.h);
+                ctx.stroke();
+            }
+
+            // 战术亮橙高光边框
+            ctx.strokeStyle = '#FF9900';
+            ctx.lineWidth = 1.8;
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+        }
+    }
+
+    const curLvlId = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+    if (obs.label && !obs.hideLabel && curLvlId !== 'level0_test') {
+        const text = obs.displayName !== undefined ? obs.displayName : obs.label;
+        ctx.font = 'bold 7.5px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        const txtW = ctx.measureText(text).width;
+        let labelX = obs.labelX !== undefined ? obs.labelX : (obs.x + 3);
+        let labelY = obs.labelY !== undefined ? obs.labelY : (obs.y - 4);
+        if (obs.labelY === undefined && obs.y < 95) {
+            labelY = (obs.h > 20) ? obs.y + 12 : obs.y + obs.h + 8;
+        }
+        if (obs.tagXOffset) labelX += obs.tagXOffset;
+        if (obs.tagYOffset) labelY += obs.tagYOffset;
+
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+        ctx.fillRect(labelX - 2, labelY - 7, txtW + 4, 9);
+        ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(labelX - 2, labelY - 7, txtW + 4, 9);
+
+        ctx.fillStyle = '#cbd5e1';
+        ctx.fillText(text, labelX, labelY);
+    }
+
+    const isInfiniteBlind = (level0InfiniteBlindTimer > 0);
+    if (blindActive && !isInfiniteBlind && (obs.type === 'pool' || obs.label === 'SWIMMING POOL' || inBlindZone(obs.x + obs.w / 2, obs.y + obs.h / 2))) {
+        ctx.save();
+        ctx.strokeStyle = '#facc15';
+        ctx.lineWidth = 1.8;
+        ctx.strokeRect(obs.x - 1, obs.y - 1, obs.w + 2, obs.h + 2);
+        ctx.restore();
+    }
+
+    ctx.restore();
+}
+
+function drawSecurityGates() {
+    securityGates.forEach(gate => {
+        if (typeof isObjectRevealed === 'function' && !isObjectRevealed(gate.x, gate.y, gate.w, gate.h)) {
+            return;
+        }
+        ctx.save();
+
+        const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+        const isAirport = (currentLevelId === 'level1_airport');
+        if (isAirport) {
+            // === 关卡 1 机场安检金属探测门 (Airport Checkpoint WTMD - 半写实风，呼应值机台与转盘) ===
+            const isAlarm = (typeof gateAlarmCooldown !== 'undefined' && gateAlarmCooldown > 0);
+            const pillarW = gate.w + 6;
+            const pillarH = 9;
+            const pX = gate.x + gate.w / 2 - pillarW / 2;
+            const openSpan = gate.h - pillarH * 2; // corridor height between posts
+
+            // 1. 地面过道防滑耐磨垫 (深色耐磨橡胶垫 + 防滑纹理 + 黄黑安全防跌边界)
+            ctx.fillStyle = '#09131a';
+            ctx.fillRect(gate.x - 3, gate.y, gate.w + 6, gate.h);
+            
+            // 地板防滑肋条细纹
+            ctx.strokeStyle = 'rgba(51, 65, 85, 0.45)';
+            ctx.lineWidth = 1;
+            for (let my = gate.y + pillarH + 4; my < gate.y + gate.h - pillarH - 4; my += 5) {
+                ctx.beginPath();
+                ctx.moveTo(gate.x - 1, my);
+                ctx.lineTo(gate.x + gate.w + 1, my);
+                ctx.stroke();
+            }
+
+            // 行人通行方向引导微箭头 (极淡极地青色)
+            ctx.strokeStyle = isAlarm ? 'rgba(255, 51, 68, 0.3)' : 'rgba(0, 204, 255, 0.3)';
+            ctx.lineWidth = 1.2;
+            const midY = gate.y + gate.h / 2;
+            ctx.beginPath();
+            ctx.moveTo(gate.x + 4, midY); ctx.lineTo(gate.x + gate.w - 4, midY);
+            ctx.moveTo(gate.x + gate.w - 8, midY - 3); ctx.lineTo(gate.x + gate.w - 4, midY); ctx.lineTo(gate.x + gate.w - 8, midY + 3);
+            ctx.stroke();
+
+            // 门框地基外侧黄色警告虚线
+            ctx.strokeStyle = 'rgba(234, 179, 8, 0.4)';
+            ctx.lineWidth = 0.8;
+            ctx.setLineDash([3, 2]);
+            ctx.strokeRect(gate.x - 4, gate.y - 1, gate.w + 8, gate.h + 2);
+            ctx.setLineDash([]);
+
+            // 2. 南北两侧超宽重型探测立柱 (Walk-Through Metal Detector Archway Columns)
+            const gateStroke = isAlarm ? '#FF3344' : '#00CCFF';
+
+            // 顶部立柱 (North Pillar)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(pX, gate.y, pillarW, pillarH);
+            ctx.strokeStyle = gateStroke;
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(pX, gate.y, pillarW, pillarH);
+            // 柱体多区段感应 LED 阵列 (Multi-Zone Detection Indicator LEDs)
+            for (let li = 0; li < 3; li++) {
+                const lx = pX + 4 + li * 7;
+                ctx.fillStyle = isAlarm ? '#FF3344' : (li === 1 ? '#00CCFF' : '#00FF66');
+                ctx.fillRect(lx, gate.y + 2, 4, pillarH - 4);
+            }
+
+            // 底部立柱 (South Pillar)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(pX, gate.y + gate.h - pillarH, pillarW, pillarH);
+            ctx.strokeStyle = gateStroke;
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(pX, gate.y + gate.h - pillarH, pillarW, pillarH);
+            // 柱体多区段感应 LED 阵列
+            for (let li = 0; li < 3; li++) {
+                const lx = pX + 4 + li * 7;
+                ctx.fillStyle = isAlarm ? '#FF3344' : (li === 1 ? '#00CCFF' : '#00FF66');
+                ctx.fillRect(lx, gate.y + gate.h - pillarH + 2, 4, pillarH - 4);
+            }
+
+            // 3. 中央贯通式高敏电磁与光幕感应束 (Dual Optical / EM Scan Sensors)
+            // 两道纵向高敏光栅
+            ctx.strokeStyle = isAlarm ? 'rgba(255, 51, 68, 0.85)' : 'rgba(0, 255, 102, 0.65)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(gate.x + 6, gate.y + pillarH);
+            ctx.lineTo(gate.x + 6, gate.y + gate.h - pillarH);
+            ctx.moveTo(gate.x + gate.w - 6, gate.y + pillarH);
+            ctx.lineTo(gate.x + gate.w - 6, gate.y + gate.h - pillarH);
+            ctx.stroke();
+
+            // 动态扫描脉冲光点 (沿光幕上下移动)
+            const pulseT = ((Date.now() % 1400) / 1400);
+            const pulseY1 = (gate.y + pillarH + 4) + pulseT * (openSpan - 8);
+            const pulseY2 = (gate.y + gate.h - pillarH - 4) - pulseT * (openSpan - 8);
+            ctx.fillStyle = isAlarm ? '#FF3344' : '#00FF66';
+            ctx.beginPath(); ctx.arc(gate.x + 6, pulseY1, 1.8, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(gate.x + gate.w - 6, pulseY2, 1.8, 0, Math.PI * 2); ctx.fill();
+
+            // 4. 战术标签铭牌 (呼应 CAROUSEL / CHECK-IN 的文字标签规范)
+            ctx.font = 'bold 7.5px monospace';
+            ctx.textAlign = 'left';
+            const txt = gate.label + (isAlarm ? ' [ALARM]' : ' [SECURE]');
+            const txtW = ctx.measureText(txt).width;
+            let gateLabelX = gate.labelX !== undefined ? gate.labelX : (gate.x - 5);
+            let gateLabelY = gate.labelY !== undefined ? gate.labelY : (gate.y - 4);
+            if (gate.labelY === undefined && gate.y < 95) {
+                gateLabelY = gate.y + gate.h + 8;
+            }
+            if (gate.tagXOffset) gateLabelX += gate.tagXOffset;
+            if (gate.tagYOffset) gateLabelY += gate.tagYOffset;
+
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+            ctx.fillRect(gateLabelX - 2, gateLabelY - 7, txtW + 4, 9);
+            ctx.strokeStyle = isAlarm ? '#FF3344' : '#00FF66';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(gateLabelX - 2, gateLabelY - 7, txtW + 4, 9);
+
+            ctx.fillStyle = isAlarm ? '#FF3344' : '#00FF66';
+            ctx.fillText(txt, gateLabelX, gateLabelY);
+
+            ctx.restore();
+            return;
+        }
+
+        const isSubway = (currentLevelId === 'level2_subway');
+        if (isSubway) {
+            // === 关卡 2 地铁站厅智能自动剪票/验票拍卡闸机 (Subway AFC Retractable Flap Turnstile Gate) ===
+            const isAlarm = (typeof gateAlarmCooldown !== 'undefined' && gateAlarmCooldown > 0);
+            const pillarW = gate.w;
+            const pillarH = 10;
+            const openSpan = gate.h - pillarH * 2;
+
+            // 1. 地面黑色防滑通道导流垫 (Transit Floor Guide Mat)
+            ctx.fillStyle = '#090d16';
+            ctx.fillRect(gate.x, gate.y, gate.w, gate.h);
+
+            // 通道中心高亮通行导向箭头 (Directional Transit Arrow)
+            ctx.strokeStyle = isAlarm ? 'rgba(239, 68, 68, 0.6)' : 'rgba(56, 189, 248, 0.6)';
+            ctx.lineWidth = 1.4;
+            const midY = gate.y + gate.h / 2;
+            ctx.beginPath();
+            ctx.moveTo(gate.x + 3, midY); ctx.lineTo(gate.x + gate.w - 3, midY);
+            ctx.moveTo(gate.x + gate.w - 7, midY - 3.5); ctx.lineTo(gate.x + gate.w - 3, midY); ctx.lineTo(gate.x + gate.w - 7, midY + 3.5);
+            ctx.stroke();
+
+            // 2. 南北两侧流线型拉丝不锈钢机箱 (North & South Brushed Stainless Steel Pedestals)
+            const gateBoxStroke = isAlarm ? '#ef4444' : '#38bdf8';
+
+            // 北机箱 (North Turnstile Pedestal)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(gate.x, gate.y, pillarW, pillarH);
+            ctx.strokeStyle = gateBoxStroke;
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(gate.x, gate.y, pillarW, pillarH);
+
+            // 北机箱刷卡感应区与通行指示灯
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(gate.x + 3, gate.y + 2, 7, pillarH - 4);
+            ctx.fillStyle = isAlarm ? '#ef4444' : '#06b6d4';
+            ctx.fillRect(gate.x + 4.5, gate.y + 3.5, 4, pillarH - 7);
+            ctx.fillStyle = isAlarm ? '#ef4444' : '#22c55e';
+            ctx.fillRect(gate.x + pillarW - 8, gate.y + 2.5, 5, pillarH - 5);
+
+            // 南机箱 (South Turnstile Pedestal)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(gate.x, gate.y + gate.h - pillarH, pillarW, pillarH);
+            ctx.strokeStyle = gateBoxStroke;
+            ctx.lineWidth = 1.4;
+            ctx.strokeRect(gate.x, gate.y + gate.h - pillarH, pillarW, pillarH);
+
+            // 南机箱刷卡感应区与通行指示灯
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(gate.x + 3, gate.y + gate.h - pillarH + 2, 7, pillarH - 4);
+            ctx.fillStyle = isAlarm ? '#ef4444' : '#06b6d4';
+            ctx.fillRect(gate.x + 4.5, gate.y + gate.h - pillarH + 3.5, 4, pillarH - 7);
+            ctx.fillStyle = isAlarm ? '#ef4444' : '#22c55e';
+            ctx.fillRect(gate.x + pillarW - 8, gate.y + gate.h - pillarH + 2.5, 5, pillarH - 5);
+
+            // 3. 中央半透明阻挡翼闸/剪式拍打门 (Retractable Acrylic Flap Barrier Wings - 留出宽敞中心通行空间)
+            // 北阻挡翼 (North Flap Wing)
+            ctx.fillStyle = isAlarm ? 'rgba(239, 68, 68, 0.75)' : 'rgba(16, 185, 129, 0.75)';
+            ctx.beginPath();
+            ctx.moveTo(gate.x + gate.w / 2 - 2, gate.y + pillarH);
+            ctx.lineTo(gate.x + gate.w / 2 + 2, gate.y + pillarH);
+            ctx.lineTo(gate.x + gate.w / 2 + 5, gate.y + pillarH + openSpan * 0.3);
+            ctx.lineTo(gate.x + gate.w / 2 - 5, gate.y + pillarH + openSpan * 0.3);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = isAlarm ? '#ef4444' : '#10b981';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // 南阻挡翼 (South Flap Wing)
+            ctx.fillStyle = isAlarm ? 'rgba(239, 68, 68, 0.75)' : 'rgba(16, 185, 129, 0.75)';
+            ctx.beginPath();
+            ctx.moveTo(gate.x + gate.w / 2 - 2, gate.y + gate.h - pillarH);
+            ctx.lineTo(gate.x + gate.w / 2 + 2, gate.y + gate.h - pillarH);
+            ctx.lineTo(gate.x + gate.w / 2 + 5, gate.y + gate.h - pillarH - openSpan * 0.3);
+            ctx.lineTo(gate.x + gate.w / 2 - 5, gate.y + gate.h - pillarH - openSpan * 0.3);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = isAlarm ? '#ef4444' : '#10b981';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // 4. 红外对射光幕传感器 (Infrared Optical Beams)
+            ctx.strokeStyle = isAlarm ? 'rgba(239, 68, 68, 0.65)' : 'rgba(56, 189, 248, 0.35)';
+            ctx.lineWidth = 0.8;
+            for (let iy = gate.y + pillarH + 7; iy < gate.y + gate.h - pillarH - 5; iy += 8) {
+                ctx.beginPath();
+                ctx.moveTo(gate.x + 3, iy);
+                ctx.lineTo(gate.x + gate.w - 3, iy);
+                ctx.stroke();
+            }
+
+            // 5. 战术标签铭牌 (AFC Gate Tag)
+            ctx.font = 'bold 7.5px monospace';
+            ctx.textAlign = 'left';
+            const txt = (gate.label || 'TICKET GATE') + (isAlarm ? ' [LOCKED]' : ' [READY]');
+            const txtW = ctx.measureText(txt).width;
+            let gateLabelX = gate.labelX !== undefined ? gate.labelX : (gate.x - 5);
+            let gateLabelY = gate.labelY !== undefined ? gate.labelY : (gate.y - 4);
+            if (gate.labelY === undefined && gate.y < 95) {
+                gateLabelY = gate.y + gate.h + 8;
+            }
+            if (gate.tagXOffset) gateLabelX += gate.tagXOffset;
+            if (gate.tagYOffset) gateLabelY += gate.tagYOffset;
+
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+            ctx.fillRect(gateLabelX - 2, gateLabelY - 7, txtW + 4, 9);
+            ctx.strokeStyle = isAlarm ? '#ef4444' : '#38bdf8';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(gateLabelX - 2, gateLabelY - 7, txtW + 4, 9);
+
+            ctx.fillStyle = isAlarm ? '#ef4444' : '#38bdf8';
+            ctx.fillText(txt, gateLabelX, gateLabelY);
+
+            ctx.restore();
+            return;
+        }
+
+        // 1. 地面安检警示区域 (Floor indicator: subtle red glow zone)
+        ctx.fillStyle = 'rgba(255, 51, 68, 0.05)';
+        ctx.fillRect(gate.x, gate.y, gate.w, gate.h);
+
+        // 2. 侧边机箱柱体 (Top and Bottom posts/pillars of the walkthrough detector frame)
+        const pillarW = gate.w + 4;
+        const pillarH = 7;
+        const pX = gate.x + gate.w / 2 - pillarW / 2;
+
+        // 顶部立柱 (Top Post)
+        ctx.fillStyle = '#1e293b'; // 钢灰色
+        ctx.fillRect(pX, gate.y, pillarW, pillarH);
+        ctx.strokeStyle = '#ef4444'; // 红色警示包边
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(pX, gate.y, pillarW, pillarH);
+
+        // 顶部小红/绿LED工作指示灯
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath(); ctx.arc(pX + 3, gate.y + pillarH / 2, 1.2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#22c55e';
+        ctx.beginPath(); ctx.arc(pX + pillarW - 3, gate.y + pillarH / 2, 1.2, 0, Math.PI * 2); ctx.fill();
+
+        // 底部立柱 (Bottom Post)
+        ctx.fillStyle = '#1e293b';
+        ctx.fillRect(pX, gate.y + gate.h - pillarH, pillarW, pillarH);
+        ctx.strokeRect(pX, gate.y + gate.h - pillarH, pillarW, pillarH);
+
+        // 底部小红/绿LED工作指示灯
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath(); ctx.arc(pX + 3, gate.y + gate.h - pillarH / 2, 1.2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#22c55e';
+        ctx.beginPath(); ctx.arc(pX + pillarW - 3, gate.y + gate.h - pillarH / 2, 1.2, 0, Math.PI * 2); ctx.fill();
+
+        // 3. 中央红外检测光束 (Infrared beam)
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.85)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(gate.x + gate.w / 2, gate.y + pillarH);
+        ctx.lineTo(gate.x + gate.w / 2, gate.y + gate.h - pillarH);
+        ctx.stroke();
+
+        // 4. 安检门外框轮廓描边
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(gate.x, gate.y, gate.w, gate.h);
+
+        // 5. 关卡文字标识 (CHECKPOINT / GATE)
+        ctx.font = 'bold 7.5px monospace';
+        ctx.textAlign = 'left';
+        const txtW = ctx.measureText(gate.label).width;
+        let gateLabelX = gate.labelX !== undefined ? gate.labelX : (gate.x - 5);
+        let gateLabelY = gate.labelY !== undefined ? gate.labelY : (gate.y - 4);
+        if (gate.labelY === undefined && gate.y < 95) {
+            gateLabelY = gate.y + gate.h + 8;
+        }
+        if (gate.tagXOffset) gateLabelX += gate.tagXOffset;
+        if (gate.tagYOffset) gateLabelY += gate.tagYOffset;
+
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+        ctx.fillRect(gateLabelX - 2, gateLabelY - 7, txtW + 4, 9);
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.4)';
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(gateLabelX - 2, gateLabelY - 7, txtW + 4, 9);
+
+        ctx.fillStyle = '#f87171';
+        ctx.fillText(gate.label, gateLabelX, gateLabelY);
+
+        ctx.restore();
+    });
+}
+
+// 统一精细武器矢量绘制函数 (1步枪-AR15, 2手枪-GLOCK, 3狙击枪-R700, 4冲锋枪-SMG, 5手雷-M67)
+function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = isSelected ? 1.8 : 1.4;
+
+    const cx = x + w / 2;
+    const cy = y + h / 2 + 3.5;
+    const darkColor = (color === '#00FF66' || color.startsWith('#00FF')) ? '#020e06' : '#050c08';
+
+    if (weaponId === 1) {
+        // --- 1: RIFLE - 参考 AR-15 / M4A1 (图片2) ---
+        // 枪管与枪口防焰器
+        ctx.fillRect(cx - 22, cy - 2, 6, 3);
+        ctx.fillRect(cx - 16, cy - 1.5, 5, 2);
+
+        // 散热护木与皮轨
+        ctx.fillRect(cx - 11, cy - 3, 11, 5);
+        ctx.fillRect(cx - 11, cy - 4.5, 11, 1.5);
+
+        // 散热孔
+        ctx.fillStyle = darkColor;
+        for (let i = 0; i < 5; i++) {
+            ctx.beginPath();
+            ctx.arc(cx - 9 + i * 2, cy - 0.5, 0.8, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.fillStyle = color;
+
+        // 主机匣与抛壳窗
+        ctx.fillRect(cx, cy - 4.5, 10, 7.5);
+        ctx.fillStyle = darkColor;
+        ctx.fillRect(cx + 1, cy - 3.5, 5, 1.5);
+        ctx.fillStyle = color;
+
+        // 扳机护圈
+        ctx.fillRect(cx + 1, cy + 3, 5, 1.2);
+        ctx.fillRect(cx + 5, cy + 3, 1.2, 3);
+        ctx.fillRect(cx + 1, cy + 5.5, 5, 1);
+
+        // 弯曲 STANAG 弹匣
+        ctx.beginPath();
+        ctx.moveTo(cx - 4, cy + 3);
+        ctx.lineTo(cx - 8, cy + 12);
+        ctx.lineTo(cx - 3, cy + 12);
+        ctx.lineTo(cx + 1, cy + 3);
+        ctx.closePath();
+        ctx.fill();
+
+        // 弹匣纵向肋条
+        ctx.strokeStyle = darkColor;
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(cx - 5.5, cy + 4.5); ctx.lineTo(cx - 8.5, cy + 10.5);
+        ctx.moveTo(cx - 3.5, cy + 4.5); ctx.lineTo(cx - 6.5, cy + 10.5);
+        ctx.moveTo(cx - 1.5, cy + 4.5); ctx.lineTo(cx - 4.5, cy + 10.5);
+        ctx.stroke();
+        ctx.strokeStyle = color;
+
+        // 人体工程学握把
+        ctx.beginPath();
+        ctx.moveTo(cx + 6, cy + 3);
+        ctx.lineTo(cx + 10, cy + 11);
+        ctx.lineTo(cx + 14, cy + 10);
+        ctx.lineTo(cx + 10, cy + 3);
+        ctx.closePath();
+        ctx.fill();
+
+        // 战术伸缩枪托
+        ctx.fillRect(cx + 10, cy - 2, 5, 2.5);
+        ctx.beginPath();
+        ctx.moveTo(cx + 13, cy - 4);
+        ctx.lineTo(cx + 21, cy - 4);
+        ctx.lineTo(cx + 21, cy + 6);
+        ctx.lineTo(cx + 17, cy + 6);
+        ctx.lineTo(cx + 15, cy + 2);
+        ctx.lineTo(cx + 13, cy + 2);
+        ctx.closePath();
+        ctx.fill();
+
+        // 枪托底板散热孔
+        ctx.fillStyle = darkColor;
+        for (let r = 0; r < 3; r++) {
+            for (let c = 0; c < 2; c++) {
+                ctx.beginPath();
+                ctx.arc(cx + 18.5 + c * 1.5, cy + 1.5 + r * 1.5, 0.6, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+    } else if (weaponId === 2) {
+        // --- 2: PISTOL - 参考 GLOCK 17 (图片1) ---
+        // 套筒
+        ctx.fillRect(cx - 14, cy - 7, 24, 6.5);
+
+        // 前后准星
+        ctx.fillRect(cx - 12, cy - 8.5, 1.5, 1.8);
+        ctx.fillRect(cx + 8, cy - 8.5, 1.5, 1.8);
+
+        // 套筒抛壳窗与凹槽线
+        ctx.fillStyle = darkColor;
+        ctx.fillRect(cx - 3, cy - 6, 9, 2);
+        ctx.fillRect(cx - 13, cy - 2.5, 22, 0.9);
+        ctx.fillStyle = color;
+
+        // 枪管前端
+        ctx.fillRect(cx - 15, cy - 5, 1.5, 3);
+
+        // 套筒座与扳机护圈
+        ctx.fillRect(cx - 14, cy - 0.5, 12, 2.5);
+
+        ctx.beginPath();
+        ctx.moveTo(cx - 3, cy - 0.5);
+        ctx.lineTo(cx - 3, cy + 4.5);
+        ctx.lineTo(cx + 3, cy + 4.5);
+        ctx.lineTo(cx + 3, cy - 0.5);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = darkColor;
+        ctx.fillRect(cx - 1.8, cy + 0.8, 3.6, 2.7);
+        ctx.fillStyle = color;
+
+        // 扳机
+        ctx.beginPath();
+        ctx.moveTo(cx - 0.5, cy + 0.8);
+        ctx.quadraticCurveTo(cx + 1, cy + 2, cx - 0.5, cy + 3.2);
+        ctx.lineTo(cx + 0.5, cy + 3.2);
+        ctx.fill();
+
+        // 聚合物握把 (含海狸尾弧线)
+        ctx.beginPath();
+        ctx.moveTo(cx + 2, cy - 0.5);
+        ctx.lineTo(cx + 3, cy + 11);
+        ctx.lineTo(cx + 10, cy + 11);
+        ctx.lineTo(cx + 9, cy + 1);
+        ctx.quadraticCurveTo(cx + 11, cy - 2, cx + 8, cy - 0.5);
+        ctx.closePath();
+        ctx.fill();
+
+    } else if (weaponId === 3) {
+        // --- 3: SMG - 参考 Micro Uzi / MP9 (图片3右侧) ---
+        // 枪管与枪口
+        ctx.fillRect(cx - 13, cy - 5, 4, 2);
+
+        // 紧凑型机匣与抛壳窗
+        ctx.fillRect(cx - 9, cy - 7, 18, 6);
+        ctx.fillStyle = darkColor;
+        ctx.fillRect(cx - 3, cy - 6, 7, 1.8);
+        ctx.fillStyle = color;
+
+        // 顶置折叠托
+        ctx.beginPath();
+        ctx.moveTo(cx + 6, cy - 7);
+        ctx.lineTo(cx + 12, cy - 11);
+        ctx.lineTo(cx + 11, cy - 12);
+        ctx.lineTo(cx + 5, cy - 8);
+        ctx.closePath();
+        ctx.fill();
+
+        // 垂直手柄
+        ctx.fillRect(cx - 2, cy - 1, 6, 8);
+
+        // 超长直型弹匣
+        ctx.fillRect(cx - 1, cy + 7, 4, 11);
+        ctx.fillRect(cx - 1.5, cy + 17, 5, 1.5);
+
+        // 扳机护圈
+        ctx.beginPath();
+        ctx.moveTo(cx - 7, cy - 1);
+        ctx.lineTo(cx - 7, cy + 4);
+        ctx.lineTo(cx - 2, cy + 4);
+        ctx.lineTo(cx - 2, cy - 1);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = darkColor;
+        ctx.fillRect(cx - 5.8, cy + 0.2, 3.6, 2.8);
+        ctx.fillStyle = color;
+        ctx.fillRect(cx - 4, cy + 0.5, 1, 2);
+
+    } else if (weaponId === 4) {
+        // --- 4: SNIPER - 枪口朝左 ---
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.scale(-1, 1);
+        ctx.translate(-cx, -cy);
+
+        // 消音器与重型枪管
+        ctx.fillRect(cx - 5, cy - 1, 18, 2);
+        ctx.fillRect(cx + 11, cy - 2.5, 13, 5);
+
+        // 双目战术高倍瞄准镜
+        ctx.fillRect(cx - 7, cy - 4.5, 2, 2);
+        ctx.fillRect(cx + 1, cy - 4.5, 2, 2);
+        ctx.fillRect(cx - 10, cy - 7, 16, 2.5);
+
+        // 前物镜大喇叭
+        ctx.beginPath();
+        ctx.moveTo(cx + 4, cy - 7);
+        ctx.lineTo(cx + 9, cy - 8.5);
+        ctx.lineTo(cx + 9, cy - 3);
+        ctx.lineTo(cx + 4, cy - 4.5);
+        ctx.closePath();
+        ctx.fill();
+
+        // 后目镜
+        ctx.fillRect(cx - 12, cy - 8, 3, 4.5);
+        // 调节塔
+        ctx.fillRect(cx - 2, cy - 8.5, 2.5, 2);
+
+        // 机匣与拉机柄
+        ctx.fillRect(cx - 12, cy - 2.5, 14, 5);
+        ctx.fillRect(cx - 9, cy - 4, 1.5, 2);
+        ctx.beginPath();
+        ctx.arc(cx - 10, cy - 4, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 拆卸式盒状弹匣
+        ctx.fillRect(cx - 3, cy + 2.5, 6, 6);
+
+        // 扳机护圈与握把
+        ctx.beginPath();
+        ctx.moveTo(cx - 8, cy + 2.5);
+        ctx.lineTo(cx - 11, cy + 9.5);
+        ctx.lineTo(cx - 7, cy + 9.5);
+        ctx.lineTo(cx - 5, cy + 2.5);
+        ctx.closePath();
+        ctx.fill();
+
+        // 战术枪托与贴腮板
+        ctx.beginPath();
+        ctx.moveTo(cx - 12, cy - 1);
+        ctx.lineTo(cx - 22, cy - 1);
+        ctx.lineTo(cx - 22, cy + 7);
+        ctx.lineTo(cx - 19, cy + 7);
+        ctx.lineTo(cx - 18, cy + 3);
+        ctx.lineTo(cx - 12, cy + 2);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillRect(cx - 20, cy - 4, 7, 2.5);
+        ctx.fillStyle = darkColor;
+        ctx.fillRect(cx - 21.5, cy + 0.5, 1.5, 5);
+        ctx.fillStyle = color;
+
+        ctx.restore();
+
+    } else if (weaponId === 5) {
+        // --- 5: GRENADE - 参考 M67 手雷 (图片4) ---
+        // 圆形破片弹体
+        ctx.beginPath();
+        ctx.arc(cx + 1, cy + 3, 8.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 右上方高光弧线
+        ctx.strokeStyle = darkColor;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(cx + 1, cy + 3, 6.8, -Math.PI * 0.35, -Math.PI * 0.05);
+        ctx.stroke();
+
+        // 顶部引信与旋钮
+        ctx.fillStyle = color;
+        ctx.fillRect(cx - 2.5, cy - 6, 5, 3);
+        ctx.fillRect(cx - 4.5, cy - 11, 8.5, 5);
+
+        ctx.beginPath();
+        ctx.arc(cx + 5, cy - 10, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 左侧曲面保险压片
+        ctx.beginPath();
+        ctx.moveTo(cx - 4.5, cy - 10.5);
+        ctx.lineTo(cx - 9, cy - 5);
+        ctx.lineTo(cx - 9.5, cy + 3);
+        ctx.lineTo(cx - 8.5, cy + 8);
+        ctx.lineTo(cx - 7, cy + 8);
+        ctx.lineTo(cx - 8, cy + 3);
+        ctx.lineTo(cx - 7.5, cy - 4.5);
+        ctx.lineTo(cx - 3.5, cy - 9);
+        ctx.closePath();
+        ctx.fill();
+    } else if (weaponId === 6) {
+        // --- 6: M240 GENERAL PURPOSE MACHINE GUN (通用机枪) ---
+        ctx.fillStyle = color;
+        ctx.fillRect(cx - 12, cy - 2, 30, 3.5); // 长枪管
+        ctx.fillRect(cx + 18, cy - 3.5, 4, 6.5); // 消焰制退器
+        ctx.fillRect(cx + 12, cy - 6, 2, 4); // 准星
+
+        // 折叠脚架
+        ctx.beginPath();
+        ctx.moveTo(cx + 12, cy + 1.5); ctx.lineTo(cx + 17, cy + 10);
+        ctx.moveTo(cx + 12, cy + 1.5); ctx.lineTo(cx + 8, cy + 10);
+        ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.stroke();
+
+        // 提把
+        ctx.beginPath();
+        ctx.moveTo(cx - 3, cy - 2); ctx.lineTo(cx - 1, cy - 8);
+        ctx.lineTo(cx + 7, cy - 8); ctx.lineTo(cx + 8, cy - 2);
+        ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.stroke();
+
+        // 机匣与顶盖
+        ctx.fillRect(cx - 16, cy - 5, 14, 8);
+        ctx.fillRect(cx - 14, cy - 7, 10, 2);
+
+        // 下挂方形软弹药包
+        ctx.fillRect(cx - 10, cy + 3, 10, 8);
+
+        // 枪托与握把
+        ctx.fillRect(cx - 24, cy - 3, 9, 5);
+        ctx.fillRect(cx - 24, cy - 5, 2, 9);
+        ctx.fillRect(cx - 14, cy + 3, 3, 7);
+    } else if (weaponId === 7) {
+        // --- 7: UAV - 战术无人机/高空爆破 ---
+        ctx.beginPath();
+        ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(cx - 12, cy); ctx.lineTo(cx + 12, cy);
+        ctx.moveTo(cx, cy - 12); ctx.lineTo(cx, cy + 12);
+        ctx.stroke();
+        [[-8,-8], [8,-8], [-8,8], [8,8]].forEach(([ox, oy]) => {
+            ctx.beginPath();
+            ctx.arc(cx + ox, cy + oy, 2.8, 0, Math.PI * 2);
+            ctx.stroke();
+        });
+    } else if (weaponId === 8) {
+        // --- 8: HEAVY TRIPLE-BARREL SHOTGUN (重型三管猎枪) ---
+        ctx.fillStyle = color;
+        // 3 根平行沉重枪管
+        ctx.fillRect(cx - 16, cy - 4.5, 20, 2.5); // 上枪管
+        ctx.fillRect(cx - 16, cy - 1.5, 20, 2.5); // 中下枪管1
+        ctx.fillRect(cx - 16, cy + 1.5, 20, 2.5); // 下枪管2
+        // 三管枪口收束环 / 防焰罩
+        ctx.fillRect(cx + 4, cy - 5.5, 3, 10);
+
+        // 木质/聚合物重型战术护木
+        ctx.fillRect(cx - 10, cy + 1.5, 12, 5);
+
+        // 绞链式重型枪机机匣
+        ctx.fillRect(cx + 4, cy - 5, 8, 10);
+        ctx.fillStyle = darkColor;
+        ctx.fillRect(cx + 6, cy - 3, 4, 6);
+        ctx.fillStyle = color;
+
+        // 击锤与双/三扳机组
+        ctx.fillRect(cx + 10, cy - 6, 2, 3);
+        ctx.beginPath();
+        ctx.arc(cx + 8, cy + 7, 3, 0, Math.PI);
+        ctx.fill();
+
+        // 沉重人体工程学枪托
+        ctx.beginPath();
+        ctx.moveTo(cx + 12, cy - 2);
+        ctx.lineTo(cx + 22, cy - 4);
+        ctx.lineTo(cx + 22, cy + 8);
+        ctx.lineTo(cx + 16, cy + 8);
+        ctx.lineTo(cx + 12, cy + 4);
+        ctx.closePath();
+        ctx.fill();
+    } else if (weaponId === 9) {
+        // --- 9: SOUL-RIPPING RUNE SCYTHE (符文光镰 - 银灰刀刃) ---
+        // 银灰金属主刀刃
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 2.8;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 13, -Math.PI * 0.65, Math.PI * 0.65, false);
+        ctx.stroke();
+
+        // 锋利刃锋高光
+        ctx.strokeStyle = '#f8fafc';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 14.2, -Math.PI * 0.5, Math.PI * 0.5, false);
+        ctx.stroke();
+
+        // 内部血色符文脉络
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 10, -Math.PI * 0.5, Math.PI * 0.5, false);
+        ctx.stroke();
+
+        // 暗铁镰柄
+        ctx.strokeStyle = '#64748b';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx + 8, cy - 10); ctx.lineTo(cx - 12, cy + 12);
+        ctx.stroke();
+    } else if (weaponId === 10) {
+        // --- 10: INFERNAL LAVA CIRCLE (地狱熔岩阵) ---
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 13, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 1.1;
+        for (let k = 0; k < 2; k++) {
+            const offset = k * (Math.PI / 3);
+            ctx.beginPath();
+            for (let i = 0; i <= 3; i++) {
+                const a = offset + (i * Math.PI * 2) / 3;
+                const px = cx + Math.cos(a) * 11;
+                const py = cy + Math.sin(a) * 11;
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+        }
+    } else if (weaponId === 11) {
+        // --- 11: DEMONIC SOUL SIPHON (灵魂汲取 - 精致缩小邪能光球) ---
+        ctx.fillStyle = '#f43f5e';
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 5.5, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = '#fff1f2';
+        ctx.beginPath();
+        ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#fda4af';
+        ctx.lineWidth = 1.2;
+        for (let a = 0; a < Math.PI * 2; a += Math.PI / 2) {
+            ctx.beginPath();
+            ctx.moveTo(cx + Math.cos(a) * 6, cy + Math.sin(a) * 6);
+            ctx.lineTo(cx + Math.cos(a) * 11, cy + Math.sin(a) * 11);
+            ctx.stroke();
+        }
+    }
+
+    ctx.restore();
+}
+
+function drawWeaponIcons() {
+    const boxSize = 46;
+    const gap = 10;
+    const startX = 25;
+    const startY = height - 62;
+
+    const isLevel0 = (getCurrentLevelId() === 'level0_test');
+
+    const normalWeapons = isLevel0
+        ? [WEAPONS.TRIPLE_SHOTGUN, WEAPONS.RUNE_SCYTHE, WEAPONS.LAVA_CIRCLE, WEAPONS.SOUL_SIPHON]
+        : [WEAPONS.RIFLE, WEAPONS.PISTOL, WEAPONS.SMG, WEAPONS.SNIPER, WEAPONS.GRENADE];
+
+    normalWeapons.forEach((w, index) => {
+        let x = startX + index * (boxSize + gap);
+        let y = startY;
+        let isUnlocked = unlockedWeapons.includes(w.id);
+        let isSelected = !!(currentWeapon && w.id === currentWeapon.id);
+
+        ctx.save();
+        if (!isUnlocked) {
+            ctx.fillStyle = isLevel0 ? 'rgba(22, 10, 12, 0.65)' : 'rgba(12, 18, 15, 0.65)';
+            ctx.strokeStyle = isLevel0 ? 'rgba(100, 60, 60, 0.3)' : 'rgba(80, 100, 90, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.fillRect(x, y, boxSize, boxSize);
+            ctx.strokeRect(x, y, boxSize, boxSize);
+
+            drawWeaponSilhouette(ctx, w.id, x, y, boxSize, boxSize, isLevel0 ? 'rgba(100, 60, 60, 0.35)' : 'rgba(80, 100, 90, 0.35)', false);
+
+            // 绘制独立小标牌，绝不遮挡武器图标
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.70)';
+            ctx.fillRect(x + 2, y + 2, 17, 10);
+            ctx.strokeStyle = 'rgba(100, 60, 60, 0.4)';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(x + 2, y + 2, 17, 10);
+
+            ctx.fillStyle = isLevel0 ? 'rgba(160, 90, 90, 0.6)' : 'rgba(100, 130, 110, 0.6)';
+            ctx.font = 'bold 9px monospace';
+            ctx.fillText(isLevel0 ? `[${index + 1}]` : `[${w.id}]`, x + 3.5, y + 9.5);
+
+        } else {
+            ctx.fillStyle = isSelected
+                ? (isLevel0 ? 'rgba(255, 51, 68, 0.30)' : 'rgba(0, 255, 102, 0.28)')
+                : (isLevel0 ? 'rgba(22, 6, 8, 0.88)' : 'rgba(4, 16, 10, 0.88)');
+            ctx.strokeStyle = isSelected
+                ? (isLevel0 ? '#FF2200' : '#FFFF00')
+                : (isLevel0 ? 'rgba(255, 51, 68, 0.50)' : 'rgba(0, 255, 102, 0.45)');
+            ctx.lineWidth = isSelected ? 2 : 1.2;
+            ctx.fillRect(x, y, boxSize, boxSize);
+            ctx.strokeRect(x, y, boxSize, boxSize);
+
+            const iconColor = isSelected ? (isLevel0 ? '#FF2200' : '#FFFF00') : (isLevel0 ? '#FF3344' : '#00FF66');
+            drawWeaponSilhouette(ctx, w.id, x, y, boxSize, boxSize, iconColor, isSelected);
+
+            // 绘制独立小标牌，绝不遮挡武器图标
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+            ctx.fillRect(x + 2, y + 2, 17, 10);
+            ctx.strokeStyle = isSelected ? (isLevel0 ? '#FF3344' : '#00FF66') : 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(x + 2, y + 2, 17, 10);
+
+            ctx.fillStyle = isSelected ? (isLevel0 ? '#FF5566' : '#00FF66') : '#E2E8F0';
+            ctx.font = 'bold 9px monospace';
+            ctx.fillText(isLevel0 ? `[${index + 1}]` : `[${w.id}]`, x + 3.5, y + 9.5);
+        }
+
+        ctx.restore();
+    });
+
+    const currentLevelId = getCurrentLevelId();
+    if (isKillstreakSupportedLevel(currentLevelId) && !isLevel0) {
+        const ksBoxSize = 46;
+        const ksGap = 10;
+        const ksStartX = width - 180;
+
+        const isEn = (window.__gameLang === 'en');
+        ctx.save();
+        ctx.fillStyle = '#FF9900';
+        ctx.font = 'bold 11px monospace';
+        ctx.fillText(isEn ? `⚡ STREAK [${level0StreakCount}]` : `⚡ 连杀奖励 [当前: ${level0StreakCount}]`, ksStartX, startY - 8);
+        ctx.restore();
+
+        const ksRewards = [
+            {
+                num: 1,
+                id: WEAPONS.MACHINE_GUN.id,
+                reqKills: 3,
+                name: 'M240',
+                keyStr: '[6]',
+                isUnlocked: level0StreakCount >= 3 || level0MgAmmo > 0,
+                isSelected: !!(currentWeapon && currentWeapon.id === WEAPONS.MACHINE_GUN.id),
+                ammoText: level0MgAmmo > 0 ? `${level0MgAmmo}` : (level0StreakCount >= 3 ? '30' : '0')
+            },
+            {
+                num: 2,
+                id: WEAPONS.UAV.id,
+                reqKills: 5,
+                name: 'UAV',
+                keyStr: '[7]',
+                isUnlocked: level0StreakCount >= 5 || level0UavAmmo > 0,
+                isSelected: !!(currentWeapon && currentWeapon.id === WEAPONS.UAV.id),
+                ammoText: level0UavAmmo > 0 ? `${level0UavAmmo}x` : (level0StreakCount >= 5 ? '5x' : '0x')
+            },
+            {
+                num: 3,
+                id: 'BLINDZONE',
+                reqKills: 7,
+                name: isEn ? 'BLIND' : '盲区',
+                keyStr: '[8]',
+                isUnlocked: level0StreakCount >= 7 || level0InfiniteBlindTimer > 0,
+                isSelected: level0InfiniteBlindTimer > 0,
+                ammoText: level0InfiniteBlindTimer > 0 ? `${(level0InfiniteBlindTimer/60).toFixed(0)}s` : '7s'
+            }
+        ];
+
+        ksRewards.forEach((r, idx) => {
+            let x = ksStartX + idx * (ksBoxSize + ksGap);
+            let y = startY;
+
+            ctx.save();
+            if (!r.isUnlocked) {
+                // 1. 未解锁状态
+                ctx.fillStyle = 'rgba(10, 14, 20, 0.85)';
+                ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+                ctx.lineWidth = 1;
+                ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                if (r.id === 'BLINDZONE') {
+                    ctx.beginPath();
+                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 8, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+                    ctx.stroke();
+                } else {
+                    drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, 'rgba(100, 116, 139, 0.4)', false);
+                }
+
+                ctx.fillStyle = '#64748B';
+                ctx.font = 'bold 9px monospace';
+                ctx.fillText(isEn ? `${r.reqKills} K` : `${r.reqKills} 杀`, x + 3, y + 11);
+
+                ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+                ctx.font = 'bold 9px monospace';
+                ctx.fillText(r.keyStr, x + ksBoxSize - (r.keyStr.length * 5 + 3), y + ksBoxSize - 4);
+
+            } else if (!r.isSelected) {
+                // 2. 解锁但未选中状态 -> 灰色，显示连杀数和按键提示
+                ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+                ctx.strokeStyle = '#94A3B8';
+                ctx.lineWidth = 1.5;
+                ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                const grayColor = '#94A3B8';
+
+                if (r.id === 'BLINDZONE') {
+                    ctx.beginPath();
+                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 9, 0, Math.PI * 2);
+                    ctx.strokeStyle = grayColor;
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = grayColor;
+                    ctx.fill();
+                } else {
+                    drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, grayColor, false);
+                }
+
+                ctx.fillStyle = grayColor;
+                ctx.font = 'bold 9px monospace';
+                ctx.fillText(isEn ? `${r.reqKills} K` : `${r.reqKills} 杀`, x + 3, y + 11);
+
+                ctx.fillStyle = grayColor;
+                ctx.font = 'bold 9px monospace';
+                ctx.fillText(r.keyStr, x + ksBoxSize - (r.keyStr.length * 5 + 3), y + ksBoxSize - 4);
+
+            } else {
+                // 3. 选中状态 -> 橙色高亮，显示名称和弹药数/剩余数
+                ctx.fillStyle = 'rgba(255, 153, 0, 0.2)';
+                ctx.strokeStyle = '#FF9900';
+                ctx.lineWidth = 2.2;
+                ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                const orangeColor = '#FF9900';
+
+                if (r.id === 'BLINDZONE') {
+                    ctx.beginPath();
+                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 9, 0, Math.PI * 2);
+                    ctx.strokeStyle = orangeColor;
+                    ctx.lineWidth = 2.0;
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = orangeColor;
+                    ctx.fill();
+                } else {
+                    drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, orangeColor, true);
+                }
+
+                ctx.fillStyle = orangeColor;
+                ctx.font = 'bold 9px monospace';
+                ctx.fillText(r.name, x + 3, y + 11);
+
+                ctx.fillStyle = orangeColor;
+                ctx.font = 'bold 9px monospace';
+                const label = r.ammoText;
+                ctx.fillText(label, x + ksBoxSize - (label.length * 5 + 3), y + ksBoxSize - 4);
+            }
+            ctx.restore();
+        });
+    }
+}
+
+function drawInfernalWatcher(cam) {
+    ctx.save();
+    ctx.translate(cam.x, cam.y);
+    
+    const range = cam.fovRange || 450;
+    const halfAngle = cam.fovAngle ? (cam.fovAngle / 2) : 0.42;
+    const ang = cam.currentAngle;
+    const isDetecting = cam.detecting;
+    const type = cam.type || 'soul_lantern';
+
+    // =========================================================
+    // 1. 扫描视锥绘制 (TACTICAL INFERNAL SCAN CONE WITH RUNE RINGS)
+    // =========================================================
+    ctx.save();
+    const timeNow = Date.now() * 0.001;
+    if (type === 'soul_lantern') {
+        ctx.fillStyle = isDetecting ? 'rgba(168, 85, 247, 0.48)' : 'rgba(56, 189, 248, 0.25)';
+        ctx.strokeStyle = isDetecting ? 'rgba(216, 180, 254, 0.9)' : 'rgba(56, 189, 248, 0.7)';
+    } else if (type === 'gargoyle_sentinel') {
+        ctx.fillStyle = isDetecting ? 'rgba(239, 68, 68, 0.5)' : 'rgba(249, 115, 22, 0.28)';
+        ctx.strokeStyle = isDetecting ? 'rgba(254, 202, 202, 0.9)' : 'rgba(249, 115, 22, 0.75)';
+    } else {
+        ctx.fillStyle = isDetecting ? 'rgba(255, 17, 34, 0.55)' : 'rgba(239, 68, 68, 0.3)';
+        ctx.strokeStyle = isDetecting ? '#ff0033' : 'rgba(244, 63, 94, 0.8)';
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, range, ang - halfAngle, ang + halfAngle);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(ang - halfAngle) * range, Math.sin(ang - halfAngle) * range);
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(ang + halfAngle) * range, Math.sin(ang + halfAngle) * range);
+    ctx.arc(0, 0, range, ang - halfAngle, ang + halfAngle);
+    ctx.stroke();
+
+    // 动态符文矩阵弧线
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = isDetecting ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.35)';
+    for (let rFactor of [0.35, 0.65, 0.88]) {
+        ctx.beginPath();
+        ctx.arc(0, 0, range * rFactor, ang - halfAngle + Math.sin(timeNow + rFactor) * 0.05, ang + halfAngle);
+        ctx.stroke();
+    }
+    ctx.restore();
+
+    // =========================================================
+    // 2. 写实地狱暗黑实体模型绘制 (ULTRA-REALISTIC DARK FANTASY PROP RENDERING)
+    // =========================================================
+    if (type === 'soul_lantern') {
+        // --- 幽冥噬魂魂灯 (Soul Lantern Pharos) ---
+        // 多边形黑曜石祭台底座
+        ctx.fillStyle = '#0f172a';
+        ctx.strokeStyle = '#0284c7';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+            const ha = (i * Math.PI) / 3;
+            const hx = Math.cos(ha) * 18;
+            const hy = Math.sin(ha) * 18;
+            if (i === 0) ctx.moveTo(hx, hy);
+            else ctx.lineTo(hx, hy);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // 冰晶骨骼支柱
+        for (let i = 0; i < 3; i++) {
+            const legAng = (i * Math.PI * 2) / 3 + timeNow * 0.2;
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 2.0;
+            ctx.beginPath();
+            ctx.moveTo(Math.cos(legAng) * 8, Math.sin(legAng) * 8);
+            ctx.lineTo(Math.cos(legAng) * 20, Math.sin(legAng) * 20);
+            ctx.stroke();
+        }
+
+        // 旋转吊臂与六角噬魂魂灯
+        ctx.save();
+        ctx.rotate(ang);
+        
+        ctx.fillStyle = '#1e293b';
+        ctx.strokeStyle = '#0284c7';
+        ctx.lineWidth = 1.8;
+        ctx.fillRect(0, -3.5, 18, 7);
+        ctx.strokeRect(0, -3.5, 18, 7);
+
+        ctx.translate(18, 0);
+        ctx.fillStyle = '#020617';
+        ctx.beginPath();
+        ctx.moveTo(10, 0);
+        ctx.lineTo(5, 9);
+        ctx.lineTo(-5, 9);
+        ctx.lineTo(-10, 0);
+        ctx.lineTo(-5, -9);
+        ctx.lineTo(5, -9);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // 核心幽冥烈焰与光晕
+        const flicker = Math.sin(Date.now() * 0.01) * 3;
+        ctx.fillStyle = isDetecting ? '#d8b4fe' : '#38bdf8';
+        ctx.shadowColor = isDetecting ? '#c084fc' : '#0284c7';
+        ctx.shadowBlur = 15 + flicker;
+        ctx.beginPath();
+        ctx.arc(0, 0, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.restore();
+
+    } else if (type === 'gargoyle_sentinel') {
+        // --- 狱火石像鬼巨像 (Gargoyle Sentinel) ---
+        // 重型火山玄武岩基座
+        ctx.fillStyle = '#18120e';
+        ctx.strokeStyle = '#ea580c';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // 熔岩灼烧脉络
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(-12, -4); ctx.lineTo(-3, 3); ctx.lineTo(7, -5); ctx.lineTo(14, 5);
+        ctx.stroke();
+
+        // 折叠暗黑石翼
+        ctx.save();
+        ctx.rotate(cam.baseAngle + Math.sin(timeNow * 1.5) * 0.05);
+        ctx.fillStyle = '#221915';
+        ctx.strokeStyle = '#0f0a08';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(-10, -6); ctx.lineTo(-28, -18); ctx.lineTo(-18, -3); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-10, 6); ctx.lineTo(-28, 18); ctx.lineTo(-18, 3); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.restore();
+
+        // 石像鬼旋转头颅与熔岩双眼
+        ctx.save();
+        ctx.rotate(ang);
+        
+        ctx.fillStyle = '#2c221e';
+        ctx.strokeStyle = '#120d0b';
+        ctx.lineWidth = 2.0;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 11, 9.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // 角冠
+        ctx.fillStyle = '#120d0b';
+        ctx.beginPath();
+        ctx.moveTo(4, -8); ctx.lineTo(11, -15); ctx.lineTo(0, -9); ctx.closePath();
+        ctx.moveTo(4, 8); ctx.lineTo(11, 15); ctx.lineTo(0, 9); ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        const eyeColor = isDetecting ? '#ff0000' : '#f59e0b';
+        ctx.fillStyle = eyeColor;
+        ctx.shadowColor = eyeColor;
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.arc(7, -4, 2.2, 0, Math.PI * 2);
+        ctx.arc(7, 4, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.restore();
+
+    } else {
+        // --- 深渊全视魔眼图腾 (The Watchful Eye) ---
+        // 精美六角黑曜石决战祭坛底座
+        ctx.fillStyle = '#050303';
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        const rBase = 22;
+        for (let i = 0; i < 6; i++) {
+            const hAng = (i * Math.PI) / 3 + timeNow * 0.05;
+            const hx = Math.cos(hAng) * rBase;
+            const hy = Math.sin(hAng) * rBase;
+            if (i === 0) ctx.moveTo(hx, hy);
+            else ctx.lineTo(hx, hy);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // 4座黑曜石守护尖塔
+        ctx.fillStyle = '#110c0c';
+        ctx.strokeStyle = '#991b1b';
+        ctx.lineWidth = 1.6;
+        for (let i = 0; i < 4; i++) {
+            const spAng = (i * Math.PI) / 2 + Math.PI / 4 + timeNow * 0.1;
+            ctx.beginPath();
+            ctx.moveTo(Math.cos(spAng) * 14, Math.sin(spAng) * 14);
+            ctx.lineTo(Math.cos(spAng) * 26, Math.sin(spAng) * 26);
+            ctx.lineTo(Math.cos(spAng + 0.3) * 12, Math.sin(spAng + 0.3) * 12);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
+
+        // 脉动血火能量光环
+        const pulse = Math.sin(timeNow * 6) * 3;
+        ctx.fillStyle = isDetecting ? '#ff0033' : '#991b1b';
+        ctx.shadowColor = '#ef4444';
+        ctx.shadowBlur = 16 + pulse;
+        ctx.beginPath();
+        ctx.arc(0, 0, 13, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // 邪神旋转巨眼
+        ctx.save();
+        ctx.rotate(ang);
+        
+        ctx.fillStyle = isDetecting ? '#fff5f5' : '#fee2e2';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 11, 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#020101';
+        ctx.beginPath();
+        ctx.ellipse(3.5, 0, isDetecting ? 5.5 : 3.0, isDetecting ? 6.5 : 5.0, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(4.0, -2.2, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    ctx.restore();
+}
+
+function drawCamera(cam) {
+    if (cam.type === 'soul_lantern' || cam.type === 'gargoyle_sentinel' || cam.type === 'infernal_eye' || (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test')) {
+        drawInfernalWatcher(cam);
+        return;
+    }
+    ctx.save();
+    ctx.translate(cam.x, cam.y);
+    
+    // 1. 监控扇区视觉：显著加强的半透明锥形光，保留高对比度原色且十分凸显 (Highly visible scan cone)
+    ctx.fillStyle = cam.detecting ? 'rgba(255, 51, 51, 0.32)' : 'rgba(0, 255, 102, 0.16)';
+    ctx.beginPath(); 
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.closePath(); 
+    ctx.fill();
+
+    // 绘制清晰的扇区边缘线与轮廓弧线，使视野边界分外凸显
+    ctx.strokeStyle = cam.detecting ? 'rgba(255, 51, 51, 0.75)' : 'rgba(0, 255, 102, 0.45)';
+    ctx.lineWidth = 1.5;
+    
+    // 左边界
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(cam.currentAngle - 0.45) * 320, Math.sin(cam.currentAngle - 0.45) * 320);
+    ctx.stroke();
+    
+    // 右边界
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(cam.currentAngle + 0.45) * 320, Math.sin(cam.currentAngle + 0.45) * 320);
+    ctx.stroke();
+    
+    // 最外圈扇区弧线
+    ctx.beginPath();
+    ctx.arc(0, 0, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.stroke();
+
+    // 扫描扇区中间的同心雷达辅助线
+    ctx.strokeStyle = cam.detecting ? 'rgba(255, 51, 51, 0.45)' : 'rgba(0, 255, 102, 0.3)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 160, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, 260, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.stroke();
+
+    // 2. 墙体壁挂支架结构 (Camera Mounting Bracket - opposite to camera angle for realism)
+    const oppositeAngle = cam.currentAngle + Math.PI;
+    ctx.save();
+    ctx.rotate(oppositeAngle);
+    // 支架底座
+    ctx.fillStyle = '#2A312D';
+    ctx.strokeStyle = '#0B110E';
+    ctx.lineWidth = 1.5;
+    ctx.fillRect(16, -7, 5, 14);
+    ctx.strokeRect(16, -7, 5, 14);
+    // 伸缩双关节悬臂
+    ctx.fillStyle = '#3E4742';
+    ctx.fillRect(0, -3, 17, 6);
+    ctx.strokeRect(0, -3, 17, 6);
+    ctx.restore();
+
+    // 3. 监控器本体（3D视角俯瞰质感）
+    ctx.rotate(cam.currentAngle);
+    
+    // 3.1 球形旋转阻尼云台 (Swivel Joint Base)
+    ctx.fillStyle = '#48524C';
+    ctx.strokeStyle = '#0F1612';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, 6.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // 3.2 枪机型枪式监控机身与遮阳雨罩 (Main Bullet Camera Housing & Sun Shield)
+    // 底部暗色散热格栅阴影
+    ctx.fillStyle = '#080E0A';
+    ctx.fillRect(-6, -7, 24, 14);
+
+    // 主机身外壳（哑光战术银灰/白）
+    ctx.fillStyle = '#E3EAE5';
+    ctx.strokeStyle = cam.detecting ? '#FF3344' : '#57615B';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.roundRect(-4, -6, 21, 12, [2, 4, 4, 2]);
+    ctx.fill();
+    ctx.stroke();
+
+    // 机顶一体化遮阳防护板 (Sun Shield Overlay)
+    ctx.fillStyle = '#1D2420';
+    ctx.fillRect(-7, -7, 25, 2.5);
+
+    // 3.3 镜头组与红外传感器
+    // 暗色光学玻璃面罩
+    ctx.fillStyle = '#060B08';
+    ctx.fillRect(15, -4, 3, 8);
+
+    // 镜片中心蓝色镀膜反光 (Glossy Camera Lens Optics)
+    ctx.fillStyle = '#00CCFF';
+    ctx.shadowColor = '#00CCFF';
+    ctx.shadowBlur = cam.detecting ? 4 : 1;
+    ctx.beginPath();
+    ctx.arc(16.5, 0, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // 3.4 动态状态指示灯 (Pulsing Rec LED)
+    // 根据系统毫秒进行红/绿闪烁，增强实机工作感
+    const isLedOn = Date.now() % 900 < 450;
+    if (cam.detecting) {
+        ctx.fillStyle = isLedOn ? '#FF1133' : '#770011';
+    } else {
+        ctx.fillStyle = isLedOn ? '#00FF66' : '#004411';
+    }
+    ctx.beginPath();
+    ctx.arc(4, -3, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+}
+
+function drawDropItems() {
+    dropItems.forEach(item => {
+        ctx.save();
+        ctx.translate(item.x, item.y);
+        ctx.shadowBlur = 12;
+
+        if (item.type === 'medkit') {
+            ctx.fillStyle = '#00FF66'; ctx.shadowColor = '#00FF66';
+            ctx.fillRect(-9, -9, 18, 18);
+            ctx.fillStyle = '#000'; ctx.fillRect(-2, -6, 4, 12); ctx.fillRect(-6, -2, 12, 4);
+        } else if (item.type === 'battery') {
+            ctx.fillStyle = '#00CCFF'; ctx.shadowColor = '#00CCFF';
+            ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#000'; ctx.fillRect(-4, -4, 8, 8);
+        } else if (item.type === 'weapon') {
+            const wp = item.weaponData || WEAPONS.RIFLE;
+            ctx.fillStyle = 'rgba(10, 20, 15, 0.9)';
+            ctx.shadowColor = '#FFFF00';
+            ctx.strokeStyle = '#FFFF00';
+            ctx.lineWidth = 1.5;
+
+            // 掉落框
+            ctx.fillRect(-22, -15, 44, 30);
+            ctx.strokeRect(-22, -15, 44, 30);
+
+            // 武器矢量图案
+            drawWeaponSilhouette(ctx, wp.id, -22, -15, 44, 30, '#FFFF00', true);
+        } else if (item.type === 'classified_drive' || item.type === 'gold_vault_crown') {
+            // High-Tech Cyber Classified Drive
+            ctx.fillStyle = '#0f172a';
+            ctx.shadowColor = '#00CCFF';
+            ctx.shadowBlur = 12;
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1.5;
+
+            // Sleek metallic drive casing
+            ctx.fillRect(-14, -10, 28, 20);
+            ctx.strokeRect(-14, -10, 28, 20);
+
+            // Diagonal inner chip bed
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(-10, -7, 20, 14);
+
+            // Holographic data core dot
+            ctx.fillStyle = '#00FF66';
+            ctx.beginPath();
+            ctx.arc(0, 0, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Cyber trace lines
+            ctx.strokeStyle = '#00CCFF';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-8, 0); ctx.lineTo(-3.5, 0);
+            ctx.moveTo(3.5, 0); ctx.lineTo(8, 0);
+            ctx.moveTo(0, -5); ctx.lineTo(0, -3.5);
+            ctx.moveTo(0, 3.5); ctx.lineTo(0, 5);
+            ctx.stroke();
+
+            // Status LEDs
+            ctx.fillStyle = '#10b981';
+            ctx.fillRect(-12, -7, 2, 2);
+            ctx.fillStyle = '#ef4444';
+            ctx.fillRect(-12, -4, 2, 2);
+
+            ctx.fillStyle = '#00CCFF';
+            ctx.font = 'bold 8px monospace';
+            ctx.fillText("CLASSIFIED DRIVE", -28, 18);
+        }
+        ctx.restore();
+    });
+}
+
+function drawFrozenSatan(ctx, cx, cy) {
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    const time = Date.now() * 0.001;
+
+    // 1. 深层地狱符文封印阵 (Cocytus Demonic Seal Circle)
+    ctx.save();
+    ctx.rotate(time * 0.1);
+    ctx.strokeStyle = 'rgba(14, 165, 233, 0.45)';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.arc(0, 0, 125, 0, Math.PI * 2); ctx.stroke();
+    
+    // 内星芒阵
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+        const ang = (i * Math.PI) / 3;
+        const nx = Math.cos(ang) * 125;
+        const ny = Math.sin(ang) * 125;
+        if (i === 0) ctx.moveTo(nx, ny);
+        else ctx.lineTo(nx, ny);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    // 符文节点
+    for (let i = 0; i < 6; i++) {
+        const ang = (i * Math.PI) / 3;
+        ctx.fillStyle = '#38bdf8';
+        ctx.beginPath();
+        ctx.arc(Math.cos(ang) * 125, Math.sin(ang) * 125, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.restore();
+
+    // 2. 六翼 - 尖锐利刃恶魔蝙蝠翅膀 (Six Sharp Spiky Bat Wings with Scalloped Membranes & Talon Spikes)
+    for (let side of [-1, 1]) {
+        // --- 2.1 上对巨型主蝙蝠翼 (Upper Dominant Spiky Bat Wings) ---
+        const wingGradUpper = ctx.createLinearGradient(0, -100, side * 150, 0);
+        wingGradUpper.addColorStop(0, '#02040a');
+        wingGradUpper.addColorStop(0.5, '#091322');
+        wingGradUpper.addColorStop(1, '#030712');
+
+        ctx.fillStyle = wingGradUpper;
+        ctx.strokeStyle = '#0284c7';
+        ctx.lineWidth = 2.2;
+
+        // 蝙蝠主骨架 + 3个尖锐指节 + 凹面膜边缘 (Scalloped bat membrane)
+        ctx.beginPath();
+        ctx.moveTo(side * 12, -25);
+        // 主上骨骼延伸至第一指尖 (Upper main bone to finger 1 tip)
+        ctx.quadraticCurveTo(side * 90, -130, side * 165, -105);
+        // 指尖1至指尖2的蝙蝠膜凹弧 (Scalloped arc 1->2)
+        ctx.quadraticCurveTo(side * 148, -75, side * 140, -45);
+        // 指尖2至指尖3的蝙蝠膜凹弧 (Scalloped arc 2->3)
+        ctx.quadraticCurveTo(side * 120, -25, side * 105, -5);
+        // 指尖3折回根部的蝙蝠膜凹弧 (Scalloped arc 3->root)
+        ctx.quadraticCurveTo(side * 55, 0, side * 12, -25);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+
+        // 3根尖锐指节骨 (3 Pointed Finger Struts)
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.5;
+        // 指骨 1
+        ctx.beginPath(); ctx.moveTo(side * 12, -25); ctx.lineTo(side * 165, -105); ctx.stroke();
+        // 指骨 2
+        ctx.beginPath(); ctx.moveTo(side * 12, -25); ctx.lineTo(side * 140, -45); ctx.stroke();
+        // 指骨 3
+        ctx.beginPath(); ctx.moveTo(side * 12, -25); ctx.lineTo(side * 105, -5); ctx.stroke();
+
+        // 翼尖利爪突刺 (Talon Claws at Finger Tips)
+        ctx.strokeStyle = '#ff3300';
+        ctx.lineWidth = 2.0;
+        ctx.beginPath();
+        ctx.moveTo(side * 165, -105); ctx.lineTo(side * 178, -118);
+        ctx.moveTo(side * 140, -45); ctx.lineTo(side * 150, -52);
+        ctx.moveTo(side * 105, -5); ctx.lineTo(side * 114, -8);
+        ctx.stroke();
+
+        // 翼膜多级细密暗纹与冰晶裂隙 (Vein details & Magma)
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+        ctx.lineWidth = 0.9;
+        for (let r = 1; r <= 3; r++) {
+            ctx.beginPath();
+            ctx.moveTo(side * (30 + r * 20), -65 + r * 12);
+            ctx.quadraticCurveTo(side * (45 + r * 20), -50 + r * 12, side * (60 + r * 20), -35 + r * 12);
+            ctx.stroke();
+        }
+
+        const wingMagmaPulse = 0.35 + Math.sin(time * 3 + side) * 0.25;
+        ctx.strokeStyle = `rgba(249, 115, 22, ${wingMagmaPulse})`;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(side * 12, -25);
+        ctx.quadraticCurveTo(side * 85, -125, side * 165, -105);
+        ctx.stroke();
+
+
+        // --- 2.2 中对侧面蝙蝠翼 (Middle Lateral Spiky Bat Wings) ---
+        ctx.fillStyle = '#080d1a';
+        ctx.strokeStyle = '#0369a1';
+        ctx.lineWidth = 1.8;
+
+        ctx.beginPath();
+        ctx.moveTo(side * 14, -5);
+        ctx.quadraticCurveTo(side * 80, -35, side * 150, 15);
+        ctx.quadraticCurveTo(side * 130, 40, side * 120, 60);
+        ctx.quadraticCurveTo(side * 95, 75, side * 80, 85);
+        ctx.quadraticCurveTo(side * 45, 40, side * 14, -5);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+
+        // 中翼指骨与利爪
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.6)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(side * 14, -5); ctx.lineTo(side * 150, 15); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(side * 14, -5); ctx.lineTo(side * 120, 60); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(side * 14, -5); ctx.lineTo(side * 80, 85); ctx.stroke();
+
+        ctx.strokeStyle = '#ff3300';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(side * 150, 15); ctx.lineTo(side * 162, 12);
+        ctx.moveTo(side * 120, 60); ctx.lineTo(side * 128, 68);
+        ctx.moveTo(side * 80, 85); ctx.lineTo(side * 86, 94);
+        ctx.stroke();
+
+
+        // --- 2.3 下对底侧蝙蝠翼 (Lower Infernal Spiky Bat Wings) ---
+        ctx.fillStyle = '#050914';
+        ctx.strokeStyle = '#0284c7';
+        ctx.lineWidth = 1.5;
+
+        ctx.beginPath();
+        ctx.moveTo(side * 12, 20);
+        ctx.quadraticCurveTo(side * 70, 50, side * 125, 105);
+        ctx.quadraticCurveTo(side * 105, 125, side * 90, 140);
+        ctx.quadraticCurveTo(side * 65, 130, side * 50, 120);
+        ctx.quadraticCurveTo(side * 30, 70, side * 12, 20);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+
+        // 下翼指骨与利爪
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
+        ctx.lineWidth = 1.1;
+        ctx.beginPath(); ctx.moveTo(side * 12, 20); ctx.lineTo(side * 125, 105); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(side * 12, 20); ctx.lineTo(side * 90, 140); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(side * 12, 20); ctx.lineTo(side * 50, 120); ctx.stroke();
+
+        ctx.strokeStyle = '#ff3300';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(side * 125, 105); ctx.lineTo(side * 134, 114);
+        ctx.moveTo(side * 90, 140); ctx.lineTo(side * 96, 150);
+        ctx.moveTo(side * 50, 120); ctx.lineTo(side * 54, 129);
+        ctx.stroke();
+    }
+
+    // 3. 撒旦解剖学胸肋与肌肉魔躯 (Muscular Demonic Anatomy & Chest)
+    // 肩膀与胸肌
+    const bodyGrad = ctx.createRadialGradient(0, 0, 5, 0, 0, 45);
+    bodyGrad.addColorStop(0, '#0f172a');
+    bodyGrad.addColorStop(0.6, '#060a12');
+    bodyGrad.addColorStop(1, '#020408');
+    ctx.fillStyle = bodyGrad;
+    ctx.strokeStyle = '#0e7490';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-35, -28);
+    ctx.bezierCurveTo(-45, -10, -32, 10, -22, 25);
+    ctx.lineTo(-12, 45);
+    ctx.lineTo(12, 45);
+    ctx.lineTo(22, 25);
+    ctx.bezierCurveTo(32, 10, 45, -10, 35, -28);
+    ctx.bezierCurveTo(20, -38, -20, -38, -35, -28);
+    ctx.fill(); ctx.stroke();
+
+    // 恶魔皮层鳞片与冰晶纹理 (Demonic Skin Scales & Frost Crystal Veins)
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+    ctx.lineWidth = 0.8;
+    for (let sy = -20; sy <= 30; sy += 8) {
+        ctx.beginPath();
+        for (let sx = -25; sx <= 25; sx += 10) {
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(sx + 4, sy - 3);
+            ctx.lineTo(sx + 8, sy);
+        }
+        ctx.stroke();
+    }
+
+    // 皮下地狱灼热熔岩隐脉 (Subdermal Glowing Magma Veins)
+    const veinPulse = 0.4 + Math.sin(time * 2.5) * 0.3;
+    ctx.strokeStyle = `rgba(249, 115, 22, ${veinPulse})`;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-28, -15); ctx.quadraticCurveTo(-15, 5, -8, 20);
+    ctx.moveTo(28, -15); ctx.quadraticCurveTo(15, 5, 8, 20);
+    ctx.moveTo(0, -25); ctx.lineTo(0, 15);
+    ctx.stroke();
+
+    // 肋骨与解剖胸骨 (Anatomical Ribcage)
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
+    ctx.lineWidth = 1.6;
+    for (let r = 0; r < 5; r++) {
+        ctx.beginPath();
+        ctx.moveTo(-22 + r * 2, -18 + r * 10);
+        ctx.quadraticCurveTo(0, -10 + r * 10, 22 - r * 2, -18 + r * 10);
+        ctx.stroke();
+    }
+
+    // 地狱熔岩心脏核心 (Infernal Heart Core)
+    const heartPulse = 0.6 + Math.sin(time * 3) * 0.35;
+    ctx.fillStyle = `rgba(239, 68, 68, ${heartPulse})`;
+    ctx.shadowColor = '#ef4444';
+    ctx.shadowBlur = 20;
+    ctx.beginPath(); ctx.arc(0, -2, 12, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = `rgba(255, 200, 100, ${heartPulse})`;
+    ctx.beginPath(); ctx.arc(0, -2, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // 4. 封印重型冰霜铁链与金属枷锁 (Heavy Iron Sealing Chains & Shackle Collars)
+    const satanChains = [
+        { sx: -28, sy: -15, tx: -175, ty: -110 },
+        { sx: 28, sy: -15, tx: 175, ty: -110 },
+        { sx: -22, sy: 25, tx: -160, ty: 125 },
+        { sx: 22, sy: 25, tx: 160, ty: 125 }
+    ];
+
+    satanChains.forEach(c => {
+        // Main dark chain core
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 4.5;
+        ctx.shadowColor = '#0284c7';
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.moveTo(c.sx, c.sy);
+        ctx.lineTo(c.tx, c.ty);
+        ctx.stroke();
+
+        // Inner Frost Cyan Thread
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(c.sx, c.sy);
+        ctx.lineTo(c.tx, c.ty);
+        ctx.stroke();
+
+        // Individual chain links
+        const dist = Math.hypot(c.tx - c.sx, c.ty - c.sy);
+        const steps = Math.floor(dist / 11);
+        const dx = (c.tx - c.sx) / steps;
+        const dy = (c.ty - c.sy) / steps;
+
+        for (let s = 1; s < steps; s++) {
+            const lx = c.sx + dx * s;
+            const ly = c.sy + dy * s;
+
+            ctx.save();
+            ctx.translate(lx, ly);
+            ctx.rotate(Math.atan2(dy, dx) + (s % 2 === 0 ? 0 : Math.PI / 2));
+
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 5, 2.8, 0, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.strokeStyle = '#7dd3fc';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 4, 2, 0, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        // Ice anchor spike at chain terminus
+        ctx.fillStyle = '#0284c7';
+        ctx.strokeStyle = '#e0f2fe';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(c.tx, c.ty, 5.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+    });
+
+    // 5. 三首魔颅与巨型黑曜曲角 (Lucifer's 3 Heads & Realistic Horns)
+    // 侧首 (Left & Right Heads)
+    for (let side of [-1, 1]) {
+        ctx.save();
+        ctx.translate(side * 26, -38);
+        ctx.rotate(side * 0.3);
+
+        ctx.fillStyle = '#060a12';
+        ctx.strokeStyle = '#0284c7';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(0, -10);
+        ctx.bezierCurveTo(side * 15, -35, side * 35, -45, side * 28, -65);
+        ctx.stroke();
+
+        ctx.fillStyle = '#ef4444';
+        ctx.shadowColor = '#ef4444'; ctx.shadowBlur = 8;
+        ctx.fillRect(-2, -2, 4, 3);
+        ctx.shadowBlur = 0;
+
+        ctx.restore();
+    }
+
+    // 主首 (Central Main Head - Lucifer)
+    ctx.save();
+    ctx.translate(0, -50);
+
+    ctx.fillStyle = '#020617';
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(-18, -10);
+    ctx.bezierCurveTo(-22, -30, 22, -30, 18, -10);
+    ctx.bezierCurveTo(15, 10, -15, 10, -18, -10);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = '#0f172a';
+    ctx.beginPath();
+    ctx.moveTo(-10, 5); ctx.lineTo(0, 16); ctx.lineTo(10, 5);
+    ctx.closePath(); ctx.fill();
+
+    ctx.fillStyle = '#e2e8f0';
+    for (let t = -6; t <= 6; t += 3) {
+        ctx.fillRect(t, 4, 1.8, 4);
+    }
+
+    for (let side of [-1, 1]) {
+        ctx.strokeStyle = '#e0f2fe';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(side * 12, -22);
+        ctx.bezierCurveTo(side * 35, -70, side * 75, -85, side * 55, -125);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#0284c7';
+        ctx.lineWidth = 1.5;
+        for (let h = 1; h <= 5; h++) {
+            ctx.beginPath();
+            ctx.arc(side * (12 + h * 8), -22 - h * 16, 4, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
+
+    ctx.fillStyle = '#00f0ff';
+    ctx.shadowColor = '#00f0ff'; ctx.shadowBlur = 12;
+    ctx.fillRect(-8, -12, 5, 3.5);
+    ctx.fillRect(3, -12, 5, 3.5);
+    ctx.fillStyle = '#ff2200';
+    ctx.shadowColor = '#ff2200';
+    ctx.fillRect(-2, -2, 4, 4);
+    ctx.shadowBlur = 0;
+
+    ctx.restore();
+
+    // 6. 冰封层厚重开裂与冰晶纹理 (Realistic Ice Cracks & Frost Crystals)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+    ctx.lineWidth = 1.8;
+    const crackPaths = [
+        [ {x: 0, y: -2}, {x: -35, y: -45}, {x: -85, y: -70}, {x: -120, y: -60} ],
+        [ {x: 0, y: -2}, {x: 45, y: -35}, {x: 95, y: -80}, {x: 130, y: -95} ],
+        [ {x: 0, y: -2}, {x: -50, y: 35}, {x: -90, y: 85}, {x: -115, y: 120} ],
+        [ {x: 0, y: -2}, {x: 40, y: 45}, {x: 85, y: 95}, {x: 125, y: 110} ]
+    ];
+
+    crackPaths.forEach(path => {
+        ctx.beginPath();
+        ctx.moveTo(path[0].x, path[0].y);
+        for (let p = 1; p < path.length; p++) {
+            ctx.lineTo(path[p].x, path[p].y);
+        }
+        ctx.stroke();
+    });
+
+    // 7. 冰封撒旦战术铭牌 (Frozen Satan Badge) - 移至冰湖下半部分远离岩石的开阔区域 (y = +181)
+    ctx.save();
+    ctx.fillStyle = 'rgba(2, 6, 23, 0.92)';
+    ctx.strokeStyle = '#0284c7';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.roundRect(-140, 168, 280, 26, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = 'bold 11px monospace';
+    ctx.fillStyle = '#e0f2fe';
+    ctx.shadowColor = '#38bdf8';
+    ctx.shadowBlur = 10;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText("🧊 LUCIFER SATAN - FROZEN IN COCYTUS 🧊", 0, 181);
+    ctx.restore();
+
+    ctx.restore();
+}
+
+// =========================================================================
+// 地狱三头犬 (CERBERUS) 专属高度写实美术渲染系统 (三头·蛇毛·龙尾·双层护甲)
+// =========================================================================
+function drawCerberus(e) {
+    const x = e.x, y = e.y, angle = e.angle;
+    const hp = e.hp, maxHp = e.maxHp || 260;
+    const shield = e.shield || 0, maxShield = e.maxShield || 160;
+    const walkCycle = e.walkCycle || 0;
+    const isAlert = e.alert;
+    const hitFlash = e.hitTimer > 0;
+    const alpha = (e.deathAlpha !== undefined) ? Math.max(0, e.deathAlpha) : 1.0;
+    const isPouncing = e.isPouncing;
+    const tailLash = e.tailLashAnim || 0;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    const isInBlind = inBlindZone(x, y);
+
+    // 1. 盲区紫色战术高亮轮廓 (Purple Outline in Blind Zone)
+    if (isInBlind) {
+        ctx.save();
+        ctx.strokeStyle = '#c084fc';
+        ctx.shadowColor = '#a855f7';
+        ctx.shadowBlur = 18;
+        ctx.lineWidth = 3.2;
+        ctx.beginPath();
+        ctx.ellipse(x, y, 38, 28, angle, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#f3e8ff';
+        ctx.setLineDash([5, 4]);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.ellipse(x, y, 46, 34, angle, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+
+    // 2. 双层血条与专属名字标签 (Floating HUD)
+    if (hp > 0) {
+        ctx.save();
+        ctx.translate(x, y);
+        const barW = 58;
+        const barX = -barW / 2;
+        const barY = -52;
+
+        // Header Title
+        ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = isAlert ? '#ff3300' : '#f97316';
+        ctx.shadowColor = '#000000';
+        ctx.shadowBlur = 4;
+        ctx.fillText('🐺 CERBERUS · 地狱三头犬', 0, barY - 4);
+
+        // Frame
+        ctx.fillStyle = 'rgba(10, 10, 15, 0.88)';
+        ctx.fillRect(barX - 1.5, barY - 1, barW + 3, 11);
+
+        // Upper Bar: Demonic Crest Armor / Shield (Cyan-Violet)
+        const sPct = Math.max(0, Math.min(1, shield / maxShield));
+        ctx.fillStyle = '#818cf8';
+        ctx.fillRect(barX, barY, barW * sPct, 4);
+
+        // Lower Bar: Infernal Flesh HP (Deep Crimson)
+        const hpPct = Math.max(0, Math.min(1, hp / maxHp));
+        ctx.fillStyle = '#ef4444';
+        ctx.fillRect(barX, barY + 5, barW * hpPct, 4);
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(barX - 1.5, barY - 1, barW + 3, 11);
+        ctx.restore();
+    }
+
+    // 3. 实体局部变换 (Local transform: (0,0) is Cerberus center, +X is facing forward)
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+
+    // 3.1 双层护甲外层魔力法阵与力场护罩 (Demonic Shield Barrier)
+    if (shield > 0) {
+        ctx.save();
+        const pulse = 1 + Math.sin(Date.now() * 0.008) * 0.05;
+        ctx.strokeStyle = 'rgba(129, 140, 248, 0.65)';
+        ctx.lineWidth = 1.8;
+        ctx.shadowColor = '#818cf8';
+        ctx.shadowBlur = 14;
+        ctx.beginPath();
+        // Hexagonal runic shield boundary
+        const sr = 36 * pulse;
+        for (let i = 0; i < 6; i++) {
+            const a = (i * Math.PI) / 3;
+            const px = Math.cos(a) * (sr + 4);
+            const py = Math.sin(a) * sr;
+            if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+
+        // 3 floating infernal ward runes
+        ctx.fillStyle = 'rgba(192, 132, 252, 0.7)';
+        for (let i = 0; i < 3; i++) {
+            const ra = (i * Math.PI * 2 / 3) + Date.now() * 0.002;
+            ctx.beginPath();
+            ctx.arc(Math.cos(ra) * (sr + 6), Math.sin(ra) * (sr + 4), 2.2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    // 3.2 柔和阴影 (Soft Shadow)
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.beginPath();
+    ctx.ellipse(2, 2, 34, 22, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // 3.3 四肢与巨爪 (Four Muscular Demonic Legs & Hell-Talons)
+    const legOffsetFront = isPouncing ? 12 : Math.sin(walkCycle) * 6;
+    const legOffsetBack = isPouncing ? -8 : Math.cos(walkCycle) * 6;
+
+    // Hind legs (Back Left & Back Right)
+    [ -1, 1 ].forEach(side => {
+        ctx.save();
+        const ly = side * 14;
+        const lx = -14 - side * legOffsetBack * 0.5;
+        // Haunch muscle
+        ctx.fillStyle = '#1c1917';
+        ctx.beginPath();
+        ctx.ellipse(lx, ly, 8, 5, side * 0.2, 0, Math.PI * 2);
+        ctx.fill();
+        // Lower paw
+        ctx.fillStyle = '#292524';
+        ctx.beginPath();
+        ctx.arc(lx - 4, ly + side * 4, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        // Claws
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(lx - 6, ly + side * 4);
+        ctx.lineTo(lx - 10, ly + side * 5);
+        ctx.stroke();
+        ctx.restore();
+    });
+
+    // Fore legs (Front Left & Front Right)
+    [ -1, 1 ].forEach(side => {
+        ctx.save();
+        const ly = side * 15;
+        const lx = (isPouncing ? 18 : 12) + side * legOffsetFront * 0.6;
+        // Shoulder & Bicep
+        ctx.fillStyle = '#1c1917';
+        ctx.beginPath();
+        ctx.ellipse(lx - 2, ly, 9, 6, -side * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        // Talon Paw
+        ctx.fillStyle = '#292524';
+        ctx.beginPath();
+        ctx.arc(lx + 5, ly + side * 3, 5, 0, Math.PI * 2);
+        ctx.fill();
+        // Razor claws with magma heat
+        ctx.strokeStyle = isPouncing ? '#ff2200' : '#ea580c';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(lx + 7, ly + side * 2);
+        ctx.lineTo(lx + 13, ly + side * 2);
+        ctx.moveTo(lx + 6, ly + side * 4);
+        ctx.lineTo(lx + 12, ly + side * 5);
+        ctx.stroke();
+        ctx.restore();
+    });
+
+    // 3.4 龙尾 (Dragon-Scaled Tail with Serpentine Viper Tip)
+    ctx.save();
+    const tailBaseX = -20;
+    const tailBaseY = 0;
+    let sway = Math.sin(walkCycle * 0.8) * 0.35;
+    if (tailLash > 0) {
+        const lashNorm = (25 - tailLash) / 25;
+        sway += Math.sin(lashNorm * Math.PI * 2) * 1.5;
+    }
+
+    // Draw multi-segmented dragon tail joints
+    const segments = 8;
+    let currX = tailBaseX, currY = tailBaseY;
+    let currAngle = Math.PI + sway;
+
+    const tailPoints = [{ x: currX, y: currY, angle: currAngle, scaleW: 7 }];
+    for (let s = 1; s <= segments; s++) {
+        const segLen = 5.2;
+        currAngle += (sway * 0.22);
+        currX += Math.cos(currAngle) * segLen;
+        currY += Math.sin(currAngle) * segLen;
+        tailPoints.push({ x: currX, y: currY, angle: currAngle, scaleW: Math.max(3, 7 - s * 0.5) });
+    }
+
+    // Draw tail spine segment links
+    for (let s = 0; s < tailPoints.length - 1; s++) {
+        const p1 = tailPoints[s];
+        const p2 = tailPoints[s + 1];
+
+        // Segment body
+        ctx.lineWidth = p1.scaleW;
+        ctx.strokeStyle = (s % 2 === 0) ? '#18181b' : '#27272a';
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+
+        // Dragon scales dorsal ridge (triangular spikes)
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+        const normA = p1.angle + Math.PI / 2;
+        ctx.fillStyle = '#b91c1c';
+        ctx.beginPath();
+        ctx.moveTo(midX, midY);
+        ctx.lineTo(midX + Math.cos(normA) * (p1.scaleW * 0.7), midY + Math.sin(normA) * (p1.scaleW * 0.7));
+        ctx.lineTo(midX - Math.cos(p1.angle) * 3, midY - Math.sin(p1.angle) * 3);
+        ctx.fill();
+    }
+
+    // Tail Tip: Serpentine Dragon Viper Head (龙尾之首)
+    const tip = tailPoints[tailPoints.length - 1];
+    ctx.save();
+    ctx.translate(tip.x, tip.y);
+    ctx.rotate(tip.angle);
+
+    // Viper skull
+    ctx.fillStyle = '#450a0a';
+    ctx.beginPath();
+    ctx.moveTo(0, -3.5);
+    ctx.lineTo(7, -1);
+    ctx.lineTo(9, 0);
+    ctx.lineTo(7, 1);
+    ctx.lineTo(0, 3.5);
+    ctx.closePath();
+    ctx.fill();
+
+    // Toxic venom eye
+    ctx.fillStyle = '#10b981';
+    ctx.beginPath();
+    ctx.arc(3, -1.8, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Open jaw & dripping poison fangs
+    ctx.strokeStyle = '#f87171';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(6, 1);
+    ctx.lineTo(8, 3.5); // lower viper jaw
+    ctx.stroke();
+
+    // Green poison drip particle
+    ctx.fillStyle = '#34d399';
+    ctx.beginPath();
+    ctx.arc(8, 4.2, 1.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.restore();
+
+    // 3.5 躯干与黑曜石肌肉熔岩肌理 (Muscular Torso & Volcanic Ash Flesh)
+    ctx.save();
+    // Torso Base
+    ctx.fillStyle = '#18181b';
+    ctx.beginPath();
+    ctx.ellipse(2, 0, 24, 15, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ribcage & back shading
+    const grad = ctx.createLinearGradient(-16, 0, 18, 0);
+    grad.addColorStop(0, '#09090b');
+    grad.addColorStop(0.4, '#27272a');
+    grad.addColorStop(1, '#18181b');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(3, 0, 21, 13, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Glowing molten lava veins etched across ribs
+    ctx.strokeStyle = isPouncing ? '#ff3300' : '#f97316';
+    ctx.lineWidth = 1.3;
+    ctx.shadowColor = '#ea580c';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    // Rib vein lines
+    [-8, -2, 4, 10].forEach(vx => {
+        ctx.moveTo(vx, -8);
+        ctx.lineTo(vx + 3, 0);
+        ctx.lineTo(vx, 8);
+    });
+    ctx.stroke();
+
+    // Demonic bone spine ridge along center
+    ctx.fillStyle = '#52525b';
+    for (let sx = -14; sx <= 12; sx += 6) {
+        ctx.beginPath();
+        ctx.moveTo(sx, -2.5);
+        ctx.lineTo(sx + 3.5, 0);
+        ctx.lineTo(sx, 2.5);
+        ctx.lineTo(sx - 1.5, 0);
+        ctx.closePath();
+        ctx.fill();
+    }
+    ctx.restore();
+
+    // 3.6 蛇毛 (Serpentine Venomous Mane along Neck and Shoulders)
+    // 8 writhing viper heads emerging from the neck ridge and shoulders
+    ctx.save();
+    const snakeOffsets = [
+        { bx: 6, by: -11, dir: -0.6, len: 13, phase: 0.1 },
+        { bx: 9, by: -8, dir: -0.3, len: 14, phase: 1.2 },
+        { bx: 11, by: -12, dir: -0.8, len: 15, phase: 2.3 },
+        { bx: 14, by: -5, dir: -0.2, len: 12, phase: 3.4 },
+        { bx: 6, by: 11, dir: 0.6, len: 13, phase: 4.5 },
+        { bx: 9, by: 8, dir: 0.3, len: 14, phase: 5.6 },
+        { bx: 11, by: 12, dir: 0.8, len: 15, phase: 0.7 },
+        { bx: 14, by: 5, dir: 0.2, len: 12, phase: 1.8 }
+    ];
+
+    snakeOffsets.forEach((snk, idx) => {
+        const wave = Math.sin(walkCycle * 1.3 + snk.phase) * 0.4;
+        const totalAngle = snk.dir + wave;
+        const midX = snk.bx + Math.cos(totalAngle - 0.2) * (snk.len * 0.55);
+        const midY = snk.by + Math.sin(totalAngle - 0.2) * (snk.len * 0.55);
+        const headX = snk.bx + Math.cos(totalAngle) * snk.len;
+        const headY = snk.by + Math.sin(totalAngle) * snk.len;
+
+        // Snake slender body
+        ctx.strokeStyle = (idx % 2 === 0) ? '#064e3b' : '#047857';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(snk.bx, snk.by);
+        ctx.quadraticCurveTo(midX, midY, headX, headY);
+        ctx.stroke();
+
+        // Tiny diamond viper head
+        ctx.fillStyle = '#065f46';
+        ctx.beginPath();
+        ctx.arc(headX, headY, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Emerald glowing viper eye
+        ctx.fillStyle = '#34d399';
+        ctx.beginPath();
+        ctx.arc(headX + Math.cos(totalAngle) * 1.2, headY + Math.sin(totalAngle) * 1.2, 0.8, 0, Math.PI * 2);
+        ctx.fill();
+    });
+    ctx.restore();
+
+    // 3.7 三头 (Three Distinct Ferocious Hellhound Heads: Left, Center, Right)
+    // Left Hound Head (Angled ~ -26°)
+    drawHoundHead(ctx, 16, -11, -0.46, walkCycle, isPouncing, hitFlash, false);
+
+    // Right Hound Head (Angled ~ +26°)
+    drawHoundHead(ctx, 16, 11, 0.46, walkCycle, isPouncing, hitFlash, false);
+
+    // Central Dominant Alpha Head (Facing Straight Ahead, Larger)
+    drawHoundHead(ctx, 22, 0, 0, walkCycle, isPouncing, hitFlash, true);
+
+    // 3.8 挨打受创红白闪光覆盖 (Hit Flash)
+    if (hitFlash) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+        ctx.beginPath();
+        ctx.ellipse(10, 0, 32, 22, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    ctx.restore(); // Restore local entity transform
+    ctx.restore(); // Restore global context
+}
+
+// 独立犬首绘制函数 (Individual Hound Head Renderer)
+function drawHoundHead(ctx, hx, hy, baseAng, walkCycle, isPouncing, hitFlash, isAlpha) {
+    ctx.save();
+    ctx.translate(hx, hy);
+    const snarlJitter = isPouncing ? (Math.random() - 0.5) * 0.08 : 0;
+    ctx.rotate(baseAng + snarlJitter);
+
+    const scale = isAlpha ? 1.25 : 1.0;
+    ctx.scale(scale, scale);
+
+    // Muscular neck connection
+    ctx.fillStyle = '#18181b';
+    ctx.beginPath();
+    ctx.ellipse(-6, 0, 8, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Backward sweeping demonic horns
+    ctx.fillStyle = '#3f3f46';
+    // Top Horn
+    ctx.beginPath();
+    ctx.moveTo(-2, -5);
+    ctx.quadraticCurveTo(-8, -12, -14, -14);
+    ctx.quadraticCurveTo(-7, -8, 0, -4);
+    ctx.closePath();
+    ctx.fill();
+    // Bottom Horn
+    ctx.beginPath();
+    ctx.moveTo(-2, 5);
+    ctx.quadraticCurveTo(-8, 12, -14, 14);
+    ctx.quadraticCurveTo(-7, 8, 0, 4);
+    ctx.closePath();
+    ctx.fill();
+
+    // Hound Skull
+    ctx.fillStyle = '#27272a';
+    ctx.beginPath();
+    ctx.moveTo(-4, -5);
+    ctx.lineTo(8, -4);
+    ctx.lineTo(13, -2);
+    ctx.lineTo(15, 0); // nose tip
+    ctx.lineTo(13, 2);
+    ctx.lineTo(8, 4);
+    ctx.lineTo(-4, 5);
+    ctx.closePath();
+    ctx.fill();
+
+    // Snout & Upper Jaw
+    ctx.fillStyle = '#09090b';
+    ctx.beginPath();
+    ctx.ellipse(9, 0, 6, 3.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Snarl Maw Cavity (Dark Crimson interior mouth)
+    ctx.fillStyle = '#7f1d1d';
+    ctx.beginPath();
+    ctx.ellipse(10, 0, 4.5, 2.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Bared Sharp Fangs (Upper & Lower razor teeth)
+    ctx.fillStyle = '#fef08a';
+    // Upper canines
+    ctx.beginPath();
+    ctx.moveTo(9, -2.8); ctx.lineTo(11, -2.8); ctx.lineTo(10, -0.6); ctx.closePath();
+    ctx.moveTo(9, 2.8); ctx.lineTo(11, 2.8); ctx.lineTo(10, 0.6); ctx.closePath();
+    ctx.fill();
+    // Front teeth
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(11, -1.2, 1.2, 2.4);
+
+    // Glowing Magma Saliva / Hellfire Froth
+    if (Math.random() < 0.6) {
+        ctx.fillStyle = '#f97316';
+        ctx.beginPath();
+        ctx.arc(13.5, 0.8, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Ferocious Infernal Eye (Blazing Amber/Red Iris)
+    ctx.save();
+    const eyeX = 4, eyeY = -3.2;
+    ctx.fillStyle = isPouncing ? '#ff0000' : '#f97316';
+    ctx.shadowColor = '#ff2200';
+    ctx.shadowBlur = isPouncing ? 10 : 5;
+    ctx.beginPath();
+    ctx.arc(eyeX, eyeY, isAlpha ? 1.8 : 1.4, 0, Math.PI * 2);
+    ctx.fill();
+    // Slit pupil
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(eyeX - 0.3, eyeY - 1, 0.6, 2);
+    ctx.restore();
+
+    ctx.restore();
+}
+
+function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendingDamage, alpha = 1.0, isObserver = false, enemyShield = 0, maxShield = 80, alert = false, flashTimer = 0, isDemon = false, isJammer = false) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+
+    const isInBlind = !isPlayer && inBlindZone(x, y);
+
+    // ------------------- 盲区高亮紫色战术轮廓 (Purple Outline in Blind Zone) -------------------
+    if (isInBlind) {
+        ctx.save();
+        ctx.strokeStyle = '#c084fc';
+        ctx.shadowColor = '#a855f7';
+        ctx.shadowBlur = 20;
+        ctx.lineWidth = 3.5;
+        ctx.beginPath();
+        if (isDemon) {
+            ctx.ellipse(0, 0, 28, 22, 0, 0, Math.PI * 2);
+        } else {
+            ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        }
+        ctx.stroke();
+
+        ctx.strokeStyle = '#f3e8ff';
+        ctx.setLineDash([5, 4]);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        if (isDemon) {
+            ctx.ellipse(0, 0, 35, 28, 0, 0, Math.PI * 2);
+        } else {
+            ctx.arc(0, 0, 26, 0, Math.PI * 2);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+
+    // ------------------- 1. 头顶血条与护盾 -------------------
+    if ((hp < maxHp || !isPlayer || isDemon) && hp > 0) {
+        if (isDemon) {
+            // 恶魔统一双层血条 (Dual-Layer Demonic Health & Pact Bar)
+            const barW = 44;
+            const barX = -barW / 2;
+            
+            // Background Frame
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+            ctx.fillRect(barX - 1, -44, barW + 2, 11);
+            
+            // Upper Bar: Pact Shield / Armor (Amber Gold / Flame Orange)
+            const shieldVal = (enemyShield !== undefined && enemyShield > 0) ? enemyShield : 0;
+            const shieldMax = (maxShield || 100);
+            const shieldPct = Math.max(0, Math.min(1, shieldVal / shieldMax));
+            ctx.fillStyle = '#f97316';
+            ctx.fillRect(barX, -43, barW * shieldPct, 4);
+
+            // Lower Bar: Demonic HP (Crimson)
+            const hpPct = Math.max(0, Math.min(1, hp / maxHp));
+            ctx.fillStyle = '#f43f5e';
+            ctx.fillRect(barX, -38, barW * hpPct, 4);
+
+            // Label
+            ctx.font = 'bold 8px monospace';
+            ctx.fillStyle = '#ff2200';
+            ctx.textAlign = 'center';
+            ctx.fillText("🔥 DEMON 🔥", 0, -47);
+        } else {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; ctx.fillRect(-20, -36, 40, 5);
+            ctx.fillStyle = isPlayer ? ((getCurrentLevelId() === 'level0_test') ? '#FF3344' : '#00FF66') : (isInBlind ? '#FFFF00' : '#FF3344');
+            ctx.fillRect(-20, -36, (Math.max(0, hp) / maxHp) * 40, 5);
+            
+            if (enemyShield > 0) {
+                ctx.fillStyle = isJammer ? '#C084FC' : '#00CCFF';
+                ctx.fillRect(-20, -42, (enemyShield / maxShield) * 40, 4);
+            }
+        }
+    }
+
+    ctx.rotate(angle);
+
+    if (isDemon) {
+        // ------------------- 纯魔物/恶魔生物渲染 (Pure Demonic Fiend Renderer) -------------------
+        ctx.shadowColor = '#ff2200';
+        ctx.shadowBlur = alert ? 20 : 10;
+
+        // 1. 恶魔地狱翼 (Infernal Bat Wings spreading laterally along Y-axis)
+        const wingFlap = Math.sin(walkCycle * 2.8) * 8;
+        ctx.fillStyle = alert ? '#580808' : '#2b0404';
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        for (let side of [-1, 1]) {
+            const rootX = -3;
+            const rootY = side * 8;
+            const tipX = -20;
+            const tipY = side * (38 + wingFlap);
+            const midX = 8;
+            const midY = side * (26 + wingFlap * 0.5);
+
+            ctx.beginPath();
+            ctx.moveTo(rootX, rootY);
+            ctx.quadraticCurveTo(midX, midY, tipX, tipY);
+            ctx.quadraticCurveTo(tipX * 0.5, side * 22, rootX - 10, rootY);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+
+            // Wing ribs
+            ctx.strokeStyle = '#f97316';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(rootX, rootY);
+            ctx.lineTo(tipX, tipY);
+            ctx.moveTo(rootX, rootY);
+            ctx.lineTo(tipX * 0.6, side * (28 + wingFlap * 0.7));
+            ctx.stroke();
+
+            // Wing tip talon claw
+            ctx.strokeStyle = '#ff3300';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(tipX, tipY);
+            ctx.lineTo(tipX - 6, tipY + side * 5);
+            ctx.stroke();
+        }
+
+        // 2. 4只利爪与前肢 (4 Fiendish Claws with Stride)
+        const legStride = Math.sin(walkCycle * 2.5) * 8;
+        ctx.fillStyle = '#180202';
+        ctx.strokeStyle = '#991b1b';
+        ctx.lineWidth = 1.5;
+
+        // Rear claws
+        ctx.beginPath(); ctx.arc(-10, -11 + legStride, 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(-10, 11 - legStride, 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+        // Front claws
+        ctx.beginPath(); ctx.arc(10, -12 - legStride, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(10, 12 + legStride, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+        // Sharp fiery claw tips
+        ctx.strokeStyle = '#ff3300';
+        ctx.lineWidth = 2;
+        for (let side of [-1, 1]) {
+            const offset = side * (12 + (side > 0 ? legStride : -legStride));
+            ctx.beginPath();
+            ctx.moveTo(12, offset);
+            ctx.lineTo(20, offset + side * 2);
+            ctx.stroke();
+        }
+
+        // 3. 恶魔魔兽躯干与黑曜脊刺 (Demonic Beast Torso & Spines along X axis)
+        ctx.fillStyle = '#0f0202';
+        ctx.strokeStyle = alert ? '#ff2200' : '#dc2626';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 16, 10, 0, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+
+        // Dorsal obsidian spines along the center spine
+        ctx.fillStyle = '#ea580c';
+        for (let s = -10; s <= 4; s += 5) {
+            ctx.beginPath();
+            ctx.moveTo(s, -2);
+            ctx.lineTo(s + 2, -7);
+            ctx.lineTo(s + 4, -2);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        // 熔岩流淌心核 (Glowing Lava Veins & Core)
+        const coreGlow = 0.6 + Math.sin(Date.now() * 0.008) * 0.35;
+        ctx.fillStyle = `rgba(249, 115, 22, ${coreGlow})`;
+        ctx.beginPath(); ctx.ellipse(-2, 0, 8, 5, 0, 0, Math.PI * 2); ctx.fill();
+
+        // 4. 恶魔头颅、黑曜弯角与血红巨口 (Beast Skull & Horns)
+        ctx.fillStyle = '#080101';
+        ctx.strokeStyle = '#ff2200';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(10, 0, 9.5, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+
+        // Demonic Curved Horns (sweeping backward from head)
+        for (let side of [-1, 1]) {
+            ctx.strokeStyle = '#f97316';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.moveTo(8, side * 5);
+            ctx.quadraticCurveTo(2, side * 22, -6, side * 24);
+            ctx.stroke();
+
+            ctx.fillStyle = '#ff2200';
+            ctx.beginPath(); ctx.arc(-6, side * 24, 2, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // Glowing Fiery Eyes
+        ctx.fillStyle = '#ff0000';
+        ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 12;
+        ctx.fillRect(13, -4, 3.5, 2.5);
+        ctx.fillRect(13, 1.5, 3.5, 2.5);
+
+        // Open Fiery Maw / Mouth
+        ctx.fillStyle = '#ff3300';
+        ctx.beginPath();
+        ctx.moveTo(16, -3); ctx.lineTo(23, 0); ctx.lineTo(16, 3);
+        ctx.closePath(); ctx.fill();
+
+        if (alert) {
+            ctx.fillStyle = '#fef08a';
+            ctx.beginPath();
+            ctx.arc(24 + Math.random() * 4, (Math.random() - 0.5) * 4, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.shadowBlur = 0;
+        ctx.restore();
+        return;
+    }
+    
+    // 决定色彩与动态战术主题配色组 (Dynamic Tactical Color Palettes based on Faction)
+    let mainColor = '#FF3344';
+    
+    // 我们将所有角色的基础衣着、防弹衣和重型装备调整为专业的、无绿色/红色偏差的深灰色/暗碳色，
+    // 并适当调浅（从接近纯黑到极具质感的碳灰、钢灰），以便看清其细节。
+    let baseTacticalColor = '#2F3336'; // 战术衣物基底：深碳灰色 (Dark Charcoal Gray)
+    let vestColor = '#3A4146';          // 战术防弹衣：碳灰色 (Carbon Gray)
+    let plateColor = '#464E54';         // 防弹重型插板：深钢灰色 (Steel Gray)
+    let gearColor = '#535B62';          // 头盔、背背包、弹匣包、耳机等挂载装备：中深灰色 (Slate Gray)
+    let gearColor2 = '#202326';         // 枪支机匣、枪托、战术靴底、墨镜镜框：哑光石墨灰 (Matte Graphite Gray)
+    
+    const isLvl0Player = isPlayer && (getCurrentLevelId() === 'level0_test');
+
+    if (isPlayer) {
+        mainColor = isLvl0Player ? '#FF3344' : '#00FF66';
+    } else if (isInBlind) {
+        mainColor = '#FFFF00';
+    } else if (isJammer) {
+        mainColor = alert ? '#F43F5E' : '#C084FC';
+        baseTacticalColor = '#1c102b';
+        vestColor = '#2d1445';
+        plateColor = '#3b1859';
+        gearColor = '#581c87';
+        gearColor2 = '#130924';
+    } else if (isObserver) {
+        mainColor = alert ? '#FF3344' : '#00CCFF';
+    } else if (hitFlash) {
+        mainColor = '#FFFFFF';
+    }
+
+    // ------------------- 2. 四肢：精细军用战术靴 & 步态动画 -------------------
+    const legOffset = Math.sin(walkCycle) * 5.5;
+    
+    // 战术靴底部边缘（双层橡胶鞋底质感 - 调浅细节）
+    ctx.fillStyle = gearColor2;
+    ctx.beginPath(); ctx.roundRect(-9, -11.5 + legOffset, 8, 6, 2.5); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(-9, 5.5 - legOffset, 8, 6, 2.5); ctx.fill();
+    
+    // 战术靴绑带与正面皮革 (调浅细节)
+    ctx.fillStyle = gearColor;
+    ctx.beginPath(); ctx.roundRect(-8, -10.5 + legOffset, 6.5, 4, 1.5); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(-8, 6.5 - legOffset, 6.5, 4, 1.5); ctx.fill();
+
+    // ------------------- 3. 躯干：重型战术防弹衣 & MOLLE挂载系统 -------------------
+    // 3.1 战术防弹护甲基底 (Plate Carrier Base)
+    ctx.fillStyle = baseTacticalColor; 
+    ctx.strokeStyle = mainColor; 
+    ctx.lineWidth = isInBlind ? 2.8 : 1.8;
+    ctx.beginPath(); 
+    ctx.roundRect(-10, -10, 18, 20, 4.5); 
+    ctx.fill(); 
+    ctx.stroke();
+
+    // 3.2 背部战术电台、背包装备包与天线 (Tactical Radio Back Unit & Antenna - 调浅细节)
+    ctx.fillStyle = gearColor;
+    ctx.fillRect(-13, -5, 4, 10);
+    ctx.strokeStyle = gearColor2;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-13, -5, 4, 10);
+    
+    // 战术防折电台鞭状天线 (Flexible Whip Antenna)
+    ctx.strokeStyle = gearColor2;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-11, -3);
+    ctx.quadraticCurveTo(-18, -4, -14, -12); // 微弯的天线形态
+    ctx.stroke();
+
+    // 3.3 胸前战术重插板 (Ballistic Insert Plates - 调浅细节)
+    ctx.fillStyle = plateColor;
+    ctx.beginPath(); ctx.roundRect(-7, -7.5, 12, 15, 2.5); ctx.fill();
+
+    // 3.4 战术防弹衣 MOLLE 织带 (MOLLE Webbing Straps)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.lineWidth = 1;
+    for (let i = -5; i <= 5; i += 3.5) {
+        ctx.beginPath();
+        ctx.moveTo(-6, i);
+        ctx.lineTo(4, i);
+        ctx.stroke();
+    }
+
+    // 3.5 战术弹匣快拔套与投掷物挂包 (Magazine Pouches & Grenades - 调浅细节)
+    ctx.fillStyle = gearColor;
+    // 前方挂载两个弹匣包
+    ctx.fillRect(-1.5, -8.5, 4, 2);
+    ctx.fillRect(3.5, -8.5, 4, 2);
+    // 后方挂载两个杂物包
+    ctx.fillRect(-1.5, 6.5, 4, 2);
+    ctx.fillRect(3.5, 6.5, 4, 2);
+
+    // 3.6 战术肩章
+    ctx.fillStyle = mainColor;
+    ctx.fillRect(-4, -9.2, 4, 1.5);
+    ctx.fillRect(-4, 7.7, 4, 1.5);
+
+    // ------------------- 4. 技能与状态光环 -------------------
+    if (isInBlind && hp > 0) {
+        ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = 2; ctx.shadowColor = '#FFFF00'; ctx.shadowBlur = 12;
+        ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.stroke();
+        ctx.shadowBlur = 0;
+    }
+
+    if (isObserver && enemyShield > 0) {
+        ctx.strokeStyle = '#00CCFF'; ctx.lineWidth = 2; ctx.shadowColor = '#00CCFF'; ctx.shadowBlur = 8;
+        ctx.beginPath(); ctx.arc(0, 0, 21, 0, Math.PI * 2); ctx.stroke();
+        ctx.shadowBlur = 0;
+    }
+
+    if (isJammer && enemyShield > 0) {
+        // 半弧形的高能前向护盾 (Front Semi-Arc Energy Shield)
+        ctx.save();
+        ctx.strokeStyle = '#C084FC';
+        ctx.shadowColor = '#A855F7';
+        ctx.shadowBlur = 10;
+        ctx.lineWidth = 3.2;
+        // 半弧：智能体正前方 (-Math.PI * 0.48 到 +Math.PI * 0.48)
+        ctx.beginPath();
+        ctx.arc(0, 0, 23, -Math.PI * 0.48, Math.PI * 0.48);
+        ctx.stroke();
+
+        // 内部微电弧
+        ctx.strokeStyle = '#F3E8FF';
+        ctx.lineWidth = 1.2;
+        ctx.shadowBlur = 4;
+        ctx.beginPath();
+        ctx.arc(0, 0, 20.5, -Math.PI * 0.42, Math.PI * 0.42);
+        ctx.stroke();
+
+        // 两端能量发生器节点 (Arc Emitter Nodes)
+        const tipAngles = [-Math.PI * 0.48, Math.PI * 0.48];
+        tipAngles.forEach(tipAng => {
+            const tx = Math.cos(tipAng) * 23;
+            const ty = Math.sin(tipAng) * 23;
+            ctx.fillStyle = '#E879F9';
+            ctx.beginPath();
+            ctx.arc(tx, ty, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+        });
+        ctx.restore();
+    }
+
+    if (isPlayer && player.shield > 0) {
+        const shieldColor = isLvl0Player ? '#FF3344' : '#00CCFF';
+        ctx.strokeStyle = shieldColor;
+        ctx.shadowColor = shieldColor;
+        ctx.shadowBlur = 10;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+    }
+
+    // ------------------- 5. 枪械渲染 (Gun Rendering) -------------------
+    ctx.save();
+    ctx.translate(4, 3); // 枪械基底偏移
+
+    if (isLvl0Player) {
+        // --- Level 0 专有：粗野原始的重型三管猎枪 (Primitive Heavy Triple-Barrel Shotgun) ---
+        // 5.1 粗糙锻造铸铁枪机与结实机匣 (Crude Cast-Iron Receiver)
+        ctx.fillStyle = '#22252a';
+        ctx.fillRect(-4, -4, 9, 8);
+        ctx.strokeStyle = '#0e1012';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(-4, -4, 9, 8);
+
+        // 粗糙铆钉与铁焊痕
+        ctx.fillStyle = '#78808a';
+        ctx.fillRect(-2.5, -2.8, 1.2, 1.2);
+        ctx.fillRect(1, -2.8, 1.2, 1.2);
+        ctx.fillRect(-2.5, 1.6, 1.2, 1.2);
+        ctx.fillRect(1, 1.6, 1.2, 1.2);
+
+        // 3个独立暴露的重型击锤 (3 Mechanical External Hammers)
+        ctx.fillStyle = '#3a3e44';
+        ctx.fillRect(-5.5, -3.2, 2, 1.8);
+        ctx.fillRect(-5.5, -0.8, 2, 1.8);
+        ctx.fillRect(-5.5, 1.6, 2, 1.8);
+
+        // 5.2 粗野锯短实木手柄与枪托 (Sawn-Off Solid Wood Stock)
+        ctx.fillStyle = '#542813';
+        ctx.beginPath();
+        ctx.moveTo(-4, -2);
+        ctx.lineTo(-11, -3.2);
+        ctx.lineTo(-12, 5);
+        ctx.lineTo(-7, 5.5);
+        ctx.lineTo(-4, 3);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#2d1408';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // 5.3 粗野原木前护木 (Wood Forend)
+        ctx.fillStyle = '#663218';
+        ctx.fillRect(2.5, -3.8, 8.5, 7.6);
+        ctx.strokeStyle = '#2d1408';
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(2.5, -3.8, 8.5, 7.6);
+
+        // 加固铁环箍 (Steel Retention Bands)
+        ctx.fillStyle = '#2e3238';
+        ctx.fillRect(4.5, -4.2, 1.5, 8.4);
+        ctx.fillRect(8.5, -4.2, 1.5, 8.4);
+
+        // 5.4 3根排列极其清晰凸显的重型铸铁枪管 (3 Distinct Parallel Heavy Steel Barrels)
+        // 枪管1 (Top Barrel: y = -4.2 ~ -1.8)
+        // 枪管2 (Center Barrel: y = -1.2 ~ +1.2)
+        // 枪管3 (Bottom Barrel: y = +1.8 ~ +4.2)
+        const barrels = [
+            { y: -4.2, h: 2.4, len: 19.5, muzzleX: 24.5 },
+            { y: -1.2, h: 2.4, len: 21.0, muzzleX: 26.0 },
+            { y: 1.8, h: 2.4, len: 19.5, muzzleX: 24.5 }
+        ];
+
+        // 枪管深暗黑隐深沟 separator
+        ctx.fillStyle = '#050608';
+        ctx.fillRect(5, -1.8, 19.5, 0.6);
+        ctx.fillRect(5, 1.2, 19.5, 0.6);
+
+        barrels.forEach(b => {
+            // 枪管钢材主体 (Dark Cast Steel)
+            ctx.fillStyle = '#1c2026';
+            ctx.fillRect(5, b.y, b.len, b.h);
+
+            // 枪管圆柱曲面立体银灰高亮 (Metallic Cylinder Ridge Highlight)
+            ctx.fillStyle = '#8a94a0';
+            ctx.fillRect(5, b.y + 0.4, b.len - 1, 0.7);
+
+            // 枪管外轮廓线
+            ctx.strokeStyle = '#080a0c';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(5, b.y, b.len, b.h);
+
+            // 枪口黑洞开孔 (Muzzle Hole)
+            ctx.fillStyle = '#050506';
+            ctx.beginPath();
+            ctx.arc(b.muzzleX, b.y + b.h / 2, 1.1, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 枪口炽热发光内圈 (Hot Glowing Orifice)
+            ctx.fillStyle = '#ff3300';
+            ctx.beginPath();
+            ctx.arc(b.muzzleX, b.y + b.h / 2, 0.55, 0, Math.PI * 2);
+            ctx.fill();
+        });
+
+    } else {
+        // 5.1 战术伸缩枪托 (Collapsible Stock - 调浅细节)
+        ctx.fillStyle = gearColor2;
+        ctx.fillRect(-4, -1.5, 4, 3);
+        // 枪托托腮板细节 (调浅细节)
+        ctx.fillStyle = gearColor;
+        ctx.fillRect(-3, -2, 2.5, 1);
+
+        // 5.2 精密枪身与机匣 (Upper Receiver & Handguard - 调浅细节)
+        ctx.fillStyle = gearColor2;
+        ctx.fillRect(0, -2, 17, 4);
+
+        // 5.3 弯曲战术弹匣 (Tactical Curved Magazine)
+        // 弹匣朝前方微弯突显真枪感觉 (调浅细节)
+        ctx.fillStyle = gearColor;
+        ctx.beginPath();
+        ctx.moveTo(7, 1);
+        ctx.quadraticCurveTo(8, 5, 10, 8);
+        ctx.lineTo(8, 8.5);
+        ctx.quadraticCurveTo(6, 5, 5, 1);
+        ctx.closePath();
+        ctx.fill();
+
+        // 5.4 顶部全息/红点战术瞄具 (EoTech Holographic Sight - 调浅细节)
+        ctx.fillStyle = gearColor2;
+        ctx.fillRect(2, -3.2, 7, 1.5);
+        ctx.fillStyle = mainColor; // 全息瞄具激光分划点
+        ctx.fillRect(4.5, -3.6, 2, 1);
+
+        // 5.5 侧挂激光瞄准器 (PEQ-15 Laser Designator - 调浅细节)
+        ctx.fillStyle = gearColor;
+        ctx.fillRect(6, 1.8, 4.5, 1.5);
+
+        // 5.6 战术快拆消音器 (QD Suppressor - 调浅细节)
+        ctx.fillStyle = gearColor2;
+        ctx.fillRect(17, -2.5, 6, 5);
+
+        // 5.7 枪口极微弱消焰指示
+        ctx.fillStyle = mainColor;
+        ctx.fillRect(22.5, -0.8, 1.5, 1.6);
+    }
+
+    ctx.restore();
+
+    // ------------------- 6. 战术双手 & 护甲手套 (Oakley Combat Gloves - 调浅细节) -------------------
+    ctx.fillStyle = gearColor;
+    ctx.strokeStyle = mainColor;
+    ctx.lineWidth = 1;
+
+    if (isLvl0Player) {
+        // 左手 (抓握三管猎枪粗木护木)
+        ctx.beginPath(); ctx.arc(10, -1, 2.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        // 右手 (握持锯短木柄与扳机)
+        ctx.beginPath(); ctx.arc(4, 3, 2.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    } else {
+        // 左手 (抓握前部导轨护木)
+        ctx.beginPath(); ctx.arc(14, -2, 2.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        // 右手 (握持后握把与扳机)
+        ctx.beginPath(); ctx.arc(5, 5, 2.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+
+    // 开火枪口焰
+    const showFlash = isPlayer ? (player.flashTimer > 0) : (flashTimer > 0);
+    if (showFlash) {
+        if (isLvl0Player) {
+            ctx.fillStyle = '#FF3300'; ctx.shadowColor = '#FF2200'; ctx.shadowBlur = 16;
+            ctx.beginPath(); ctx.arc(28, 1, 9, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#FEF08A';
+            ctx.beginPath(); ctx.arc(28, 1, 4, 0, Math.PI * 2); ctx.fill();
+            ctx.shadowBlur = 0;
+        } else {
+            ctx.fillStyle = '#FF9900'; ctx.shadowColor = '#FF6600'; ctx.shadowBlur = 12;
+            ctx.beginPath(); ctx.arc(28, 3, 7.5, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+        }
+    }
+
+    // ------------------- 7. 战术头盔、拾音降噪耳机 & GPNVG-18 四目夜视仪 -------------------
+    // 7.1 特种兵降噪降温拾音耳机 (Peltor Tactical Earmuffs - 调浅细节)
+    // 头部两侧的椭圆耳机结构
+    ctx.fillStyle = gearColor;
+    ctx.strokeStyle = mainColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(-1.5, -9.5, 3.5, 2.5, 1); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.roundRect(-1.5, 7.0, 3.5, 2.5, 1); ctx.fill(); ctx.stroke();
+
+    // 7.2 模块化 FAST 战术头盔 (FAST Base Jump Helmet - 调浅细节)
+    ctx.fillStyle = gearColor; 
+    ctx.beginPath(); ctx.arc(-0.5, 0, 8.8, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = mainColor; ctx.lineWidth = 1.6; ctx.stroke();
+
+    // 头盔两侧战术导轨 (ARC Helmet Rails - 调浅细节)
+    ctx.fillStyle = gearColor2;
+    ctx.fillRect(-3, -8.2, 4.5, 1.2);
+    ctx.fillRect(-3, 7.0, 4.5, 1.2);
+
+    // 7.3 防弹护目镜/墨镜 (Oakley Tactical Goggles - 调浅细节)
+    ctx.fillStyle = gearColor2;
+    ctx.fillRect(3.2, -5.2, 2.2, 10.4);
+
+    // 7.4 标志性的 GPNVG-18 四目全景夜视仪 (Panoramic Quad-Eye Night Vision Goggles)
+    // 连接额头墨镜的固定墨镜架 (调浅细节)
+    ctx.fillStyle = gearColor;
+    ctx.fillRect(4.5, -1.5, 1.8, 3);
+
+    // 扇形展开的四组镜筒结构 (调浅细节)
+    ctx.fillStyle = gearColor;
+    // 1号、2号镜筒 (左侧外展与内直)
+    ctx.fillRect(5.5, -5.0, 4, 2.2);
+    ctx.fillRect(5.8, -2.4, 4, 2.2);
+    // 3号、4号镜筒 (右侧内直与外展)
+    ctx.fillRect(5.8, 0.2, 4, 2.2);
+    ctx.fillRect(5.5, 2.8, 4, 2.2);
+
+    // 7.5 四个镀膜镜头发光镜片 (4 GPNVG Glowing Lenses)
+    // 经典的 Tier-1 幽灵绿/天蓝荧光镜片，增强画面特种作战科技感
+    ctx.fillStyle = mainColor;
+    ctx.shadowColor = mainColor;
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.arc(9.7, -3.9, 1.2, 0, Math.PI * 2); // 1
+    ctx.arc(10.0, -1.3, 1.2, 0, Math.PI * 2); // 2
+    ctx.arc(10.0, 1.3, 1.2, 0, Math.PI * 2);  // 3
+    ctx.arc(9.7, 3.9, 1.2, 0, Math.PI * 2);  // 4
+    ctx.fill();
+    ctx.shadowBlur = 0; // 恢复 shadowBlur
+
+    ctx.restore();
+
+    // ------------------- 8. 文字标识 (不随视角旋转) -------------------
+    if (isInBlind && hp > 0) {
+        ctx.fillStyle = '#FFFF00'; ctx.font = 'bold 10px monospace';
+        ctx.fillText("[IN BLIND ZONE]", x - 35, y - 46);
+    } else if (!isPlayer && isJammer && hp > 0) {
+        ctx.fillStyle = alert ? '#F43F5E' : '#C084FC'; ctx.font = 'bold 9px monospace';
+        ctx.fillText("[JAMMER]", x - 23, y - 46);
+    } else if (!isPlayer && isObserver && hp > 0) {
+        ctx.fillStyle = alert ? '#FF3344' : '#00CCFF'; ctx.font = 'bold 9px monospace';
+        ctx.fillText("[OBSERVER]", x - 26, y - 46);
+    }
+
+    if (!isPlayer && pendingDamage > 0 && hp > 0) {
+        ctx.fillStyle = '#00FF66'; ctx.font = 'bold 10px monospace';
+        ctx.fillText(`[DEBT: ${pendingDamage}]`, x - 26, y - (isInBlind ? 58 : 46));
+    }
+}
+
+function draw() {
+    if (!ensureCanvas()) return;
+    if (window.__viewState && window.__viewState !== 'playing') {
+        ctx.fillStyle = '#020403';
+        ctx.fillRect(0, 0, width, height);
+        return;
+    }
+    const levelId = getCurrentLevelId();
+    
+    // Calculate smooth camera scroll position for Level 4 Yacht, Level 0 Test, and Level 6 Train
+    if (levelId === 'level4_yacht') {
+        const mapWidth = window.level4MapWidth || 2400;
+        const targetCamX = player.x - width / 2;
+        window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
+        window.cameraY = height > 700 ? (height - 700) / 2 : 0;
+    } else if (levelId === 'level0_test') {
+        const mapWidth = window.level0MapWidth || 3200;
+        const mapHeight = window.level0MapHeight || 1000;
+        const targetCamX = player.x - width / 2;
+        window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
+        if (mapHeight > height) {
+            const targetCamY = player.y - height / 2;
+            const clampY = Math.max(0, Math.min(mapHeight - height, targetCamY));
+            window.cameraY = -clampY;
+        } else {
+            window.cameraY = (height - mapHeight) / 2;
+        }
+    } else if (levelId === 'level6_train') {
+        const mapWidth = window.level6MapWidth || 7200;
+        const mapHeight = window.level6MapHeight || 240;
+        const targetCamX = player.x - width / 2;
+        window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
+        window.cameraY = (height - mapHeight) / 2;
+    } else if (levelId === 'level7_lab') {
+        const mapWidth = window.level7MapWidth || 3200;
+        const mapHeight = window.level7MapHeight || 720;
+        const targetCamX = player.x - width / 2;
+        window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
+        window.cameraY = height > mapHeight ? (height - mapHeight) / 2 : 0;
+    } else {
+        window.cameraX = 0;
+        window.cameraY = 0;
+    }
+
+    ctx.clearRect(0, 0, width, height);
+    
+    ctx.save();
+    if (levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') {
+        ctx.translate(-(window.cameraX || 0), window.cameraY || 0);
+    }
+    
+    if (levelId === 'level1_airport') {
+        // 1. 机场关卡：现代大理石感灰色瓷砖地板（底色显著加深为精致的高端深钢灰色，使角色和各种战术指示界线格外清晰凸显）
+        ctx.fillStyle = '#4B5358'; 
+        ctx.fillRect(0, 0, width, height);
+        
+        ctx.strokeStyle = 'rgba(15, 23, 42, 0.48)'; // 高对比度的深色瓷砖缝隙，使网格格外出众
+        ctx.lineWidth = 1.3;
+        for(let x = 0; x < width; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
+        for(let y = 0; y < height; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+    } else if (levelId === 'level0_test') {
+        // 0. 测试关卡：地狱深渊深邃黑红底色（无网格、无外框，仅保留实际地形与环境元素）
+        const mapW = window.level0MapWidth || 3200;
+        const mapH = window.level0MapHeight || 1000;
+        ctx.fillStyle = '#060202';
+        ctx.fillRect(-2000, -2000, mapW + 4000, mapH + 4000);
+    } else if (levelId === 'level6_train') {
+        // 6. 远东装甲列车与西伯利亚极寒雪原（7200px × 240px，长宽比 30:1）
+        const mapW = window.level6MapWidth || 7200;
+        const mapH = window.level6MapHeight || 240;
+        const viewH = height || 720;
+        const camY = window.cameraY || (viewH - mapH) / 2;
+
+        // =========================================================================
+        // 1. 远东极寒积雪雪原背景（Far East Snowy Tundra - 柔和冷调渐变与自然雪原）
+        // =========================================================================
+        // 北侧远景雪原 (y < 0)
+        const northSnowGrad = ctx.createLinearGradient(0, -camY - 80, 0, 0);
+        northSnowGrad.addColorStop(0, '#7b93ab');     // 远景极寒灰蓝冻原
+        northSnowGrad.addColorStop(0.35, '#97acc2');  // 中景冷杉雪雾层
+        northSnowGrad.addColorStop(0.75, '#b9ccd9');  // 浅灰蓝积雪层
+        northSnowGrad.addColorStop(1, '#d5e2ec');     // 近轨积雪层
+        ctx.fillStyle = northSnowGrad;
+        ctx.fillRect(-800, -camY - 120, mapW + 1600, camY + 120);
+
+        // 南侧近景雪原 (y > mapH)
+        const southSnowGrad = ctx.createLinearGradient(0, mapH, 0, mapH + camY + 120);
+        southSnowGrad.addColorStop(0, '#d5e2ec');     // 近轨积雪层
+        southSnowGrad.addColorStop(0.3, '#b9ccd9');   // 浅灰蓝积雪层
+        southSnowGrad.addColorStop(0.7, '#97acc2');   // 冻原雪地
+        southSnowGrad.addColorStop(1, '#7b93ab');     // 远景极寒灰蓝
+        ctx.fillStyle = southSnowGrad;
+        ctx.fillRect(-800, mapH, mapW + 1600, camY + 120);
+
+        // 远东雪原细节装饰：远景针叶林剪影、风吹雪纹理、冻原积雪起伏 (仅外部雪地背景流动)
+        const trainSpeed = 520; // 模拟列车巡航时速 (px/s)
+        const now = performance.now() / 1000;
+        const camX = window.cameraX || 0;
+        const viewW = width || 1200;
+
+        ctx.save();
+        // (A) 远景针叶冷杉林剪影 (北侧远景雪原 - 0.22倍远景视差缓慢后退)
+        ctx.fillStyle = 'rgba(70, 95, 120, 0.42)';
+        const treeStep = 42;
+        const treeOffset = (now * (trainSpeed * 0.22)) % treeStep;
+        for (let treeX = camX - 120 - treeOffset; treeX < camX + viewW + 120; treeX += treeStep) {
+            const worldIdx = Math.round((treeX + now * (trainSpeed * 0.22)) / treeStep);
+            const treeH = 34 + Math.abs((worldIdx * 17) % 28);
+            const treeY = -camY + 16 + Math.abs((worldIdx * 7) % 24);
+            ctx.beginPath();
+            ctx.moveTo(treeX, treeY);
+            ctx.lineTo(treeX - 10, treeY + treeH);
+            ctx.lineTo(treeX + 10, treeY + treeH);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        // (B) 柔和风吹雪痕与积雪起伏线条 (严格限制在外部雪原 y < -28 与 y > mapH + 28)
+        ctx.strokeStyle = 'rgba(240, 246, 252, 0.45)';
+        ctx.lineWidth = 1.8;
+        const waveOffset = now * (trainSpeed * 0.40);
+        for (let dy = -camY + 55; dy < -30; dy += 32) {
+            ctx.beginPath();
+            for (let dx = camX - 150; dx < camX + viewW + 150; dx += 80) {
+                const waveY = dy + Math.sin((dx + dy + waveOffset) * 0.012) * 7;
+                if (dx === camX - 150) ctx.moveTo(dx, waveY);
+                else ctx.lineTo(dx, waveY);
+            }
+            ctx.stroke();
+        }
+        for (let dy = mapH + 34; dy < mapH + camY + 60; dy += 32) {
+            ctx.beginPath();
+            for (let dx = camX - 150; dx < camX + viewW + 150; dx += 80) {
+                const waveY = dy + Math.sin((dx - dy + waveOffset) * 0.012) * 7;
+                if (dx === camX - 150) ctx.moveTo(dx, waveY);
+                else ctx.lineTo(dx, waveY);
+            }
+            ctx.stroke();
+        }
+
+        // (C) 雪原地面高速掠过的积雪斑块 (在外部雪地上向后飞掠)
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+        const snowPatchStep = 64;
+        const snowPatchOffset = (now * trainSpeed) % snowPatchStep;
+        for (let spx = camX - 80 - snowPatchOffset; spx < camX + viewW + 80; spx += snowPatchStep) {
+            const spIdx = Math.round((spx + now * trainSpeed) / snowPatchStep);
+            // 北侧外部雪原地面雪斑
+            const pyNorth = -32 - Math.abs((spIdx * 19) % 36);
+            ctx.fillRect(spx, pyNorth, 16 + (spIdx % 10), 3);
+            // 南侧外部雪原地面雪斑
+            const pySouth = mapH + 32 + Math.abs((spIdx * 23) % 36);
+            ctx.fillRect(spx + 12, pySouth, 18 + (spIdx % 8), 3);
+        }
+
+        // (D) 极速飞驰暴风雪流与飞雪粒子 (纯在外部雪地空域中飞舞，绝不触碰列车外壳与装甲)
+        const numFlakes = 100;
+        const spanW = viewW + 400;
+        for (let i = 0; i < numFlakes; i++) {
+            const seed = (i + 1) * 73.19;
+            const flakeSpeed = trainSpeed * (0.85 + (i % 7) * 0.08);
+            const rawX = ((now * flakeSpeed + seed * 89) % spanW);
+            const flakeX = camX + viewW + 200 - rawX;
+
+            const isNorth = (i % 2 === 0);
+            let flakeY;
+            if (isNorth) {
+                flakeY = -camY - 80 + ((seed * 19 + now * 32) % Math.max(20, camY + 80 - 28));
+                if (flakeY > -28) flakeY = -28 - (Math.abs(seed) % 30);
+            } else {
+                flakeY = mapH + 30 + ((seed * 29 + now * 32) % Math.max(20, camY + 60));
+            }
+
+            // 高速风雪拉丝流线
+            const streakLen = 14 + (i % 5) * 6;
+            const alpha = 0.35 + (i % 4) * 0.18;
+
+            ctx.strokeStyle = `rgba(235, 245, 255, ${alpha})`;
+            ctx.lineWidth = (i % 4 === 0) ? 1.6 : 0.9;
+            ctx.beginPath();
+            ctx.moveTo(flakeX, flakeY);
+            ctx.lineTo(flakeX - streakLen, flakeY + 1.2);
+            ctx.stroke();
+
+            // 雪晶高光微粒
+            ctx.fillStyle = `rgba(255, 255, 255, ${alpha + 0.2})`;
+            ctx.fillRect(flakeX - 1.5, flakeY - 0.5, 2, 2);
+        }
+        ctx.restore();
+
+        // =========================================================================
+        // 2. 列车外层重装甲外壳、加固装甲肋梁与合金底板 (Train Outer Armored Hull)
+        // [严格保持静态 - 属于列车外层装甲本体，绝对静止不移动]
+        // =========================================================================
+        // 北侧列车装甲外沿底板 (y: -26 ~ 0) - 静态固定
+        ctx.fillStyle = '#243b53';
+        ctx.fillRect(-800, -26, mapW + 1600, 26);
+        ctx.fillStyle = 'rgba(217, 226, 236, 0.25)'; // 静态装甲铆钉点缀
+        const minBoltX = Math.max(-700, Math.floor((camX - 80) / 24) * 24);
+        const maxBoltX = Math.min(mapW + 700, Math.ceil((camX + viewW + 80) / 24) * 24);
+        for (let sx = minBoltX; sx <= maxBoltX; sx += 24) {
+            ctx.fillRect(sx + Math.abs((sx * 3) % 12), -22 + Math.abs((sx * 7) % 18), 4, 3);
+        }
+
+        // 南侧列车装甲外沿底板 (y: mapH ~ mapH + 26) - 静态固定
+        ctx.fillStyle = '#243b53';
+        ctx.fillRect(-800, mapH, mapW + 1600, 26);
+        ctx.fillStyle = 'rgba(217, 226, 236, 0.25)';
+        for (let sx = minBoltX; sx <= maxBoltX; sx += 24) {
+            ctx.fillRect(sx + Math.abs((sx * 5) % 12), mapH + 4 + Math.abs((sx * 3) % 18), 4, 3);
+        }
+
+        // 列车外层装甲加固肋梁 (Armor Rib Brackets - 静态固定)
+        ctx.fillStyle = '#102a43';
+        ctx.strokeStyle = '#0b1d30';
+        ctx.lineWidth = 1;
+        const minTieX = Math.max(-800, Math.floor((camX - 60) / 28) * 28);
+        const maxTieX = Math.min(mapW + 800, Math.ceil((camX + viewW + 60) / 28) * 28);
+        for (let tieX = minTieX; tieX <= maxTieX; tieX += 28) {
+            // 北侧装甲肋梁
+            ctx.fillRect(tieX, -24, 12, 24);
+            ctx.strokeRect(tieX, -24, 12, 24);
+            // 南侧装甲肋梁
+            ctx.fillRect(tieX, mapH, 12, 24);
+            ctx.strokeRect(tieX, mapH, 12, 24);
+        }
+
+        // 列车外层重装甲合金防撞板 (Heavy Armor Alloy Plates - 静态固定)
+        ctx.fillStyle = '#627d98';
+        ctx.fillRect(-800, -10, mapW + 1600, 4);
+        ctx.fillStyle = '#9fb3c8'; // 钢板反光高光线
+        ctx.fillRect(-800, -9, mapW + 1600, 1.5);
+
+        ctx.fillStyle = '#627d98';
+        ctx.fillRect(-800, mapH + 6, mapW + 1600, 4);
+        ctx.fillStyle = '#9fb3c8';
+        ctx.fillRect(-800, mapH + 7, mapW + 1600, 1.5);
+
+        // =========================================================================
+        // 3. 装甲列车车身甲板与 6 大专属车厢地面 (Armored Train 6 Carriage Distinct Floors)
+        // =========================================================================
+        // 6大车厢区域依次为：
+        // 1. 客舱 (Coach Class, 0~1200): 深灰蓝工装橡胶防滑地板 + 银灰细格 + 中央走道吸音毯
+        // 2. 餐车 (Dining & Bistro, 1200~2400): 复古暖核桃木拼花木地板 + 墨绿卡座绒毯 + 红木吧台地台
+        // 3. VIP舱室 (VIP Luxury Suites, 2400~3600): 奢华深绛红羊毛地毯 + 哑光烫金几何滚边
+        // 4. 控制室 (Control Room, 3600~4800): 科技深碳黑防静电地坪 + 荧光青蓝与琥珀橙数据光路
+        // 5. 引擎室 (Engine/Reactor, 4800~6000): 重型镂空格栅铁板 + 熔火橙红涡轮热流 + 工业警示条纹
+        // 6. 货仓 (Cargo/Freight, 6000~7200): 耐磨冷灰水泥仓储地面 + 黄色叉车导轨与货物停放区
+
+        // --- CAR 1: 客舱 (0 ~ 1200) ---
+        if (camX < 1250) {
+            ctx.fillStyle = '#1e293b'; // 深灰蓝工装防滑橡胶
+            ctx.fillRect(0, 0, 1200, mapH);
+            // 工装细格纹
+            ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
+            ctx.lineWidth = 1.0;
+            for (let x = 0; x < 1200; x += 40) {
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, mapH); ctx.stroke();
+            }
+            for (let y = 0; y < mapH; y += 40) {
+                ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(1200, y); ctx.stroke();
+            }
+            // 中央走道吸音蓝灰毯
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, mapH / 2 - 32, 1200, 64);
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(0, mapH / 2 - 32, 1200, 64);
+        }
+
+        // --- CAR 2: 餐车 (1200 ~ 2400) ---
+        if (camX + viewW > 1150 && camX < 2450) {
+            ctx.fillStyle = '#2b1810'; // 优雅复古核桃木
+            ctx.fillRect(1200, 0, 1200, mapH);
+            // 纵向木板拼花接缝
+            ctx.strokeStyle = '#3d2217';
+            ctx.lineWidth = 1.2;
+            for (let ty = 12; ty < mapH - 10; ty += 18) {
+                ctx.beginPath(); ctx.moveTo(1200, ty); ctx.lineTo(2400, ty); ctx.stroke();
+            }
+        }
+
+        // --- CAR 3: VIP 豪华套房 (2400 ~ 3600) ---
+        if (camX + viewW > 2350 && camX < 3650) {
+            // 纯净高档深绛红羊毛绒毯 (全无杂乱网格线与虚线)
+            ctx.fillStyle = '#2b0b14'; // 奢华深红丝绒底色
+            ctx.fillRect(2400, 0, 1200, mapH);
+
+            // 中央走廊优雅贵宾红毯 (Solid plush runner)
+            ctx.fillStyle = '#450d1d';
+            ctx.fillRect(2400, mapH / 2 - 28, 1200, 56);
+            ctx.strokeStyle = 'rgba(245, 158, 11, 0.35)'; // 走廊两侧细致烫金金边
+            ctx.lineWidth = 1.0;
+            ctx.beginPath();
+            ctx.moveTo(2400, mapH / 2 - 28); ctx.lineTo(3600, mapH / 2 - 28);
+            ctx.moveTo(2400, mapH / 2 + 28); ctx.lineTo(3600, mapH / 2 + 28);
+            ctx.stroke();
+        }
+
+        // --- CAR 4: 控制室 (3600 ~ 4800) ---
+        if (camX + viewW > 3550 && camX < 4850) {
+            ctx.fillStyle = '#0a101d'; // 科技深碳黑防静电
+            ctx.fillRect(3600, 0, 1200, mapH);
+            // 荧光青蓝发光数据管线
+            ctx.strokeStyle = 'rgba(6, 182, 212, 0.28)';
+            ctx.lineWidth = 1.4;
+            for (let cx = 3600; cx < 4800; cx += 80) {
+                ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, mapH); ctx.stroke();
+            }
+            for (let cy = 0; cy < mapH; cy += 60) {
+                ctx.beginPath(); ctx.moveTo(3600, cy); ctx.lineTo(4800, cy); ctx.stroke();
+            }
+        }
+
+        // --- CAR 5: 引擎室 (4800 ~ 6000) ---
+        if (camX + viewW > 4750 && camX < 6050) {
+            ctx.fillStyle = '#121214'; // 重型深黑工业钢板
+            ctx.fillRect(4800, 0, 1200, mapH);
+            // 镂空格栅透出的熔火橙红涡轮热流微光
+            const heatGrad = ctx.createLinearGradient(4800, 0, 6000, 0);
+            heatGrad.addColorStop(0, 'rgba(249, 115, 22, 0.08)');
+            heatGrad.addColorStop(0.3, 'rgba(239, 68, 68, 0.18)');
+            heatGrad.addColorStop(0.7, 'rgba(249, 115, 22, 0.18)');
+            heatGrad.addColorStop(1, 'rgba(239, 68, 68, 0.08)');
+            ctx.fillStyle = heatGrad;
+            ctx.fillRect(4800, 10, 1200, mapH - 20);
+
+            // 重型工业蜂窝镂空格栅
+            ctx.strokeStyle = 'rgba(249, 115, 22, 0.25)';
+            ctx.lineWidth = 1.0;
+            for (let gx = 4800; gx < 6000; gx += 30) {
+                ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, mapH); ctx.stroke();
+            }
+            for (let gy = 0; gy < mapH; gy += 30) {
+                ctx.beginPath(); ctx.moveTo(4800, gy); ctx.lineTo(6000, gy); ctx.stroke();
+            }
+        }
+
+        // --- CAR 6: 货仓与步战车运输车厢 (6000 ~ 7200) ---
+        if (camX + viewW > 5950) {
+            ctx.fillStyle = '#17202a'; // 重型军运列车防滑强化钢板底盘
+            ctx.fillRect(6000, 0, 1200, mapH);
+
+            // 步战车中央重型停泊区与履带防滑导轨槽 (Flatbed Heavy Vehicle Track Guides - 精确对齐 290 宽履带)
+            ctx.fillStyle = '#0f172a';
+            // 北侧履带定位槽
+            ctx.fillRect(6325, 58, 350, 26);
+            // 南侧履带定位槽
+            ctx.fillRect(6325, mapH - 84, 350, 26);
+            ctx.strokeStyle = 'rgba(71, 85, 105, 0.6)';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(6325, 58, 350, 26);
+            ctx.strokeRect(6325, mapH - 84, 350, 26);
+
+            // 车厢货物固定槽钢纵梁 (Tie-down channels running through the deck)
+            ctx.strokeStyle = 'rgba(100, 116, 139, 0.25)';
+            ctx.lineWidth = 1.0;
+            ctx.beginPath();
+            ctx.moveTo(6000, 36); ctx.lineTo(7180, 36);
+            ctx.moveTo(6000, mapH - 36); ctx.lineTo(7180, mapH - 36);
+            ctx.stroke();
+
+            // 货运各区域黄色定位虚线框 (Yellow Tactical Bay Outlines - 重新均匀分配整车空间并加宽各区空隙)
+            ctx.strokeStyle = 'rgba(234, 179, 8, 0.45)';
+            ctx.lineWidth = 1.6;
+            ctx.setLineDash([8, 6]);
+            // BAY 01: 战备物资箱区 (6045 ~ 6285)
+            ctx.strokeRect(6045, 48, 240, mapH - 96);
+            // BAY 02: 步战车装载区 (6315 ~ 6685 - 等比例拓宽)
+            ctx.strokeRect(6315, 48, 370, mapH - 96);
+            // BAY 03: 战术物资补给区 (6710 ~ 6830)
+            ctx.strokeRect(6710, 48, 120, mapH - 96);
+            // BAY 04: 铁轨与轨枕备用区 (6860 ~ 6980)
+            ctx.strokeRect(6860, 48, 120, mapH - 96);
+            // BAY 05: 重型工程与机修工具区 (7010 ~ 7140)
+            ctx.strokeRect(7010, 48, 130, mapH - 96);
+            ctx.setLineDash([]);
+
+            // 地面战术文字标识 (Stenciled Floor Bay Names)
+            ctx.font = 'bold 8px monospace';
+            ctx.fillStyle = 'rgba(234, 179, 8, 0.45)';
+            ctx.textAlign = 'center';
+            ctx.fillText('BAY 01: CARGO', 6165, mapH / 2 - 4);
+            ctx.fillText('BAY 02: COMBAT IFV', 6500, mapH / 2 - 4);
+            ctx.fillText('BAY 03: SUPPLIES', 6770, mapH / 2 - 4);
+            ctx.fillText('BAY 04: RAILS', 6920, mapH / 2 - 4);
+            ctx.fillText('BAY 05: TOOLS', 7075, mapH / 2 - 4);
+            ctx.textAlign = 'left';
+
+            // 车尾封闭加固防滑钢板与重型角钢纵梁 (Reinforced Cargo Deck Bulkhead Base)
+            ctx.strokeStyle = 'rgba(71, 85, 105, 0.4)';
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(7150, 48, 30, mapH - 96);
+        }
+
+        // =========================================================================
+        // 4. 车厢间风挡贯通处与工业黄黑警戒条纹 (Vestibule Gangways at car junctions)
+        // =========================================================================
+        const carJunctions = [1200, 2400, 3600, 4800, 6000];
+        carJunctions.forEach(jx => {
+            if (jx < camX - 60 || jx > camX + viewW + 60) return;
+            // 风挡重型密封橡胶框
+            ctx.fillStyle = '#0b1329';
+            ctx.fillRect(jx - 18, 0, 36, mapH);
+            
+            // 黄黑警戒斜纹 (Hazard Stripes)
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(jx - 12, 10, 24, mapH - 20);
+            ctx.clip();
+            ctx.fillStyle = '#eab308';
+            ctx.fillRect(jx - 12, 10, 24, mapH - 20);
+            ctx.fillStyle = '#0f172a';
+            for (let sy = -20; sy < mapH + 30; sy += 16) {
+                ctx.beginPath();
+                ctx.moveTo(jx - 14, sy);
+                ctx.lineTo(jx + 14, sy + 16);
+                ctx.lineTo(jx + 14, sy + 24);
+                ctx.lineTo(jx - 14, sy + 8);
+                ctx.closePath();
+                ctx.fill();
+            }
+            ctx.restore();
+
+            // 风挡两侧液压减震立柱与门框
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
+            ctx.lineWidth = 2.0;
+            ctx.strokeRect(jx - 16, 8, 32, mapH - 16);
+        });
+
+        // =========================================================================
+        // 5. 车头重型除雪排障装甲犁与强光探照灯 (Locomotive Cowcatcher & Headlights)
+        // =========================================================================
+        // 车头 (x = mapW = 7200): V形重装除雪铲
+        ctx.save();
+        ctx.fillStyle = '#1e293b';
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 2.0;
+        ctx.beginPath();
+        ctx.moveTo(mapW, 10);
+        ctx.lineTo(mapW + 65, mapH / 2);
+        ctx.lineTo(mapW, mapH - 10);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // 强光探照灯光锥 (Twin High-Intensity Beam)
+        const lightGrad = ctx.createLinearGradient(mapW + 65, mapH / 2, mapW + 350, mapH / 2);
+        lightGrad.addColorStop(0, 'rgba(254, 240, 138, 0.65)');
+        lightGrad.addColorStop(0.3, 'rgba(250, 204, 21, 0.25)');
+        lightGrad.addColorStop(1, 'rgba(250, 204, 21, 0)');
+        ctx.fillStyle = lightGrad;
+        ctx.beginPath();
+        ctx.moveTo(mapW + 65, mapH / 2 - 15);
+        ctx.lineTo(mapW + 350, mapH / 2 - 85);
+        ctx.lineTo(mapW + 350, mapH / 2 + 85);
+        ctx.lineTo(mapW + 65, mapH / 2 + 15);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        // =========================================================================
+        // 6. 暴风雪动态粒子系统 (Optimized Dynamic Blizzards Particle System)
+        // =========================================================================
+        // 初始化视口雪花粒子池（仅首次初始化 160 颗粒子，零 GC，极致性能）
+        if (!window.level0SnowParticles) {
+            window.level0SnowParticles = [];
+            for (let i = 0; i < 160; i++) {
+                window.level0SnowParticles.push({
+                    relX: Math.random() * (width + 300) - 100, // 视口相对 X
+                    y: -camY - 80 + Math.random() * (height + 160),
+                    speedX: 5.5 + Math.random() * 8.5,        // 向左高速疾驰速度
+                    speedY: 1.2 + Math.random() * 3.2,        // 向下飘落速度
+                    size: 1.0 + Math.random() * 2.2,          // 雪花尺寸
+                    alpha: 0.28 + Math.random() * 0.52,       // 透明度
+                    trail: 6 + Math.random() * 12             // 运动模糊拖尾长度
+                });
+            }
+        }
+
+        // 仅在车身外部雪原（y < 12 或 y > mapH - 12 或 车头光锥前）绘制飘落雪花
+        ctx.save();
+        ctx.lineCap = 'round';
+        const snowPool = window.level0SnowParticles;
+        const currentCamX = window.cameraX || 0;
+        const totalW = width + 300;
+        const minY = -camY - 100;
+        const maxY = mapH + camY + 100;
+
+        for (let i = 0; i < snowPool.length; i++) {
+            const p = snowPool[i];
+            
+            // 更新雪花位置（列车向右高速行驶，雪花相对向左下极速飞掠）
+            p.relX -= p.speedX;
+            p.y += p.speedY;
+
+            // 循环回绕逻辑 (Wrap Around)
+            if (p.relX < -150) {
+                p.relX = width + Math.random() * 150;
+                p.y = minY + Math.random() * (maxY - minY);
+            }
+            if (p.y > maxY) {
+                p.y = minY;
+                p.relX = Math.random() * totalW - 100;
+            }
+
+            const worldX = currentCamX + p.relX;
+            const worldY = p.y;
+
+            // 物理遮蔽：只在列车外侧雪地（y < 12 或 y > mapH - 12）以及车头前方（worldX > mapW）渲染
+            if (worldY < 12 || worldY > mapH - 12 || worldX > mapW) {
+                ctx.strokeStyle = `rgba(240, 248, 255, ${p.alpha})`;
+                ctx.lineWidth = p.size;
+                ctx.beginPath();
+                ctx.moveTo(worldX, worldY);
+                // 迎风 55° 斜拉拖尾，强化列车破雪疾驰的速度感
+                ctx.lineTo(worldX + p.trail, worldY - p.trail * 0.35);
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
+    } else if (levelId === 'level5_hotel') {
+        // 5. 闪灵红 (The Shining) 酒店大堂经典红色配色与橙黄几何格纹
+        ctx.fillStyle = '#5C060B'; 
+        ctx.fillRect(0, 0, width, height);
+        
+        ctx.strokeStyle = 'rgba(234, 88, 12, 0.32)'; // 暖橙色格缝
+        ctx.lineWidth = 1.4;
+        for(let x = 0; x < width; x += 60) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
+        for(let y = 0; y < height; y += 60) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+        
+        // 对角线编织，重现《闪灵》地毯的几何图腾质感
+        ctx.strokeStyle = 'rgba(234, 88, 12, 0.12)';
+        ctx.lineWidth = 1.0;
+        for (let x = -height; x < width; x += 120) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x + height, height);
+            ctx.stroke();
+        }
+    } else if (levelId === 'level3_bank') {
+        // 3. 银行与金库关卡：夜间行动模式，深海极夜蓝底色与暗蓝战术瓷砖格纹
+        ctx.fillStyle = '#0B132B'; 
+        ctx.fillRect(0, 0, width, height);
+        
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.12)'; // 柔和暗蓝网格缝
+        ctx.lineWidth = 1.0;
+        for(let x = 0; x < width; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
+        for(let y = 0; y < height; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+    } else if (levelId === 'level4_yacht') {
+        // 4. 豪华超级游艇：深海蔚蓝海水背景 + 船头船尾蓝绿色低灯渐变发光 + 尊贵金褐色柚木甲板 (Teak Deck)
+        const mapWidth = window.level4MapWidth || 2400;
+        
+        // Deep Sea ocean background (gorgeous deep night-sea blue)
+        ctx.fillStyle = '#051429'; 
+        ctx.fillRect(0, 0, mapWidth, height);
+        
+        // Draw subtle wave patterns in the ocean
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.04)';
+        ctx.lineWidth = 1.5;
+        for (let row = 20; row < height; row += 40) {
+            ctx.beginPath();
+            for (let col = 0; col < mapWidth; col += 80) {
+                ctx.arc(col + (row % 80), row, 20, 0, Math.PI);
+            }
+            ctx.stroke();
+        }
+
+        // ==========================================
+        // 船头与船尾的蓝绿色（Teal/Cyan）低灯（Underwater LED Lights）渐变发光效果
+        // ==========================================
+        ctx.save();
+        
+        // Helper to draw an extremely bright, multi-layered underwater light beam (fanned out with high neon bloom)
+        function drawLightBeam(bx, by, angleDeg, length) {
+            const rad = angleDeg * Math.PI / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+
+            // 1. Draw outer ambient cone (wide, vibrant cyan-teal glow)
+            ctx.save();
+            ctx.beginPath();
+            
+            const startW_outer = 15;
+            const endW_outer = 210; // wider cone for immense atmospheric scatter
+            
+            const sx1 = bx + (startW_outer / 2) * -sin;
+            const sy1 = by + (startW_outer / 2) * cos;
+            const sx2 = bx - (startW_outer / 2) * -sin;
+            const sy2 = by - (startW_outer / 2) * cos;
+            
+            const ex = bx + length * cos;
+            const ey = by + length * sin;
+            const ex1 = ex + (endW_outer / 2) * -sin;
+            const ey1 = ey + (endW_outer / 2) * cos;
+            const ex2 = ex - (endW_outer / 2) * -sin;
+            const ey2 = ey - (endW_outer / 2) * cos;
+            
+            ctx.moveTo(sx1, sy1);
+            ctx.lineTo(ex1, ey1);
+            ctx.lineTo(ex2, ey2);
+            ctx.lineTo(sx2, sy2);
+            ctx.closePath();
+            
+            const outerGrad = ctx.createLinearGradient(bx, by, ex, ey);
+            outerGrad.addColorStop(0, 'rgba(34, 211, 238, 0.7)');  // Extremely intense cyan
+            outerGrad.addColorStop(0.2, 'rgba(13, 148, 136, 0.45)'); // Beautiful rich teal
+            outerGrad.addColorStop(0.5, 'rgba(6, 182, 212, 0.18)');  // Indigo/cyan scattering
+            outerGrad.addColorStop(1, 'rgba(5, 20, 41, 0)');
+            
+            ctx.fillStyle = outerGrad;
+            ctx.fill();
+            ctx.restore();
+
+            // 2. Draw inner intense core beam (narrower and brighter)
+            ctx.save();
+            ctx.beginPath();
+            
+            const startW_inner = 8;
+            const endW_inner = 90;
+            
+            const isx1 = bx + (startW_inner / 2) * -sin;
+            const isy1 = by + (startW_inner / 2) * cos;
+            const isx2 = bx - (startW_inner / 2) * -sin;
+            const isy2 = by - (startW_inner / 2) * cos;
+            
+            const iex1 = ex + (endW_inner / 2) * -sin;
+            const iey1 = ey + (endW_inner / 2) * cos;
+            const iex2 = ex - (endW_inner / 2) * -sin;
+            const iey2 = ey - (endW_inner / 2) * cos;
+            
+            ctx.moveTo(isx1, isy1);
+            ctx.lineTo(iex1, iey1);
+            ctx.lineTo(iex2, iey2);
+            ctx.lineTo(isx2, isy2);
+            ctx.closePath();
+            
+            const innerGrad = ctx.createLinearGradient(bx, by, ex, ey);
+            innerGrad.addColorStop(0, '#FFFFFF'); // Hot white core
+            innerGrad.addColorStop(0.12, '#E0F7FA'); // Aqua neon white
+            innerGrad.addColorStop(0.35, 'rgba(34, 211, 238, 0.88)'); // Vivid glowing cyan
+            innerGrad.addColorStop(0.7, 'rgba(13, 148, 136, 0.35)'); // Mid-teal
+            innerGrad.addColorStop(1, 'rgba(5, 20, 41, 0)');
+            
+            ctx.fillStyle = innerGrad;
+            ctx.fill();
+            ctx.restore();
+
+            // 3. Ultra-bright high-intensity laser line down the center for ray look
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(bx, by);
+            ctx.lineTo(ex, ey);
+            ctx.lineWidth = 3.5;
+            const lineGrad = ctx.createLinearGradient(bx, by, ex, ey);
+            lineGrad.addColorStop(0, '#FFFFFF');
+            lineGrad.addColorStop(0.35, 'rgba(34, 211, 238, 0.95)');
+            lineGrad.addColorStop(1, 'rgba(5, 20, 41, 0)');
+            ctx.strokeStyle = lineGrad;
+            ctx.stroke();
+            ctx.restore();
+
+            // 4. Draw source lens flare (spotlight fixture)
+            ctx.save();
+            const sourceGlow = ctx.createRadialGradient(bx, by, 1, bx, by, 25);
+            sourceGlow.addColorStop(0, '#FFFFFF');
+            sourceGlow.addColorStop(0.25, '#E0F7FA');
+            sourceGlow.addColorStop(0.55, 'rgba(34, 211, 238, 0.9)');
+            sourceGlow.addColorStop(0.85, 'rgba(13, 148, 136, 0.45)');
+            sourceGlow.addColorStop(1, 'rgba(13, 148, 136, 0)');
+            ctx.fillStyle = sourceGlow;
+            ctx.beginPath();
+            ctx.arc(bx, by, 25, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // A. 船尾低灯围合光幕 (Stern Surrounding Lights Wrap)
+        // 绘制一个三面抱合船尾的大型高亮霓虹光幕 (Wraps top, left, and bottom sides of the stern!)
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(380, 44);
+        ctx.lineTo(44, 44);
+        ctx.lineTo(44, 676);
+        ctx.lineTo(380, 676);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // Set neon shadow for maximum bloom/glow effect (超强发光感)
+        ctx.shadowColor = '#22d3ee';
+        ctx.shadowBlur = 25;
+
+        // Layer 1: Ambient super-wide soft cyan glow (extremely atmospheric)
+        ctx.lineWidth = 140;
+        ctx.strokeStyle = 'rgba(13, 148, 136, 0.22)';
+        ctx.stroke();
+
+        // Layer 2: Medium glowing cyan
+        ctx.lineWidth = 75;
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.38)';
+        ctx.stroke();
+
+        // Layer 3: High intensity neon cyan
+        ctx.lineWidth = 30;
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.65)';
+        ctx.stroke();
+
+        // Layer 4: Bright inner neon core (looks white-hot)
+        ctx.lineWidth = 8;
+        ctx.strokeStyle = 'rgba(224, 247, 250, 0.95)';
+        ctx.stroke();
+        ctx.restore();
+
+        // 船尾的多角度散射光束
+        // 两个后角向外45度角散射
+        drawLightBeam(50, 50, -135, 340);
+        drawLightBeam(50, 670, 135, 340);
+
+        // 左舷直射后方光束
+        drawLightBeam(44, 180, 175, 320);
+        drawLightBeam(44, 300, 180, 360);
+        drawLightBeam(44, 420, 180, 360);
+        drawLightBeam(44, 540, 185, 320);
+
+        // 船尾上缘向上散射
+        drawLightBeam(160, 44, -105, 300);
+        drawLightBeam(280, 44, -95, 300);
+
+        // 船尾下缘向下散射
+        drawLightBeam(160, 676, 105, 300);
+        drawLightBeam(280, 676, 95, 300);
+
+        // B. 船头低灯与锯齿融为一体的散射光束 (Bow Lights & Sawtooth Integrated Rays)
+        // 沿着锯齿的内外边缘节点散射多根强力光柱，完美符合手绘示意图
+        // 上半部锯齿节点 (Upper Taper Sawteeth)
+        drawLightBeam(1800, 60, -115, 300);   // Step 1 Corner
+        drawLightBeam(1950, 140, -95, 320);   // Step 2 Corner
+        drawLightBeam(2100, 220, -75, 340);   // Step 3 Corner
+        drawLightBeam(2250, 300, -55, 360);   // Step 4 Corner
+
+        // 下半部锯齿节点 (Lower Taper Sawteeth)
+        drawLightBeam(1800, 660, 115, 300);   // Step 1 Corner
+        drawLightBeam(1950, 580, 95, 320);    // Step 2 Corner
+        drawLightBeam(2100, 500, 75, 340);    // Step 3 Corner
+        drawLightBeam(2250, 420, 55, 360);    // Step 4 Corner
+
+        // 船头正前方最前端 (x=2350, y=360) 的3根强力扇形探照灯，穿透深海
+        drawLightBeam(2350, 352, -15, 380);   // Upward fanned
+        drawLightBeam(2350, 360, 0, 440);     // Straight forward core
+        drawLightBeam(2350, 368, 15, 380);    // Downward fanned
+        
+        ctx.restore();
+        // ==========================================
+
+        // Draw Yacht Steel Hull outline base shadow
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        ctx.beginPath();
+        ctx.moveTo(56, 56);
+        ctx.lineTo(1804, 56);
+        ctx.lineTo(2354, 360);
+        ctx.lineTo(1804, 674);
+        ctx.lineTo(56, 674);
+        ctx.closePath();
+        ctx.fill();
+
+        // Draw Yacht Steel Hull base structure
+        ctx.fillStyle = '#334155'; // Steel blue gray
+        ctx.beginPath();
+        ctx.moveTo(50, 50);
+        ctx.lineTo(1800, 50);
+        ctx.lineTo(2350, 360);
+        ctx.lineTo(1800, 670);
+        ctx.lineTo(50, 670);
+        ctx.closePath();
+        ctx.fill();
+
+        // Draw Yacht Luxury Teak Deck
+        ctx.fillStyle = '#be8c54'; // Rich golden brown wood
+        ctx.beginPath();
+        ctx.moveTo(52, 52);
+        ctx.lineTo(1798, 52);
+        ctx.lineTo(2346, 360);
+        ctx.lineTo(1798, 668);
+        ctx.lineTo(52, 668);
+        ctx.closePath();
+        ctx.fill();
+
+        // Draw Teak Plank seams
+        ctx.strokeStyle = 'rgba(67, 43, 21, 0.28)';
+        ctx.lineWidth = 1;
+        for (let rawTy = 60; rawTy < 660; rawTy += 14) {
+            let ty = rawTy;
+            ctx.beginPath();
+            if (rawTy <= 360) {
+                let tFrac = (rawTy - 52) / 308;
+                let xLimit = 1798 + tFrac * 548;
+                ctx.moveTo(52, ty);
+                ctx.lineTo(xLimit, ty);
+            } else {
+                let tFrac = (rawTy - 360) / 308;
+                let xLimit = 2346 - tFrac * 548;
+                ctx.moveTo(52, ty);
+                ctx.lineTo(xLimit, ty);
+            }
+            ctx.stroke();
+        }
+
+        // Draw Yacht swimming pool beautifully (Horizontal as requested)
+        ctx.fillStyle = 'rgba(6, 182, 212, 0.22)'; // Translucent aquatic cyan
+        ctx.fillRect(110, 280, 300, 160);
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.65)';
+        ctx.lineWidth = 2.5;
+        ctx.strokeRect(110, 280, 300, 160);
+        
+        // Swimming pool steps (horizontal style steps)
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
+        ctx.fillRect(114, 284, 30, 152);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.lineWidth = 1;
+        for (let stepY = 300; stepY < 440; stepY += 24) {
+            ctx.beginPath(); ctx.moveTo(114, stepY); ctx.lineTo(144, stepY); ctx.stroke();
+        }
+
+        // Helicopter Landing pad circle visual overlay
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(1950, 360, 80, 0, Math.PI * 2);
+        ctx.stroke();
+        
+        ctx.font = 'bold 32px monospace';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText("H", 1950, 360);
+        ctx.textBaseline = 'alphabetic'; // Reset
+    } else if (levelId === 'level7_lab') {
+        const mapW = window.level7MapWidth || 3200;
+        const mapH = window.level7MapHeight || 2400;
+        ctx.fillStyle = '#020403';
+        ctx.fillRect(-2000, -2000, mapW + 4000, mapH + 4000);
+    } else {
+        // 2. 地铁关卡：浅沙褐色车站防滑地板（主色调调浅，保持极高透光度与高对比度）
+        ctx.fillStyle = '#A88E7D'; // 比原本的深棕褐色明显调浅的暖沙褐
+        ctx.fillRect(0, 0, width, height);
+        
+        ctx.strokeStyle = 'rgba(78, 59, 47, 0.28)'; // 褐咖啡色网格瓷砖缝
+        ctx.lineWidth = 1.2;
+        for(let x = 0; x < width; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
+        for(let y = 0; y < height; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+    }
+    
+    // 1. 先绘制游泳池/水体表面障碍物（作为底层水面）
+    obstacles.filter(o => o.type === 'pool' || o.label === 'SWIMMING POOL').forEach(drawObstacle);
+    // 2. 绘制道具（包含漂浮在水面上的摩托艇）
+    drawProps();
+    drawTraps();
+    drawBloodSacrificeSeals();
+    // 3. 绘制普通墙体与遮挡建筑物
+    obstacles.filter(o => o.type !== 'pool' && o.label !== 'SWIMMING POOL').forEach(drawObstacle);
+    drawSecurityGates();
+    // 4. 顶层绘制车厢区域与道具文字标签，确保不被墙体遮挡
+    drawZones();
+    drawAllPropLabels();
+
+    if (levelId === 'level7_lab') {
+        if (typeof window.drawLevel7Overlay === 'function') {
+            window.drawLevel7Overlay(ctx, width, height);
+        }
+    }
+
+    if (levelId === 'level3_bank') {
+        drawNightShadowMask();
+    }
+
+    if (blindActive && blindZone) {
+        ctx.save();
+        if (level0InfiniteBlindTimer > 0) {
+            // 在 Level 3 银行关卡遮罩未关闭 (!level3TargetSecured) 时，不叠加全图盲区的黑化填充，仅保留绿色战术外框
+            const isLevel3MaskActive = (levelId === 'level3_bank' && !level3TargetSecured && player.hp > 0);
+            const mapW = (levelId === 'level7_lab') ? (window.level7MapWidth || 3200) : ((levelId === 'level4_yacht') ? (window.level4MapWidth || 2400) : ((levelId === 'level0_test') ? (window.level0MapWidth || 3200) : ((levelId === 'level6_train') ? (window.level6MapWidth || 7200) : width)));
+            const mapH = (levelId === 'level7_lab') ? (window.level7MapHeight || 720) : ((levelId === 'level4_yacht') ? 700 : ((levelId === 'level0_test') ? (window.level0MapHeight || 1000) : ((levelId === 'level6_train') ? (window.level6MapHeight || 240) : height)));
+            if (!isLevel3MaskActive) {
+                ctx.fillStyle = 'rgba(4, 14, 9, 0.88)';
+                ctx.fillRect(0, 0, mapW, mapH);
+            }
+            ctx.strokeStyle = (levelId === 'level0_test') ? '#f43f5e' : '#00FF66';
+            ctx.lineWidth = 2.5;
+            ctx.strokeRect(2, 2, mapW - 4, mapH - 4);
+        } else {
+            ctx.fillStyle = 'rgba(4, 14, 9, 0.92)';
+            ctx.beginPath(); ctx.arc(blindZone.x, blindZone.y, blindZone.radius, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = (levelId === 'level0_test') ? '#f43f5e' : '#00FF66';
+            ctx.setLineDash([8, 6]); ctx.lineWidth = 2; ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    // 渲染暗幕者 (Jammer) 发动的局部暗影盲区 (固定在发动点，不随暗幕者移动)
+    enemies.forEach(e => {
+        if (e.hp > 0 && e.isJammer && e.jammerBlindActive) {
+            const rad = e.jammerBlindRadius || 130;
+            const zx = (typeof e.jammerZoneX === 'number') ? e.jammerZoneX : e.x;
+            const zy = (typeof e.jammerZoneY === 'number') ? e.jammerZoneY : e.y;
+            ctx.save();
+            
+            // 局部暗影遮罩：深紫黑色虚空迷雾核心 (强遮光浓雾，阻断一切外部视线)
+            const grad = ctx.createRadialGradient(zx, zy, rad * 0.1, zx, zy, rad);
+            grad.addColorStop(0, 'rgba(12, 4, 22, 0.98)');
+            grad.addColorStop(0.65, 'rgba(26, 8, 44, 0.95)');
+            grad.addColorStop(0.88, 'rgba(48, 14, 80, 0.90)');
+            grad.addColorStop(1, 'rgba(74, 20, 120, 0.75)');
+            
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(zx, zy, rad, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 边缘动态脉冲光环 (Pulsing Neon Violet Perimeter)
+            const pulse = Math.sin(Date.now() * 0.005) * 2;
+            ctx.strokeStyle = '#c084fc';
+            ctx.shadowColor = '#a855f7';
+            ctx.shadowBlur = 12;
+            ctx.lineWidth = 2.2;
+            ctx.setLineDash([7, 5]);
+            ctx.beginPath();
+            ctx.arc(zx, zy, rad + pulse, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // 战术内圈雷达微弱干扰圈
+            ctx.strokeStyle = 'rgba(216, 180, 254, 0.35)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 6]);
+            ctx.beginPath();
+            ctx.arc(zx, zy, rad * 0.55, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // 持续时间倒计时圆弧指示 (Duration Arc Indicator)
+            const durFraction = Math.max(0, Math.min(1, (e.jammerBlindDuration || 0) / 540));
+            ctx.strokeStyle = 'rgba(236, 72, 153, 0.85)';
+            ctx.lineWidth = 2.8;
+            ctx.beginPath();
+            ctx.arc(zx, zy, rad + 3, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * durFraction);
+            ctx.stroke();
+
+            // 局部盲区微型文字标签与倒计时
+            ctx.font = 'bold 8.5px monospace';
+            ctx.fillStyle = 'rgba(192, 132, 252, 0.95)';
+            ctx.textAlign = 'center';
+            const secLeft = ((e.jammerBlindDuration || 0) / 60).toFixed(1);
+            ctx.fillText(`VOID OCCLUSION [${secLeft}s]`, zx, zy - rad - 7);
+
+            ctx.restore();
+        }
+    });
+
+    if (player.hp > 0) {
+        // 主角视野范围：先绘制盲区，再在盲区之上绘制主角视锥，确保盲区内主角自己的视角清晰可见
+        const playerFovFill = (levelId === 'level0_test') ? 'rgba(255, 51, 68, 0.28)' : 'rgba(0, 255, 102, 0.28)';
+        const playerFovStroke = (levelId === 'level0_test') ? 'rgba(255, 51, 68, 0.85)' : 'rgba(0, 255, 102, 0.85)';
+        const effFov = getPlayerEffectiveFOV();
+        drawTacticalFOV(player.x, player.y, player.angle, effFov.fov, effFov.viewDistance, playerFovFill, playerFovStroke);
+    }
+
+    enemies.forEach(e => {
+        if (e.hp <= 0 && e.deathAlpha <= 0) return;
+
+        // 1. 玩家视角与射线遮挡计算 (基于当前有效视野范围)
+        const effFov = getPlayerEffectiveFOV();
+        const dx = e.x - player.x;
+        const dy = e.y - player.y;
+        const dist = Math.hypot(dx, dy);
+        let angleDiff = Math.atan2(dy, dx) - player.angle;
+        while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+        while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+
+        // 2. 判断敌人是否在玩家视角扇形内且无障碍物遮挡
+        const inSight = dist <= effFov.viewDistance && Math.abs(angleDiff) <= effFov.fov / 2 && canSee(player.x, player.y, e.x, e.y);
+
+        // 3. 判断敌人是否处于警戒或开火状态（发现玩家/向玩家射击）
+        const isAttackingOrAlert = e.alert || e.state === 'attack' || e.state === 'shoot' || e.shootTimer > 0;
+        const isInBlindTarget = inBlindZone(e.x, e.y);
+
+        // 暗幕者 (Jammer) 局部盲区交互逻辑：
+        const enemyInJammer = inJammerBlindZone(e.x, e.y).inZone;
+        const playerInJammer = inJammerBlindZone(player.x, player.y).inZone;
+        const lineCrossesJammer = (!playerInJammer) && (typeof isLineBlockedByJammerZone === 'function') && isLineBlockedByJammerZone(player.x, player.y, e.x, e.y);
+
+        // 核心可见性判定规则：
+        // 1. 玩家处于盲区外：无法看穿盲区内的任何敌人，视线穿过盲区也被阻隔，必须深入盲区！
+        // 2. 玩家深入盲区内 (playerInJammer)：进入盲区后丢失盲区内的敌人，只有视野重新扫到 (inSight) 时才会显示敌人！在盲区内被攻击或敌人警戒也不会自动显示！
+        // 3. 正常情况：双方均不在盲区内时，在视野内、或敌人警戒/开火、或处于玩家发动的盲区高亮状态时显示
+        let isVisibleToPlayer = false;
+        if (enemyInJammer && !playerInJammer) {
+            isVisibleToPlayer = false; // 无法在外看穿盲区，需深入！
+        } else if (lineCrossesJammer) {
+            isVisibleToPlayer = false; // 视线被暗幕盲区阻隔
+        } else if (playerInJammer || enemyInJammer) {
+            isVisibleToPlayer = inSight; // 深入盲区后或敌人处于盲区时，必须视锥重新扫到才可见
+        } else {
+            isVisibleToPlayer = inSight || isAttackingOrAlert || isInBlindTarget;
+        }
+
+        if (isVisibleToPlayer) {
+            if (e.hp > 0) {
+                const playerInBlind = inBlindZone(player.x, player.y);
+                let fovAngle = Math.PI / 3;
+                let fovRange = 260;
+                if (e.isCerberus) {
+                    fovAngle = Math.PI * 0.72; // 三首 130 度全景捕猎视野
+                    fovRange = 290;
+                } else if ((e.isObserver || e.isJammer) && playerInBlind) {
+                    fovAngle = Math.PI / 6; // restricted to 30 degrees
+                    fovRange = 110;
+                } else if (e.isObserver && enemyInJammer) {
+                    fovAngle = Math.PI / 6;
+                    fovRange = 110;
+                } else if (isInBlindTarget || (!e.isJammer && enemyInJammer)) {
+                    fovAngle = Math.PI / 6; // 被盲区定住后视野角度缩小
+                    fovRange = 90;          // 视野距离缩小
+                }
+                let fovFill = e.isCerberus
+                    ? (e.alert ? 'rgba(239, 68, 68, 0.35)' : 'rgba(249, 115, 22, 0.20)')
+                    : (e.isDemon 
+                        ? (e.alert ? 'rgba(255, 34, 0, 0.38)' : 'rgba(249, 115, 22, 0.20)') 
+                        : (e.isJammer
+                            ? (e.alert ? 'rgba(236, 72, 153, 0.28)' : 'rgba(168, 85, 247, 0.22)')
+                            : (e.alert ? 'rgba(255, 51, 51, 0.26)' : (e.isObserver ? 'rgba(0, 204, 255, 0.22)' : 'rgba(255, 185, 0, 0.16)'))));
+
+                let fovStroke = e.isCerberus
+                    ? (e.alert ? '#ef4444' : '#f97316')
+                    : (e.isDemon 
+                        ? (e.alert ? '#ff2200' : 'rgba(249, 115, 22, 0.75)') 
+                        : (e.isJammer
+                            ? (e.alert ? 'rgba(236, 72, 153, 0.85)' : 'rgba(168, 85, 247, 0.80)')
+                            : (e.alert ? 'rgba(255, 51, 51, 0.8)' : (e.isObserver ? 'rgba(0, 204, 255, 0.75)' : 'rgba(255, 185, 0, 0.65)'))));
+
+                drawTacticalFOV(e.x, e.y, e.angle, fovAngle, fovRange, fovFill, fovStroke);
+            }
+            if (e.isCerberus) {
+                drawCerberus(e);
+            } else {
+                drawAgent(e.x, e.y, e.angle, false, e.walkCycle, e.hitTimer > 0, e.hp, e.maxHp, e.pendingDamage, e.deathAlpha, e.isObserver, e.shield, e.maxShield, e.alert, e.flashTimer || 0, e.isDemon || false, e.isJammer || false);
+            }
+        }
+    });
+
+    cameras.forEach(cam => {
+        if (levelId === 'level3_bank') {
+            if (typeof isObjectRevealed === 'function' && !isObjectRevealed(cam.x, cam.y, 1, 1)) {
+                return;
+            }
+        }
+        drawCamera(cam);
+    });
+    if (levelId === 'level3_bank' && typeof drawLasers === 'function') {
+        drawLasers();
+    }
+    drawDropItems();
+    
+    // UAV 敌人战术锁定框 (仅当非暂停、且手持 UAV 且剩余弹药 > 0 时生效，标注敌人类型如 OBSERVER / DEMON)
+    if (!isPaused && isKillstreakSupportedLevel(levelId) && currentWeapon && currentWeapon.id === WEAPONS.UAV.id && level0UavAmmo > 0) {
+        let tgtIdx = 1;
+        enemies.forEach(e => {
+            if (e.hp <= 0) return;
+            const enemyInJammer = (typeof inJammerBlindZone === 'function') ? inJammerBlindZone(e.x, e.y).inZone : false;
+            const playerInJammer = (typeof inJammerBlindZone === 'function') ? inJammerBlindZone(player.x, player.y).inZone : false;
+            if (enemyInJammer && !playerInJammer) return;
+            ctx.save();
+            ctx.translate(e.x, e.y);
+
+            const isCerb = e.isCerberus;
+            const isObs = e.isObserver;
+            const isDem = e.isDemon;
+            const isJam = e.isJammer;
+            let typeTag = isCerb ? 'CERBERUS' : (isDem ? 'DEMON' : (isJam ? 'JAMMER' : (isObs ? 'OBSERVER' : 'PATROL')));
+            const boxColor = isCerb ? '#FF3300' : (isDem ? '#FF2200' : (isJam ? '#C084FC' : (isObs ? '#00E5FF' : '#00FF66')));
+
+            ctx.strokeStyle = boxColor;
+            ctx.fillStyle = boxColor;
+            ctx.shadowColor = boxColor;
+            ctx.shadowBlur = 10;
+            ctx.lineWidth = 1.8;
+
+            const boxSize = 42;
+            const half = boxSize / 2;
+            const cornerLen = 10;
+
+            ctx.beginPath();
+            ctx.moveTo(-half, -half + cornerLen); ctx.lineTo(-half, -half); ctx.lineTo(-half + cornerLen, -half);
+            ctx.moveTo(half - cornerLen, -half); ctx.lineTo(half, -half); ctx.lineTo(half, -half + cornerLen);
+            ctx.moveTo(half - cornerLen, half); ctx.lineTo(half, half); ctx.lineTo(half, half - cornerLen);
+            ctx.moveTo(-half + cornerLen, half); ctx.lineTo(-half, half); ctx.lineTo(-half, half - cornerLen);
+            ctx.stroke();
+
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(`TGT-0${tgtIdx} [${typeTag}]`, 0, -half - 6);
+            tgtIdx++;
+
+            ctx.restore();
+        });
+    }
+
+    if (player.hp > 0) {
+        ctx.save();
+        const worldMouse = getWorldMouse();
+
+        if (!isPaused && isKillstreakSupportedLevel(levelId) && currentWeapon && currentWeapon.id === WEAPONS.UAV.id) {
+            // Level 0 UAV 专用战术卫星瞄准准星
+            ctx.translate(worldMouse.x, worldMouse.y);
+            const now = Date.now() * 0.003;
+            ctx.strokeStyle = '#00FF66';
+            ctx.lineWidth = 1.8;
+            ctx.shadowColor = '#00FF66';
+            ctx.shadowBlur = 10;
+            
+            ctx.beginPath();
+            ctx.arc(0, 0, 26, now, now + Math.PI * 1.5);
+            ctx.stroke();
+            
+            ctx.strokeStyle = '#00E5FF';
+            ctx.beginPath();
+            ctx.arc(0, 0, 34, -now, -now + Math.PI * 1.2);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(0, -10); ctx.lineTo(10, 0); ctx.lineTo(0, 10); ctx.lineTo(-10, 0); ctx.closePath();
+            ctx.stroke();
+
+            ctx.fillStyle = '#00FF66';
+            ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI * 2); ctx.fill();
+
+            ctx.font = 'bold 10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(`[UAV STRIKE LOCK]`, 0, -42);
+            ctx.fillStyle = '#00E5FF';
+            ctx.fillText(`STRIKES: ${level0UavAmmo}`, 0, 48);
+        } else {
+            const laserLineColor = (levelId === 'level0_test') ? 'rgba(255, 51, 68, 0.25)' : 'rgba(0, 255, 102, 0.25)';
+            const reticleColor = (levelId === 'level0_test') ? '#FF3344' : '#00FF66';
+            ctx.strokeStyle = laserLineColor; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+            ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(worldMouse.x, worldMouse.y); ctx.stroke();
+            ctx.strokeStyle = reticleColor; ctx.setLineDash([]);
+            ctx.beginPath(); ctx.arc(worldMouse.x, worldMouse.y, 6, 0, Math.PI*2); ctx.stroke();
+        }
+        drawAgent(player.x, player.y, player.angle, true, player.walkCycle, false, player.hp, player.maxHp, 0, 1.0);
+        if (player.rootTimer > 0) {
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            const pulse = 1 + Math.sin(Date.now() * 0.015) * 0.15;
+            // Serpentine toxic thorny ring
+            ctx.strokeStyle = '#10b981';
+            ctx.lineWidth = 2.5;
+            ctx.shadowColor = '#10b981';
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.arc(0, 0, 24 * pulse, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.strokeStyle = '#9333ea';
+            ctx.lineWidth = 1.8;
+            ctx.beginPath();
+            for (let i = 0; i < 6; i++) {
+                const ang = (i * Math.PI / 3) + (Date.now() * 0.003);
+                const r1 = 14, r2 = 26 * pulse;
+                ctx.moveTo(Math.cos(ang) * r1, Math.sin(ang) * r1);
+                ctx.lineTo(Math.cos(ang) * r2, Math.sin(ang) * r2);
+            }
+            ctx.stroke();
+
+            // Overhead Warning Label
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#ef4444';
+            ctx.shadowColor = '#000000';
+            ctx.shadowBlur = 6;
+            ctx.fillText('⚠️ 定身束缚 (ROOTED)', 0, -32);
+            ctx.restore();
+        }
+    }
+
+    particles.forEach(p => {
+        ctx.globalAlpha = Math.max(0, Math.min(1, p.maxLife ? p.life / p.maxLife : 1));
+        if (p.isBloodSeal) {
+            ctx.save();
+            ctx.strokeStyle = p.color || '#f43f5e';
+            ctx.lineWidth = 1.8;
+            const curR = p.radius + (p.maxRadius - p.radius) * (1 - p.life / p.maxLife);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, curR, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let k = 0; k < 5; k++) {
+                const a = (k * Math.PI * 2) / 5 - Math.PI / 2;
+                const px = p.x + Math.cos(a) * curR;
+                const py = p.y + Math.sin(a) * curR;
+                if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.closePath();
+            ctx.stroke();
+            ctx.restore();
+        } else if (p.isSoulStreamer) {
+            ctx.save();
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        } else {
+            ctx.fillStyle = p.color;
+            ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+        }
+    });
+    ctx.globalAlpha = 1.0;
+
+    grenades.forEach(g => {
+        ctx.save();
+        ctx.fillStyle = '#FF9900';
+        ctx.beginPath(); ctx.arc(g.x, g.y, g.radius, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    drawLevel0MagicWeapons();
+
+    // Batched Player Bullets
+    ctx.fillStyle = '#FF9900';
+    ctx.beginPath();
+    playerBullets.forEach(b => { 
+        if (!b.isSoulSiphon) {
+            ctx.moveTo(b.x + (b.radius || 3.5), b.y);
+            ctx.arc(b.x, b.y, b.radius || 3.5, 0, Math.PI * 2); 
+        }
+    });
+    ctx.fill();
+
+    // Render Soul Siphon Bullets separately with rich demonic effects
+    playerBullets.forEach(b => {
+        if (b.isSoulSiphon) {
+            ctx.save();
+            ctx.translate(b.x, b.y);
+            
+            // Outer Pulsing Demonic Aura
+            const pulseR = (b.radius || 8) + Math.sin(Date.now() * 0.02) * 2;
+            const grad = ctx.createRadialGradient(0, 0, 1, 0, 0, pulseR + 4);
+            grad.addColorStop(0, '#fff1f2');
+            grad.addColorStop(0.4, '#f43f5e');
+            grad.addColorStop(0.8, 'rgba(225, 29, 72, 0.45)');
+            grad.addColorStop(1, 'rgba(159, 18, 57, 0)');
+            
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(0, 0, pulseR + 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Center Crimson Orb
+            ctx.fillStyle = '#e11d48';
+            ctx.beginPath();
+            ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Hot White Core
+            ctx.fillStyle = '#fff1f2';
+            ctx.beginPath();
+            ctx.arc(0, 0, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Rotating micro tendrils
+            ctx.strokeStyle = '#fda4af';
+            ctx.lineWidth = 1;
+            const now = Date.now() * 0.01;
+            for (let k = 0; k < 3; k++) {
+                const a = now + k * (Math.PI * 2 / 3);
+                ctx.beginPath();
+                ctx.moveTo(Math.cos(a) * 4, Math.sin(a) * 4);
+                ctx.lineTo(Math.cos(a) * 9, Math.sin(a) * 9);
+                ctx.stroke();
+            }
+
+            ctx.restore();
+        }
+    });
+    
+    // Batched Enemy Bullets
+    ctx.fillStyle = '#FF9900';
+    ctx.beginPath();
+    enemyBullets.forEach(eb => { 
+        if (!eb.isHellfire) {
+            ctx.moveTo(eb.x + 3.5, eb.y);
+            ctx.arc(eb.x, eb.y, 3.5, 0, Math.PI * 2); 
+        }
+    });
+    ctx.fill();
+
+    // Hellfire Bullets from Demons
+    enemyBullets.forEach(eb => {
+        if (eb.isHellfire) {
+            ctx.save();
+            ctx.fillStyle = '#ff2200';
+            ctx.shadowColor = '#ff5500';
+            ctx.shadowBlur = 10;
+            ctx.beginPath();
+            ctx.arc(eb.x, eb.y, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#fef08a';
+            ctx.beginPath();
+            ctx.arc(eb.x, eb.y, 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    });
+
+    ctx.restore(); // 恢复相机平移状态，准备在屏幕固定空间绘制 HUD
+
+    drawWeaponIcons();
+}
+
+window.__gameLoopId = (window.__gameLoopId || 0) + 1;
+const myLoopId = window.__gameLoopId;
+
+let lastLoopTimestamp = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+function gameLoop() {
+    if (window.__gameLoopId !== myLoopId) {
+        return; // Prevent duplicate concurrent loops
+    }
+    requestAnimationFrame(gameLoop);
+
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    let dt = (now - lastLoopTimestamp) / 1000;
+    lastLoopTimestamp = now;
+    if (dt > 0.05) dt = 0.05; // Cap delta time at 50ms to prevent math jumps after tab idle/switching
+
+    if (typeof soundManager !== 'undefined') {
+        soundManager.updateGameState(typeof isGameOver !== 'undefined' ? isGameOver : false, typeof isPaused !== 'undefined' ? isPaused : true);
+    }
+
+    if (ensureCanvas()) {
+        try {
+            const isPlaying = (window.__viewState === 'playing') && !isPaused;
+            if (isPlaying) {
+                currentFrameCount++;
+                update(dt);
+                draw();
+            } else if (window.__viewState === 'playing' && isPaused) {
+                // When in-game but paused, draw once so pause overlay is visible, skip update tick
+                draw();
+            } else {
+                // When on main menu or prologue/lore overlay, clear canvas and skip heavy world rendering
+                if (ctx && canvas) {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                }
+            }
+        } catch (e) {
+            console.error("Engine loop error caught:", e);
+        }
+    }
+}
+
+function updateLevel0MagicWeapons() {
+    // 1. Update Rune Scythes
+    for (let i = runeScythes.length - 1; i >= 0; i--) {
+        let sc = runeScythes[i];
+        sc.spinAngle += 0.35;
+
+        // Emit trailing rune embers during flight
+        if (Math.random() < 0.7) {
+            particles.push({
+                x: sc.x + (Math.random() - 0.5) * 12,
+                y: sc.y + (Math.random() - 0.5) * 12,
+                vx: (Math.random() - 0.5) * 2,
+                vy: (Math.random() - 0.5) * 2,
+                life: 18, maxLife: 18,
+                color: Math.random() < 0.6 ? '#cbd5e1' : '#f43f5e'
+            });
+        }
+
+        if (!sc.returning) {
+            sc.x += sc.vx;
+            sc.y += sc.vy;
+            sc.traveled += Math.hypot(sc.vx, sc.vy);
+            if (sc.traveled >= sc.maxDist) {
+                sc.returning = true;
+                sc.hitEnemies.clear();
+            }
+        } else {
+            const dx = player.x - sc.x;
+            const dy = player.y - sc.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < 22) {
+                runeScythes.splice(i, 1);
+                continue;
+            }
+            const angle = Math.atan2(dy, dx);
+            sc.x += Math.cos(angle) * (sc.speed || 15) * 1.25;
+            sc.y += Math.sin(angle) * (sc.speed || 15) * 1.25;
+        }
+
+        for (let e of enemies) {
+            if (e.hp <= 0 || sc.hitEnemies.has(e)) continue;
+            if (Math.hypot(sc.x - e.x, sc.y - e.y) < (sc.radius + 18)) {
+                sc.hitEnemies.add(e);
+                applyDamageToEnemy(e, sc.damage);
+                e.hitTimer = 8;
+                e.alert = true;
+                createExplosion(sc.x, sc.y, 10, '#f43f5e');
+                if (sc.returning) {
+                    e.x += (player.x - e.x) * 0.08;
+                    e.y += (player.y - e.y) * 0.08;
+                }
+            }
+        }
+
+        // Check collection of dropped items (medkits, batteries, weapons, etc.)
+        for (let j = dropItems.length - 1; j >= 0; j--) {
+            let item = dropItems[j];
+            if (Math.hypot(sc.x - item.x, sc.y - item.y) < (sc.radius + 22)) {
+                if (typeof soundManager !== 'undefined') soundManager.playPickup();
+                if (item.type === 'medkit') {
+                    player.hp = Math.min(player.maxHp, player.hp + 35);
+                    addLog("镰刀回收拾取: 医疗包 (+35 生命值)");
+                    createExplosion(item.x, item.y, 14, '#00FF66');
+                } else if (item.type === 'battery') {
+                    player.shield = Math.min(player.maxShield, player.shield + 50);
+                    blindEnergy = Math.min(MAX_BLIND_ENERGY, blindEnergy + 40);
+                    addLog("镰刀回收拾取: 补给 (+50 防弹衣 / +40 能量)");
+                    createExplosion(item.x, item.y, 14, '#00CCFF');
+                } else if (item.type === 'weapon') {
+                    const wp = item.weaponData;
+                    if (!unlockedWeapons.includes(wp.id)) {
+                        unlockedWeapons.push(wp.id);
+                        addLog(`镰刀回收解锁武器: [${wp.name}]！`);
+                    } else {
+                        addLog(`镰刀回收拾取武器: [${wp.name}]`);
+                    }
+                    switchWeapon(wp);
+                    createExplosion(item.x, item.y, 16, '#FFFF00');
+                } else if (item.type === 'classified_drive' || item.type === 'gold_vault_crown') {
+                    level3TargetSecured = true;
+                    addLog("💾 镰刀回收获取绝密数据芯片！");
+                    createExplosion(item.x, item.y, 25, '#00CCFF');
+                }
+                dropItems.splice(j, 1);
+            }
+        }
+    }
+
+    // 2. Update Lava Circles
+    for (let i = lavaCircles.length - 1; i >= 0; i--) {
+        let lc = lavaCircles[i];
+        lc.timer++;
+        if (lc.timer >= lc.delay) {
+            lc.tickTimer = (lc.tickTimer || 0) + 1;
+            if (lc.tickTimer % 8 === 0) {
+                enemies.forEach(e => {
+                    if (e.hp <= 0) return;
+                    if (Math.hypot(e.x - lc.x, e.y - lc.y) <= lc.radius) {
+                        applyDamageToEnemy(e, Math.round(lc.damage * 0.22));
+                        e.hitTimer = 6;
+                        e.alert = true;
+                        e.burnTimer = 60;
+                        createExplosion(e.x, e.y, 12, '#f97316');
+                    }
+                });
+            }
+            if (Math.random() < 0.85) {
+                const ang = Math.random() * Math.PI * 2;
+                const r = Math.random() * lc.radius;
+                particles.push({
+                    x: lc.x + Math.cos(ang) * r,
+                    y: lc.y + Math.sin(ang) * r,
+                    vx: (Math.random() - 0.5) * 5,
+                    vy: -2.5 - Math.random() * 5,
+                    life: 25,
+                    maxLife: 25,
+                    color: Math.random() < 0.35 ? '#ffffff' : (Math.random() < 0.5 ? '#fef08a' : (Math.random() < 0.5 ? '#f97316' : '#dc2626'))
+                });
+            }
+        } else {
+            if (Math.random() < 0.5) {
+                const ang = Math.random() * Math.PI * 2;
+                const r = Math.random() * (lc.radius * 0.8);
+                particles.push({
+                    x: lc.x + Math.cos(ang) * r,
+                    y: lc.y + Math.sin(ang) * r,
+                    vx: (Math.random() - 0.5) * 2,
+                    vy: -1 - Math.random() * 2,
+                    life: 16,
+                    maxLife: 16,
+                    color: '#fef08a'
+                });
+            }
+        }
+        if (lc.timer >= lc.delay + lc.duration) {
+            lavaCircles.splice(i, 1);
+        }
+    }
+
+    // 3. Update Blood Sacrifice Ground Seals
+    for (let i = bloodSacrificeSeals.length - 1; i >= 0; i--) {
+        let seal = bloodSacrificeSeals[i];
+        seal.timer++;
+        if (seal.radius < seal.maxRadius) {
+            seal.radius += (seal.maxRadius - seal.radius) * 0.18;
+        }
+        seal.rotation += 0.012;
+
+        if (seal.timer % 3 === 0 && seal.timer < seal.duration - 20) {
+            const ang = Math.random() * Math.PI * 2;
+            const r = Math.random() * (seal.radius * 0.85);
+            particles.push({
+                x: seal.x + Math.cos(ang) * r,
+                y: seal.y + Math.sin(ang) * r,
+                vx: (Math.random() - 0.5) * 1.5,
+                vy: -1.2 - Math.random() * 2.2,
+                life: 25 + Math.floor(Math.random() * 15),
+                maxLife: 40,
+                color: Math.random() < 0.6 ? '#f43f5e' : '#fbcfe8',
+                isSoulStreamer: true
+            });
+        }
+
+        if (seal.timer >= seal.duration) {
+            bloodSacrificeSeals.splice(i, 1);
+        }
+    }
+}
+
+function drawBloodSacrificeSeals() {
+    bloodSacrificeSeals.forEach(seal => {
+        ctx.save();
+        ctx.translate(seal.x, seal.y);
+
+        let alpha = 1.0;
+        if (seal.timer > seal.duration - 30) {
+            alpha = (seal.duration - seal.timer) / 30;
+        }
+        ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+
+        const r = seal.radius;
+
+        // 1. Ground Crimson Pulse Glow
+        const pulseR = r + Math.sin(seal.timer * 0.15) * 5;
+        const bgGrad = ctx.createRadialGradient(0, 0, r * 0.1, 0, 0, pulseR);
+        bgGrad.addColorStop(0, 'rgba(244, 63, 94, 0.55)');
+        bgGrad.addColorStop(0.35, 'rgba(225, 29, 72, 0.38)');
+        bgGrad.addColorStop(0.7, 'rgba(159, 18, 57, 0.22)');
+        bgGrad.addColorStop(1, 'rgba(136, 19, 55, 0)');
+
+        ctx.fillStyle = bgGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, pulseR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 2. Dual Concentric Runic Borders
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 2.8;
+        ctx.shadowColor = '#f43f5e';
+        ctx.shadowBlur = 12;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#fda4af';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // 3. Circumference Runic Nodes & Ticks (12 Outer Nodes)
+        for (let k = 0; k < 12; k++) {
+            const a = (k * Math.PI * 2) / 12 + seal.rotation * 0.5;
+            const px1 = Math.cos(a) * (r * 0.82);
+            const py1 = Math.sin(a) * (r * 0.82);
+            const px2 = Math.cos(a) * r;
+            const py2 = Math.sin(a) * r;
+
+            ctx.strokeStyle = '#f43f5e';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(px1, py1);
+            ctx.lineTo(px2, py2);
+            ctx.stroke();
+
+            if (k % 2 === 0) {
+                ctx.fillStyle = '#fff1f2';
+                ctx.beginPath();
+                ctx.arc(px2, py2, 2.8, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // 4. Inscribed Rotating Sacrificial Pentagram & Hexagon
+        ctx.save();
+        ctx.rotate(seal.rotation);
+
+        // Inverted Pentagram
+        ctx.strokeStyle = '#e11d48';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        const starR = r * 0.82;
+        for (let k = 0; k < 5; k++) {
+            const a1 = (k * Math.PI * 2 * 2) / 5 + Math.PI / 2;
+            const px = Math.cos(a1) * starR;
+            const py = Math.sin(a1) * starR;
+            if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+
+        // Inner Hexagon
+        ctx.strokeStyle = '#fda4af';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        const innerR = r * 0.48;
+        for (let k = 0; k < 6; k++) {
+            const a2 = (k * Math.PI * 2) / 6;
+            const px = Math.cos(a2) * innerR;
+            const py = Math.sin(a2) * innerR;
+            if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+
+        ctx.restore();
+
+        // 5. Central Sacrificial Eye Node
+        ctx.fillStyle = '#fff1f2';
+        ctx.shadowColor = '#fff1f2';
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.18, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#be123c';
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.09, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    });
+}
+
+function drawLevel0MagicWeapons() {
+    lavaCircles.forEach(lc => {
+        ctx.save();
+        ctx.translate(lc.x, lc.y);
+
+        if (lc.timer < lc.delay) {
+            // === PREPARATION / CAST PHASE ===
+            const progress = lc.timer / lc.delay;
+            const curR = lc.radius * (0.4 + 0.6 * progress);
+
+            // Ground Energy Glow
+            const bgGrad = ctx.createRadialGradient(0, 0, 5, 0, 0, curR + 10);
+            bgGrad.addColorStop(0, 'rgba(254, 240, 138, 0.45)');
+            bgGrad.addColorStop(0.5, 'rgba(249, 115, 22, 0.35)');
+            bgGrad.addColorStop(0.85, 'rgba(225, 29, 72, 0.20)');
+            bgGrad.addColorStop(1, 'rgba(185, 28, 28, 0)');
+            ctx.fillStyle = bgGrad;
+            ctx.beginPath();
+            ctx.arc(0, 0, curR + 10, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Outer Concentric Runic Rings
+            ctx.strokeStyle = '#f97316';
+            ctx.lineWidth = 2.2;
+            ctx.shadowColor = '#f97316';
+            ctx.shadowBlur = 10;
+            ctx.beginPath();
+            ctx.arc(0, 0, curR, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.strokeStyle = '#fef08a';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(0, 0, curR * 0.85, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Circumference Runic Nodes & Ticks
+            const spin = lc.timer * 0.08;
+            for (let k = 0; k < 12; k++) {
+                const a = (k * Math.PI * 2) / 12 + spin;
+                const px1 = Math.cos(a) * (curR * 0.85);
+                const py1 = Math.sin(a) * (curR * 0.85);
+                const px2 = Math.cos(a) * curR;
+                const py2 = Math.sin(a) * curR;
+
+                ctx.strokeStyle = '#fef08a';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(px1, py1);
+                ctx.lineTo(px2, py2);
+                ctx.stroke();
+
+                if (k % 3 === 0) {
+                    ctx.fillStyle = '#fff1f2';
+                    ctx.beginPath();
+                    ctx.arc(px2, py2, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Inscribed Dual Rotating Runic Stars
+            ctx.save();
+            ctx.rotate(spin);
+            ctx.strokeStyle = '#f97316';
+            ctx.lineWidth = 1.8;
+            for (let k = 0; k < 2; k++) {
+                const offset = k * (Math.PI / 3);
+                ctx.beginPath();
+                for (let i = 0; i <= 3; i++) {
+                    const a = offset + (i * Math.PI * 2) / 3;
+                    const px = Math.cos(a) * (curR * 0.85);
+                    const py = Math.sin(a) * (curR * 0.85);
+                    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+            }
+            ctx.restore();
+
+            ctx.save();
+            ctx.rotate(-spin * 1.4);
+            ctx.strokeStyle = '#f43f5e';
+            ctx.lineWidth = 1.4;
+            for (let k = 0; k < 2; k++) {
+                const offset = k * (Math.PI / 3) + Math.PI / 6;
+                ctx.beginPath();
+                for (let i = 0; i <= 3; i++) {
+                    const a = offset + (i * Math.PI * 2) / 3;
+                    const px = Math.cos(a) * (curR * 0.55);
+                    const py = Math.sin(a) * (curR * 0.55);
+                    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+            }
+            ctx.restore();
+
+            // Molten Fracture Lines
+            ctx.strokeStyle = '#fef08a';
+            ctx.lineWidth = 2;
+            for (let k = 0; k < 8; k++) {
+                const a = (k * Math.PI * 2) / 8 + Math.sin(k + lc.timer) * 0.1;
+                const rMid = curR * 0.45;
+                const rEnd = curR * 0.85;
+                const midX = Math.cos(a + 0.1) * rMid;
+                const midY = Math.sin(a + 0.1) * rMid;
+                const endX = Math.cos(a - 0.05) * rEnd;
+                const endY = Math.sin(a - 0.05) * rEnd;
+
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(midX, midY);
+                ctx.lineTo(endX, endY);
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(0, 0, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+        } else {
+            // === ERUPTION / ACTIVE PHASE ===
+            const activeTimer = lc.timer - lc.delay;
+            const pulse = lc.radius + Math.sin(activeTimer * 0.25) * 6;
+
+            // Volcanic Magma Lake Floor Fill
+            const grad = ctx.createRadialGradient(0, 0, 8, 0, 0, pulse + 12);
+            grad.addColorStop(0, '#ffffff');
+            grad.addColorStop(0.18, '#fef08a');
+            grad.addColorStop(0.42, '#f97316');
+            grad.addColorStop(0.72, '#dc2626');
+            grad.addColorStop(0.92, 'rgba(159, 18, 57, 0.45)');
+            grad.addColorStop(1, 'rgba(120, 10, 30, 0)');
+
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(0, 0, pulse + 12, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Volcanic Magma Fracture Veins
+            ctx.strokeStyle = '#fef08a';
+            ctx.lineWidth = 2.5;
+            ctx.shadowColor = '#f97316';
+            ctx.shadowBlur = 12;
+            for (let k = 0; k < 10; k++) {
+                const a = (k * Math.PI * 2) / 10;
+                const rMid = lc.radius * 0.5;
+                const rEnd = lc.radius * 0.95;
+                const midX = Math.cos(a + Math.sin(k * 3) * 0.2) * rMid;
+                const midY = Math.sin(a + Math.sin(k * 3) * 0.2) * rMid;
+                const endX = Math.cos(a - Math.cos(k * 2) * 0.15) * rEnd;
+                const endY = Math.sin(a - Math.cos(k * 2) * 0.15) * rEnd;
+
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(midX, midY);
+                ctx.lineTo(endX, endY);
+                ctx.stroke();
+            }
+
+            // Rotating Magma Runic Ring Array
+            const runicSpin = activeTimer * 0.04;
+
+            ctx.strokeStyle = '#fef08a';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(0, 0, lc.radius * 0.9, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.8;
+            ctx.beginPath();
+            ctx.arc(0, 0, lc.radius * 0.55, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Rotating Double Hexagram in Golden Fire
+            ctx.save();
+            ctx.rotate(runicSpin);
+            ctx.strokeStyle = '#fef08a';
+            ctx.lineWidth = 2.2;
+            for (let k = 0; k < 2; k++) {
+                const offset = k * (Math.PI / 3);
+                ctx.beginPath();
+                for (let i = 0; i <= 3; i++) {
+                    const a = offset + (i * Math.PI * 2) / 3;
+                    const px = Math.cos(a) * (lc.radius * 0.9);
+                    const py = Math.sin(a) * (lc.radius * 0.9);
+                    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+            }
+            ctx.restore();
+
+            for (let k = 0; k < 12; k++) {
+                const a = (k * Math.PI * 2) / 12 + runicSpin;
+                const px = Math.cos(a) * (lc.radius * 0.9);
+                const py = Math.sin(a) * (lc.radius * 0.9);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Blinding Magma Central Orb
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = '#ffffff';
+            ctx.shadowBlur = 20;
+            ctx.beginPath();
+            ctx.arc(0, 0, lc.radius * 0.22, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#fef08a';
+            ctx.beginPath();
+            ctx.arc(0, 0, lc.radius * 0.12, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.restore();
+    });
+
+    runeScythes.forEach(sc => {
+        ctx.save();
+        ctx.translate(sc.x, sc.y);
+        ctx.rotate(sc.spinAngle);
+
+        // 银灰金属主刀刃
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(0, 0, sc.radius || 16, -Math.PI * 0.65, Math.PI * 0.65, false);
+        ctx.stroke();
+
+        // 锋利高光银白外刃
+        ctx.strokeStyle = '#f8fafc';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.arc(0, 0, (sc.radius || 16) + 1.2, -Math.PI * 0.55, Math.PI * 0.55, false);
+        ctx.stroke();
+
+        // 内部深红符文精细光环
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.arc(0, 0, (sc.radius || 16) - 3.5, -Math.PI * 0.5, Math.PI * 0.5, false);
+        ctx.stroke();
+
+        // 暗铁枢纽中心与交叉十字锋刀
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(-2, -8, 4, 16);
+        ctx.fillRect(-8, -2, 16, 4);
+
+        ctx.fillStyle = '#fff1f2';
+        ctx.beginPath();
+        ctx.arc(0, 0, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    });
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+        lastLoopTimestamp = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (typeof soundManager !== 'undefined') {
+            soundManager.updateGameState(typeof isGameOver !== 'undefined' ? isGameOver : false, typeof isPaused !== 'undefined' ? isPaused : true);
+        }
+    });
+}
+
+// 挂载全局方法到 window
+window.resetGame = resetGame;
+window.initMapLayout = initMapLayout;
+window.switchWeapon = switchWeapon;
+window.togglePause = togglePause;
+window.resizeCanvas = resizeCanvas;
+window.WEAPONS = WEAPONS;
+window.currentWeapon = currentWeapon;
+
+// 初始化运行
+ensureCanvas();
+resizeCanvas();
+if (!window.__gameEngineSpawned) {
+    window.__gameEngineSpawned = true;
+    spawnWave();
+}
+gameLoop();
