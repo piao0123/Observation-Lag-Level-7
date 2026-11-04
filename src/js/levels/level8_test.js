@@ -603,12 +603,12 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     const time = Date.now() * 0.001;
 
     // --- 几何常量 (标准正圆外壳与平直后隔板位置) ---
-    const R_out = 72; // 外壳正圆半径
-    const R_in = 67;  // 外壳内壁正圆半径 (外壳厚度仅 5px，释放充裕内部空间)
-    const y_part = 44; // 平直隔板位于水平 y = 44
+    const R_out = 62; // 外壳正圆半径
+    const R_in = 57;  // 外壳内壁正圆半径 (外壳厚度仅 5px，释放充裕内部空间)
+    const y_part = 38; // 平直隔板位于水平 y = 38
     // 在正圆 x^2 + y^2 = 72^2 上，y = 44 时：x = sqrt(72^2 - 44^2) = sqrt(5184 - 1936) = sqrt(3248) ≈ 56.99
-    const x_part = 57;
-    const door_hw = 19; // 中央进出门洞半宽 19px，净通道宽 38px
+    const x_part = 49;
+    const door_hw = 16; // 中央进出门洞半宽 19px，净通道宽 38px
     const theta_r = Math.atan2(y_part, x_part);  // ~0.657 rad (37.66°)
     const theta_l = Math.atan2(y_part, -x_part); // ~2.484 rad (142.34°)
 
@@ -621,17 +621,10 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.lineTo(-door_hw, y_part);
     ctx.lineTo(-x_part, y_part);
     ctx.closePath();
-    ctx.fillStyle = "#02120e";
+    ctx.fillStyle = "#061c3a";
     ctx.fill();
 
-    // 舱内地坪同心放射科技导电纹理 (纯正圆同心圆弧)
-    ctx.strokeStyle = "rgba(16, 185, 129, 0.12)";
-    ctx.lineWidth = 1;
-    [18, 34, 50].forEach(gr => {
-        ctx.beginPath();
-        ctx.arc(0, 4, gr, 0, Math.PI * 2);
-        ctx.stroke();
-    });
+    // (已删除：偏心同心圆导轨线)
     ctx.restore();
 
     // --- 2. 纤薄轻量化标准正圆重型装甲外壳 (Slim Standard Circular Outer Shell: 5px) ---
@@ -686,42 +679,32 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     const leftDeskE = -Math.PI / 2 - 67 * Math.PI / 180;
     ctx.save();
     ctx.beginPath();
-    ctx.arc(0, 0, 66.5, leftDeskS, leftDeskE, false);
-    ctx.arc(0, 0, 42, leftDeskE, leftDeskS, true);
+    ctx.arc(0, 0, 56, leftDeskS, leftDeskE, false);
+    ctx.arc(0, 0, 36, leftDeskE, leftDeskS, true);
     ctx.closePath();
-    ctx.fillStyle = "#021712";
+    ctx.fillStyle = "#061c3a";
     ctx.fill();
-    ctx.strokeStyle = "#047857";
+    ctx.strokeStyle = "#075985";
     ctx.lineWidth = 1.0;
     ctx.stroke();
-    // 左台面同心圆弧导轨线
-    [47, 55, 63].forEach(r => {
-        ctx.beginPath(); ctx.arc(0, 0, r, leftDeskS + 0.03, leftDeskE - 0.03, false);
-        ctx.strokeStyle = "rgba(52, 211, 153, 0.25)"; ctx.lineWidth = 0.6; ctx.stroke();
-    });
 
     // 右控制台弧形台板 (从 phi = 67° 至 136°)
     const rightDeskS = -Math.PI / 2 + 67 * Math.PI / 180;
     const rightDeskE = -Math.PI / 2 + 136 * Math.PI / 180;
     ctx.beginPath();
-    ctx.arc(0, 0, 66.5, rightDeskS, rightDeskE, false);
-    ctx.arc(0, 0, 42, rightDeskE, rightDeskS, true);
+    ctx.arc(0, 0, 56, rightDeskS, rightDeskE, false);
+    ctx.arc(0, 0, 36, rightDeskE, rightDeskS, true);
     ctx.closePath();
-    ctx.fillStyle = "#021712";
+    ctx.fillStyle = "#061c3a";
     ctx.fill();
-    ctx.strokeStyle = "#047857";
+    ctx.strokeStyle = "#075985";
     ctx.lineWidth = 1.0;
     ctx.stroke();
-    // 右台面同心圆弧导轨线
-    [47, 55, 63].forEach(r => {
-        ctx.beginPath(); ctx.arc(0, 0, r, rightDeskS + 0.03, rightDeskE - 0.03, false);
-        ctx.strokeStyle = "rgba(52, 211, 153, 0.25)"; ctx.lineWidth = 0.6; ctx.stroke();
-    });
     ctx.restore();
 
     // --- 4. 前部三块连在一起的弧面大屏 ("位于座位前方 排列完全顺着圆形外壳的曲线") ---
-    const R_scr_out = 66.0;
-    const R_scr_in = 53.0; // 13px 宽屏高度，气势磅礴
+    const R_scr_out = 57.0;
+    const R_scr_in = 42.0; // 13px 宽屏高度，气势磅礴
 
     // 三块屏幕各自的弧度定义 (以北向 -PI/2 为中心对称，完全紧贴外壳曲线排列)
     const screens = [
@@ -759,9 +742,9 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
         ctx.arc(0, 0, R_scr_out + 0.8, sRad - 0.015, eRad + 0.015, false);
         ctx.arc(0, 0, R_scr_in - 0.8, eRad + 0.015, sRad - 0.015, true);
         ctx.closePath();
-        ctx.fillStyle = "#011c15";
+        ctx.fillStyle = "#061c3a";
         ctx.fill();
-        ctx.strokeStyle = "#10b981";
+        ctx.strokeStyle = "#00E5FF";
         ctx.lineWidth = 1.5;
         ctx.stroke();
 
@@ -771,17 +754,17 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
         ctx.arc(0, 0, R_scr_in, eRad, sRad, true);
         ctx.closePath();
         const gradScr = ctx.createRadialGradient(0, 0, R_scr_in, 0, 0, R_scr_out);
-        gradScr.addColorStop(0, "#011a14");
-        gradScr.addColorStop(0.65, "#022e23");
+        gradScr.addColorStop(0, "#061c3a");
+        gradScr.addColorStop(0.65, "#0b355c");
         gradScr.addColorStop(1, "#033d2f");
         ctx.fillStyle = gradScr;
         ctx.fill();
-        ctx.strokeStyle = "#34d399";
+        ctx.strokeStyle = "#00CCFF";
         ctx.lineWidth = 1.0;
         ctx.stroke();
 
         // 4C. 同心同弧度扫描线 (Concentric Scanlines strictly fitting curve)
-        ctx.strokeStyle = "rgba(52, 211, 153, 0.22)";
+        ctx.strokeStyle = "rgba(0, 229, 255, 0.22)";
         ctx.lineWidth = 0.7;
         for (let r = R_scr_in + 2; r < R_scr_out - 1.0; r += 2.4) {
             ctx.beginPath();
@@ -800,14 +783,14 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
 
         if (scr.hudType === "radar") {
             // === 正中大屏: 战术全景扫描雷达 (Facing Seat Directly) ===
-            ctx.strokeStyle = "rgba(52, 211, 153, 0.5)";
+            ctx.strokeStyle = "rgba(0, 229, 255, 0.5)";
             ctx.lineWidth = 0.7;
             ctx.beginPath(); ctx.arc(0, 0, 4.2, 0, Math.PI * 2); ctx.stroke();
             ctx.beginPath(); ctx.arc(0, 0, 2.0, 0, Math.PI * 2); ctx.stroke();
 
             // 雷达旋转扫描波束
             const sweepA = (time * 2.5) % (Math.PI * 2);
-            ctx.strokeStyle = "#34d399";
+            ctx.strokeStyle = "#00CCFF";
             ctx.lineWidth = 1.0;
             ctx.beginPath();
             ctx.moveTo(0, 0);
@@ -819,12 +802,12 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
                 ctx.fillStyle = "#ef4444";
                 ctx.fillRect(-2.8, -2.2, 1.2, 1.2);
             }
-            ctx.fillStyle = "#10b981";
+            ctx.fillStyle = "#00E5FF";
             ctx.fillRect(2.4, 1.6, 1.0, 1.0);
 
             // 屏幕顶部科技标示
             ctx.font = "bold 3.2px monospace";
-            ctx.fillStyle = "#6ee7b7";
+            ctx.fillStyle = "#7dd3fc";
             ctx.textAlign = "center";
             ctx.fillText("TACTICAL RADAR", 0, -3.6);
 
@@ -836,12 +819,12 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
         } else if (scr.hudType === "reactor") {
             // === 左侧大屏: 反应堆动力流与能量示波波形 ===
             ctx.font = "bold 3.0px monospace";
-            ctx.fillStyle = "#34d399";
+            ctx.fillStyle = "#00CCFF";
             ctx.textAlign = "center";
             ctx.fillText("REACTOR TELEM", 0, -3.6);
 
             // 动态实时正弦能量波形
-            ctx.strokeStyle = "#10b981";
+            ctx.strokeStyle = "#00E5FF";
             ctx.lineWidth = 0.8;
             ctx.beginPath();
             for (let px = -12; px <= 12; px += 1.2) {
@@ -853,9 +836,9 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
 
             // 4 阶梯动力输出指示条
             const powerBars = [1, 1, 1, Math.sin(time * 2) > 0 ? 1 : 0];
-            const pColors = ["#10b981", "#34d399", "#38bdf8", "#f59e0b"];
+            const pColors = ["#00E5FF", "#00CCFF", "#38bdf8", "#f59e0b"];
             for (let b = 0; b < 4; b++) {
-                ctx.fillStyle = powerBars[b] ? pColors[b] : "#022c22";
+                ctx.fillStyle = powerBars[b] ? pColors[b] : "#0b355c";
                 ctx.fillRect(-9 + b * 4.6, 3.4, 3.6, 1.4);
             }
 
@@ -870,13 +853,13 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
             const freqVals = [0.85, 0.45, 0.95, 0.65, 0.8, 0.55];
             for (let f = 0; f < 6; f++) {
                 const fh = 1.4 + Math.abs(Math.sin(time * 3.8 + f * 1.2)) * 3.4 * freqVals[f];
-                ctx.fillStyle = "#06b6d4";
+                ctx.fillStyle = "#0284c7";
                 ctx.fillRect(-10 + f * 3.4, 2.8 - fh, 2.4, fh);
             }
 
             // 底部防御状态
             ctx.font = "bold 2.8px monospace";
-            ctx.fillStyle = "#10b981";
+            ctx.fillStyle = "#00E5FF";
             ctx.fillText("SHIELD: 100%", 0, 4.6);
         }
 
@@ -891,13 +874,13 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
         ctx.save();
         ctx.translate(jx, jy);
         ctx.rotate(jTheta);
-        ctx.fillStyle = "#022c22";
+        ctx.fillStyle = "#0b355c";
         ctx.fillRect(-2.0, -7, 4.0, 14);
-        ctx.strokeStyle = "#34d399";
+        ctx.strokeStyle = "#00CCFF";
         ctx.lineWidth = 1.0;
         ctx.strokeRect(-2.0, -7, 4.0, 14);
         // 连接螺栓
-        ctx.fillStyle = "#10b981";
+        ctx.fillStyle = "#00E5FF";
         ctx.beginPath(); ctx.arc(0, -4, 0.9, 0, Math.PI * 2); ctx.fill();
         ctx.beginPath(); ctx.arc(0, 4, 0.9, 0, Math.PI * 2); ctx.fill();
         ctx.restore();
@@ -917,16 +900,17 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     // 5A. 左侧操作翼: 顺应圆形曲率的三排弧形按键组
     // 外弧排 (Radius 62): 5 枚顺弧排列的带背光方形指令按键
     const leftBtnsAngles = [-75, -89, -103, -117, -131];
-    const leftBtnColors = ["#10b981", "#06b6d4", "#f59e0b", "#ef4444", "#38bdf8"];
+    const leftBtnColors = ["#00E5FF", "#0284c7", "#f59e0b", "#ef4444", "#38bdf8"];
     leftBtnsAngles.forEach((deg, idx) => {
         const aRad = deg * Math.PI / 180;
         ctx.save();
         ctx.rotate(aRad);
-        ctx.translate(0, -62); // 沿法线定位到半径 62
+        ctx.translate(0, -52);
+    ctx.scale(1.2, 1.2); // 沿法线定位到半径 62
         // 按键底座与键帽
-        ctx.fillStyle = "#021a14";
+        ctx.fillStyle = "#061c3a";
         ctx.fillRect(-2.4, -2.4, 4.8, 4.8);
-        ctx.strokeStyle = "#047857";
+        ctx.strokeStyle = "#075985";
         ctx.lineWidth = 0.6;
         ctx.strokeRect(-2.4, -2.4, 4.8, 4.8);
         ctx.fillStyle = leftBtnColors[idx];
@@ -940,16 +924,17 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
         const aRad = deg * Math.PI / 180;
         ctx.save();
         ctx.rotate(aRad);
-        ctx.translate(0, -54);
-        ctx.fillStyle = "#03120e";
+        ctx.translate(0, -47);
+    ctx.scale(1.2, 1.2);
+        ctx.fillStyle = "#061c3a";
         ctx.fillRect(-2.2, -2.8, 4.4, 5.6);
         ctx.strokeStyle = "#064e3b";
         ctx.lineWidth = 0.5;
         ctx.strokeRect(-2.2, -2.8, 4.4, 5.6);
-        ctx.fillStyle = (idx % 2 === 0) ? "#047857" : "#0f766e";
+        ctx.fillStyle = (idx % 2 === 0) ? "#075985" : "#0f766e";
         ctx.fillRect(-1.6, -2.2, 3.2, 4.4);
         // 状态微灯
-        ctx.fillStyle = (Math.sin(time * 4 + idx) > 0) ? "#34d399" : "#022c22";
+        ctx.fillStyle = (Math.sin(time * 4 + idx) > 0) ? "#00CCFF" : "#0b355c";
         ctx.beginPath(); ctx.arc(0, -1.0, 0.6, 0, Math.PI * 2); ctx.fill();
         ctx.restore();
     });
@@ -960,10 +945,11 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
         const aRad = deg * Math.PI / 180;
         ctx.save();
         ctx.rotate(aRad);
-        ctx.translate(0, -46);
+        ctx.translate(0, -41);
+    ctx.scale(1.2, 1.2);
         ctx.fillStyle = "#064e3b";
         ctx.fillRect(-1.6, -1.6, 3.2, 3.2);
-        ctx.strokeStyle = "#10b981";
+        ctx.strokeStyle = "#00E5FF";
         ctx.lineWidth = 0.5;
         ctx.strokeRect(-1.6, -1.6, 3.2, 3.2);
         // 金属拨杆
@@ -982,12 +968,13 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     const fader1S = -Math.PI / 2 + 74 * Math.PI / 180;
     const fader1E = -Math.PI / 2 + 88 * Math.PI / 180;
     ctx.beginPath(); ctx.arc(0, 0, 62, fader1S, fader1E, false);
-    ctx.strokeStyle = "#020f0b"; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.strokeStyle = "#061c3a"; ctx.lineWidth = 2.4; ctx.stroke();
     ctx.strokeStyle = "#064e3b"; ctx.lineWidth = 0.6; ctx.stroke();
     // 推子滑块 (deg 81)
     ctx.rotate(81 * Math.PI / 180);
-    ctx.translate(0, -62);
-    ctx.fillStyle = "#10b981"; ctx.fillRect(-1.6, -2.4, 3.2, 4.8);
+    ctx.translate(0, -52);
+    ctx.scale(1.2, 1.2);
+    ctx.fillStyle = "#00E5FF"; ctx.fillRect(-1.6, -2.4, 3.2, 4.8);
     ctx.fillStyle = "#e0f2fe"; ctx.fillRect(-0.8, -1.4, 1.6, 2.8);
     ctx.restore();
 
@@ -996,12 +983,13 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     const fader2S = -Math.PI / 2 + 93 * Math.PI / 180;
     const fader2E = -Math.PI / 2 + 107 * Math.PI / 180;
     ctx.beginPath(); ctx.arc(0, 0, 62, fader2S, fader2E, false);
-    ctx.strokeStyle = "#020f0b"; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.strokeStyle = "#061c3a"; ctx.lineWidth = 2.4; ctx.stroke();
     ctx.strokeStyle = "#064e3b"; ctx.lineWidth = 0.6; ctx.stroke();
     // 推子滑块 (deg 101)
     ctx.rotate(101 * Math.PI / 180);
-    ctx.translate(0, -62);
-    ctx.fillStyle = "#10b981"; ctx.fillRect(-1.6, -2.4, 3.2, 4.8);
+    ctx.translate(0, -52);
+    ctx.scale(1.2, 1.2);
+    ctx.fillStyle = "#00E5FF"; ctx.fillRect(-1.6, -2.4, 3.2, 4.8);
     ctx.fillStyle = "#e0f2fe"; ctx.fillRect(-0.8, -1.4, 1.6, 2.8);
     ctx.restore();
 
@@ -1009,10 +997,11 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     [115, 127].forEach((deg, idx) => {
         ctx.save();
         ctx.rotate(deg * Math.PI / 180);
-        ctx.translate(0, -62);
-        ctx.fillStyle = "#03120e";
+        ctx.translate(0, -52);
+    ctx.scale(1.2, 1.2);
+        ctx.fillStyle = "#061c3a";
         ctx.beginPath(); ctx.arc(0, 0, 2.8, 0, Math.PI * 2); ctx.fill();
-        ctx.strokeStyle = "#10b981"; ctx.lineWidth = 0.7; ctx.stroke();
+        ctx.strokeStyle = "#00E5FF"; ctx.lineWidth = 0.7; ctx.stroke();
         // 旋钮指针
         const pRad = (time * 1.8 + idx * 2.2) % (Math.PI * 2);
         ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 0.9;
@@ -1025,10 +1014,11 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     rightMicroAngles.forEach((deg, idx) => {
         ctx.save();
         ctx.rotate(deg * Math.PI / 180);
-        ctx.translate(0, -54);
-        ctx.fillStyle = (idx % 2 === 0 ? "#10b981" : "#f59e0b");
+        ctx.translate(0, -47);
+    ctx.scale(1.2, 1.2);
+        ctx.fillStyle = (idx % 2 === 0 ? "#00E5FF" : "#f59e0b");
         ctx.fillRect(-2.0, -1.8, 4.0, 3.6);
-        ctx.strokeStyle = "#022c22"; ctx.lineWidth = 0.5;
+        ctx.strokeStyle = "#0b355c"; ctx.lineWidth = 0.5;
         ctx.strokeRect(-2.0, -1.8, 4.0, 3.6);
         ctx.restore();
     });
@@ -1036,7 +1026,8 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     // 内弧排 (Radius 46): 大型带黄黑警示圈的红色紧急制动主控按钮 (E-STOP)
     ctx.save();
     ctx.rotate(115 * Math.PI / 180);
-    ctx.translate(0, -46);
+    ctx.translate(0, -41);
+    ctx.scale(1.2, 1.2);
     // 黄黑相间安全防护座圈
     ctx.fillStyle = "#f59e0b";
     ctx.beginPath(); ctx.arc(0, 0, 4.4, 0, Math.PI * 2); ctx.fill();
@@ -1056,16 +1047,17 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     const kbW = 24;
     const kbH = 11;
     ctx.translate(0, kbY);
+    ctx.scale(1.2, 1.2);
 
     // 键盘底托
-    ctx.fillStyle = "#021a14";
+    ctx.fillStyle = "#061c3a";
     ctx.fillRect(-kbW / 2 - 1.5, -kbH / 2 - 1.5, kbW + 3, kbH + 3);
-    ctx.strokeStyle = "#065f46";
+    ctx.strokeStyle = "#0c4a6e";
     ctx.lineWidth = 0.9;
     ctx.strokeRect(-kbW / 2 - 1.5, -kbH / 2 - 1.5, kbW + 3, kbH + 3);
 
     // 机械键盘背光基板
-    ctx.fillStyle = "rgba(16, 185, 129, 0.16)";
+    ctx.fillStyle = "rgba(0, 204, 255, 0.16)";
     ctx.fillRect(-kbW / 2, -kbH / 2, kbW, kbH);
 
     // 4 排机械键帽
@@ -1085,7 +1077,7 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
             const ky = startKy + r * (kh + gapY);
             ctx.fillStyle = "#052e24";
             ctx.fillRect(kx, ky, kw, kh);
-            ctx.fillStyle = (r === 0 && c === 0) ? "#ef4444" : "#34d399";
+            ctx.fillStyle = (r === 0 && c === 0) ? "#ef4444" : "#00CCFF";
             ctx.fillRect(kx + 0.4, ky + 0.3, kw - 0.8, kh - 0.6);
         }
     }
@@ -1095,13 +1087,13 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     const spaceW = 3 * kw + 2 * gapX;
     ctx.fillStyle = "#064e3b";
     ctx.fillRect(spaceX, spaceY, spaceW, kh);
-    ctx.fillStyle = "#6ee7b7";
+    ctx.fillStyle = "#7dd3fc";
     ctx.fillRect(spaceX + 0.8, spaceY + 0.3, spaceW - 1.6, kh - 0.6);
 
     // 触控板
     ctx.fillStyle = "#041d16";
     ctx.fillRect(-4.5, kbH / 2 + 1.6, 9, 3.2);
-    ctx.strokeStyle = "#10b981";
+    ctx.strokeStyle = "#00E5FF";
     ctx.lineWidth = 0.6;
     ctx.strokeRect(-4.5, kbH / 2 + 1.6, 9, 3.2);
     ctx.fillStyle = "#38bdf8";
@@ -1112,6 +1104,7 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.save();
     const seatY = 10;
     ctx.translate(0, seatY);
+    ctx.scale(1.2, 1.2);
 
     // 五星万向轮金属底座
     ctx.strokeStyle = "#042018";
@@ -1128,7 +1121,7 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
         ctx.beginPath(); ctx.arc(wx, wy, 1.5, 0, Math.PI * 2); ctx.fill();
     }
     // 气压升降液压中柱
-    ctx.fillStyle = "#10b981";
+    ctx.fillStyle = "#00E5FF";
     ctx.beginPath(); ctx.arc(0, 0, 2.6, 0, Math.PI * 2); ctx.fill();
 
     // 坐垫本体
@@ -1136,7 +1129,7 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(-10, -8, 20, 15, 4); else ctx.rect(-10, -8, 20, 15);
     ctx.fill();
-    ctx.strokeStyle = "#047857";
+    ctx.strokeStyle = "#075985";
     ctx.lineWidth = 1.4;
     ctx.stroke();
 
@@ -1145,7 +1138,7 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(-8, -6, 16, 11, 2.5); else ctx.rect(-8, -6, 16, 11);
     ctx.fill();
-    ctx.strokeStyle = "rgba(52, 211, 153, 0.5)";
+    ctx.strokeStyle = "rgba(0, 229, 255, 0.5)";
     ctx.lineWidth = 0.7;
     ctx.beginPath();
     ctx.moveTo(0, -5); ctx.lineTo(0, 4);
@@ -1153,21 +1146,21 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
 
     // 左右两侧扶手
     [-11, 9].forEach(ax => {
-        ctx.fillStyle = "#02120e";
+        ctx.fillStyle = "#061c3a";
         ctx.fillRect(ax, -6, 2.4, 10);
-        ctx.strokeStyle = "#10b981";
+        ctx.strokeStyle = "#00E5FF";
         ctx.lineWidth = 0.7;
         ctx.strokeRect(ax, -6, 2.4, 10);
-        ctx.fillStyle = "#065f46";
+        ctx.fillStyle = "#0c4a6e";
         ctx.fillRect(ax + 0.3, -4.5, 1.8, 7);
     });
 
     // 人体工学高靠背与头枕
-    ctx.fillStyle = "#021a14";
+    ctx.fillStyle = "#061c3a";
     ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(-9, 4, 18, 9, 3.5); else ctx.rect(-9, 4, 18, 9);
     ctx.fill();
-    ctx.strokeStyle = "#10b981";
+    ctx.strokeStyle = "#00E5FF";
     ctx.lineWidth = 1.3;
     ctx.stroke();
 
@@ -1176,7 +1169,7 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(-6, 6.5, 12, 4.5, 2); else ctx.rect(-6, 6.5, 12, 4.5);
     ctx.fill();
-    ctx.strokeStyle = "#34d399";
+    ctx.strokeStyle = "#00CCFF";
     ctx.lineWidth = 0.7;
     ctx.stroke();
 
@@ -1312,7 +1305,7 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     const stanchions = [-x_part, -door_hw, door_hw, x_part];
     stanchions.forEach((sx, idx) => {
         // 立柱金属基座
-        ctx.fillStyle = "#02120e";
+        ctx.fillStyle = "#061c3a";
         ctx.beginPath(); ctx.arc(sx, y_part, 3.4, 0, Math.PI * 2); ctx.fill();
         ctx.strokeStyle = "#1e3a8a";
         ctx.lineWidth = 1;

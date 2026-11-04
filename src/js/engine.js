@@ -18241,8 +18241,8 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
         // 弯曲 STANAG 弹匣
         ctx.beginPath();
         ctx.moveTo(cx - 4, cy + 3);
-        ctx.lineTo(cx - 8, cy + 12);
-        ctx.lineTo(cx - 3, cy + 12);
+        ctx.lineTo(cx - 8, cy + 11);
+        ctx.lineTo(cx - 3, cy + 11);
         ctx.lineTo(cx + 1, cy + 3);
         ctx.closePath();
         ctx.fill();
@@ -18361,9 +18361,9 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
         // 垂直手柄
         ctx.fillRect(cx - 2, cy - 1, 6, 8);
 
-        // 超长直型弹匣
-        ctx.fillRect(cx - 1, cy + 7, 4, 11);
-        ctx.fillRect(cx - 1.5, cy + 17, 5, 1.5);
+        // 直型弹匣 (缩短以适配掉落卡片)
+        ctx.fillRect(cx - 1, cy + 7, 4, 3);
+        ctx.fillRect(cx - 1.5, cy + 9.5, 5, 1.5);
 
         // 扳机护圈
         ctx.beginPath();
@@ -18519,7 +18519,7 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
         ctx.strokeStyle = color; ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(cx - 12, cy); ctx.lineTo(cx + 12, cy);
-        ctx.moveTo(cx, cy - 12); ctx.lineTo(cx, cy + 12);
+        ctx.moveTo(cx, cy - 11); ctx.lineTo(cx, cy + 11);
         ctx.stroke();
         [[-8,-8], [8,-8], [-8,8], [8,8]].forEach(([ox, oy]) => {
             ctx.beginPath();
@@ -18587,7 +18587,7 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
         ctx.strokeStyle = '#64748b';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(cx + 8, cy - 10); ctx.lineTo(cx - 12, cy + 12);
+        ctx.moveTo(cx + 8, cy - 10); ctx.lineTo(cx - 12, cy + 11);
         ctx.stroke();
     } else if (weaponId === 10) {
         // --- 10: INFERNAL LAVA CIRCLE (地狱熔岩阵) ---
