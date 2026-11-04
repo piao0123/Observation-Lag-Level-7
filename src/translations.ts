@@ -298,6 +298,12 @@ export const translations: Record<Language, TranslationDict> = {
           title: '第 7 关 · 顶石科研中心',
           badge: '第 7 关',
           desc: '顶石科研中心：正中央梯形战术指挥大厅、环形反应堆数据核心、四联曲面工作台与北向全景俯瞰廊。'
+        },
+        {
+          id: 'level8',
+          title: '第 8 关 · 隔离测试关卡',
+          badge: '第 8 关 · 测试',
+          desc: '100% 隔离测试关卡：用于评估深色木制 45° 讲台、马蹄形 U 型工作台与重型装甲外墙，绝对不波及 Level 0 ~ 7。'
         }
       ]
     },
@@ -610,6 +616,12 @@ export const translations: Record<Language, TranslationDict> = {
           title: 'Level 07 · Apex Research Complex',
           badge: 'LEVEL 07',
           desc: 'Apex Research Complex: Central trapezoidal command chamber with circular reactor nexus, 4 curved quadrant consoles, and panoramic observation bay.'
+        },
+        {
+          id: 'level8',
+          title: 'Level 08 · Isolated Test Sandbox',
+          badge: 'LEVEL 08',
+          desc: '100% Standalone Test Environment: Used for evaluating the mahogany 45° speaker podium, horseshoe U-shaped workstation, and heavy armored outer walls.'
         }
       ]
     },

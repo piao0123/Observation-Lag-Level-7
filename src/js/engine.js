@@ -79,11 +79,12 @@ function getCurrentLevelId() {
     return 'level1_airport';
 }
 
-const LEVEL_TARGET_WAVES = [3, 3, 3, 4, 4, 4, 5, 5];
+const LEVEL_TARGET_WAVES = [3, 3, 3, 4, 4, 4, 5, 5, 1];
 function getLevelTargetWave() {
     if (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) {
         const lvl = levelManager.getCurrentLevel();
         if (lvl && lvl.id === 'level0_test') return 3;
+        if (lvl && lvl.id === 'level8_test') return 1;
     }
     const idx = (typeof levelManager !== 'undefined' && levelManager.currentIndex !== undefined) ? levelManager.currentIndex : 1;
     return LEVEL_TARGET_WAVES[idx] || 3;
@@ -337,7 +338,7 @@ let cachedIsPlayerInPool = false;
 const mouse = { x: width / 2, y: height / 2 };
 function getWorldMouse() {
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
-    if (levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') {
+    if (levelId === 'level4_yacht' || levelId === 'level0_test' || levelId === 'level6_train' || levelId === 'level7_lab' || levelId === 'level8_test') {
         return { x: mouse.x + (window.cameraX || 0), y: mouse.y + (window.cameraY || 0) };
     }
     const levelW = 1280, levelH = 720;
@@ -889,6 +890,15 @@ function getLevelBounds() {
             minY: 20,
             maxY: mapHeight - 20
         };
+    } else if (levelId === 'level8_test') {
+        const mapWidth = window.level8MapWidth || 3200;
+        const mapHeight = window.level8MapHeight || 2400;
+        return {
+            minX: 20,
+            maxX: mapWidth - 20,
+            minY: 20,
+            maxY: mapHeight - 20
+        };
     } else if (levelId === 'level5_hotel') {
         return {
             minX: 40 + 12,
@@ -1272,9 +1282,9 @@ function buildNavGrid(mw, mh) {
     } else if (levelId === 'level6_train') {
         mapW = window.level6MapWidth || 7200;
         mapH = window.level6MapHeight || 240;
-    } else if (levelId === 'level7_lab') {
-        mapW = window.level7MapWidth || 3200;
-        mapH = window.level7MapHeight || 2400;
+    } else if (levelId === 'level7_lab' || levelId === 'level8_test') {
+        mapW = (levelId === 'level8_test' ? window.level8MapWidth : window.level7MapWidth) || 3200;
+        mapH = (levelId === 'level8_test' ? window.level8MapHeight : window.level7MapHeight) || 2400;
     }
     navGridCellSize = 40;
     navGridCols = Math.ceil(mapW / navGridCellSize);
@@ -2504,6 +2514,9 @@ function setupCanvasListeners() {
                     } else if (levelId === 'level7_lab') {
                         maxXBound = (window.level7MapWidth || 3200) - 25;
                         maxYBound = (window.level7MapHeight || 2400) - 25;
+                    } else if (levelId === 'level8_test') {
+                        maxXBound = (window.level8MapWidth || 3200) - 25;
+                        maxYBound = (window.level8MapHeight || 2400) - 25;
                     }
                     for (let d = 8; d <= 120 && !found; d += 8) {
                         for (let angleIdx = 0; angleIdx < 24; angleIdx++) {
@@ -2539,7 +2552,7 @@ function setupCanvasListeners() {
         e.preventDefault();
         if (blindActive && blindZone && currentWeapon.id === WEAPONS.GRENADE.id) {
             const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
-            const isScrollLevel = (levelId === 'level4_yacht' || levelId === 'level0_test' || levelId === 'level6_train' || levelId === 'level7_lab');
+            const isScrollLevel = (levelId === 'level4_yacht' || levelId === 'level0_test' || levelId === 'level6_train' || levelId === 'level7_lab' || levelId === 'level8_test');
             const tx = e.clientX + (isScrollLevel ? (window.cameraX || 0) : 0);
             const ty = e.clientY + (isScrollLevel ? (window.cameraY || 0) : 0);
             if (inBlindZone(tx, ty)) {
@@ -3968,6 +3981,7 @@ function snapCameraToPlayer() {
     else if (levelId === 'level6_train') { mapWidth = window.level6MapWidth || 7200; mapHeight = window.level6MapHeight || 240; }
     else if (levelId === 'level4_yacht') { mapWidth = window.level4MapWidth || 2400; mapHeight = 720; }
     else if (levelId === 'level7_lab') { mapWidth = window.level7MapWidth || 3200; mapHeight = window.level7MapHeight || 2400; }
+    else if (levelId === 'level8_test') { mapWidth = window.level8MapWidth || 3200; mapHeight = window.level8MapHeight || 2400; }
 
     if (mapWidth > currentW) {
         const targetCamX = px - currentW / 2;
@@ -4055,19 +4069,42 @@ function update() {
                 
                 let nearEntity = false;
                 
-                // Detect player proximity to door bounding box
-                const pdx = Math.max(p.x - player.x, 0, player.x - (p.x + p.w));
-                const pdy = Math.max(p.y - player.y, 0, player.y - (p.y + p.h));
-                const distPlayer = Math.hypot(pdx, pdy);
-                if (distPlayer < 65) {
+                // Detect proximity to door (supports line segment and center coordinates for angled/slanted doors)
+                let distPlayer = 9999;
+                if (p.topX !== undefined && p.botX !== undefined && p.topY !== undefined && p.botY !== undefined) {
+                    const segDx = p.botX - p.topX, segDy = p.botY - p.topY;
+                    const segLenSq = segDx * segDx + segDy * segDy;
+                    let t = Math.max(0, Math.min(1, ((player.x - p.topX) * segDx + (player.y - p.topY) * segDy) / (segLenSq || 1)));
+                    distPlayer = Math.hypot(player.x - (p.topX + t * segDx), player.y - (p.topY + t * segDy));
+                } else if (p.cx !== undefined && p.cy !== undefined) {
+                    distPlayer = Math.hypot(player.x - p.cx, player.y - p.cy);
+                } else {
+                    const pdx = Math.max(p.x - player.x, 0, player.x - (p.x + p.w));
+                    const pdy = Math.max(p.y - player.y, 0, player.y - (p.y + p.h));
+                    distPlayer = Math.hypot(pdx, pdy);
+                }
+
+                const triggerDist = (p.topX !== undefined) ? 80 : (p.cx !== undefined ? 115 : 65);
+                if (distPlayer < triggerDist) {
                     nearEntity = true;
                 } else if (typeof enemies !== 'undefined' && Array.isArray(enemies)) {
                     // Detect alive enemies proximity
                     for (let e of enemies) {
                         if (e.hp > 0) {
-                            const edx = Math.max(p.x - e.x, 0, e.x - (p.x + p.w));
-                            const edy = Math.max(p.y - e.y, 0, e.y - (p.y + p.h));
-                            if (Math.hypot(edx, edy) < 60) {
+                            let distE = 9999;
+                            if (p.topX !== undefined && p.botX !== undefined && p.topY !== undefined && p.botY !== undefined) {
+                                const segDx = p.botX - p.topX, segDy = p.botY - p.topY;
+                                const segLenSq = segDx * segDx + segDy * segDy;
+                                let t = Math.max(0, Math.min(1, ((e.x - p.topX) * segDx + (e.y - p.topY) * segDy) / (segLenSq || 1)));
+                                distE = Math.hypot(e.x - (p.topX + t * segDx), e.y - (p.topY + t * segDy));
+                            } else if (p.cx !== undefined && p.cy !== undefined) {
+                                distE = Math.hypot(e.x - p.cx, e.y - p.cy);
+                            } else {
+                                const edx = Math.max(p.x - e.x, 0, e.x - (p.x + p.w));
+                                const edy = Math.max(p.y - e.y, 0, e.y - (p.y + p.h));
+                                distE = Math.hypot(edx, edy);
+                            }
+                            if (distE < triggerDist) {
                                 nearEntity = true;
                                 break;
                             }
@@ -4318,9 +4355,9 @@ function update() {
         } else if (currentLevelId === 'level6_train') {
             maxXVal = (window.level6MapWidth || 7200) - 20;
             maxYVal = (window.level6MapHeight || 240) - 20;
-        } else if (currentLevelId === 'level7_lab') {
-            maxXVal = (window.level7MapWidth || 3200) - 20;
-            maxYVal = (window.level7MapHeight || 2400) - 20;
+        } else if (currentLevelId === 'level7_lab' || currentLevelId === 'level8_test') {
+            maxXVal = ((currentLevelId === 'level8_test' ? window.level8MapWidth : window.level7MapWidth) || 3200) - 20;
+            maxYVal = ((currentLevelId === 'level8_test' ? window.level8MapHeight : window.level7MapHeight) || 2400) - 20;
         }
         player.x = Math.max(minXVal, Math.min(maxXVal, nextX));
         player.y = Math.max(minYVal, Math.min(maxYVal, nextY));
@@ -5719,7 +5756,7 @@ function drawProps() {
 
         const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
         const isHotelLevel = (currentLevelId === 'level5_hotel');
-        const isTrainLevel = ((currentLevelId === 'level0_test' || currentLevelId === 'level6_train'));
+        const isTrainLevel = ((currentLevelId === 'level0_test' || currentLevelId === 'level6_train' || currentLevelId === 'level8_test'));
         const isYachtLevel = (currentLevelId === 'level4_yacht');
         const isSubwayLevel = (currentLevelId === 'level2_subway');
         const isBankLevel = (currentLevelId === 'level3_bank');
@@ -6008,109 +6045,136 @@ function drawProps() {
             const openProg = p.openProgress !== undefined ? p.openProgress : 0;
             const isOpening = openProg > 0.05;
 
-            // 1. Heavy Drop Shadow
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+            // Support rotation for doors on slanted walls
+            const doorCx = p.cx !== undefined ? p.cx : (p.x + p.w / 2);
+            const doorCy = p.cy !== undefined ? p.cy : (p.y + p.h / 2);
+            if (p.angle) {
+                ctx.translate(doorCx, doorCy);
+                ctx.rotate(p.angle);
+                ctx.translate(-doorCx, -doorCy);
+            }
 
-            // 2. Heavy Armored Frame Base
-            ctx.fillStyle = '#0f172a'; // Deep slate dark steel
-            ctx.fillRect(p.x - 2, p.y, p.w + 4, p.h);
-            ctx.strokeStyle = '#334155';
-            ctx.lineWidth = 1.6;
-            ctx.strokeRect(p.x - 2, p.y, p.w + 4, p.h);
+            const isEmeraldTheme = (currentLevelId === 'level8_test' || currentLevelId === 'level7_lab');
+            const frameSteel = isEmeraldTheme ? '#051914' : '#0f172a';
+            const frameStroke = isEmeraldTheme ? '#10b981' : '#38bdf8';
+            const cylinderColor = isEmeraldTheme ? '#064e3b' : '#1e293b';
+            const leafSteel = isEmeraldTheme ? '#06201b' : '#334155';
+            const leafBezel = isEmeraldTheme ? '#34d399' : '#94a3b8';
+            const leafBrace = isEmeraldTheme ? '#02120e' : '#1e293b';
+            const glassColor = isEmeraldTheme ? 'rgba(16, 185, 129, 0.8)' : 'rgba(56, 189, 248, 0.7)';
+            const glassBorder = isEmeraldTheme ? '#10b981' : '#0284c7';
+
+            const isNarrow = isEmeraldTheme || (p.w <= 16);
+            const pad = isNarrow ? 1 : 3;
+            const jambW = isNarrow ? 2 : 4;
+            const barH = isNarrow ? 7 : 10;
+
+            // 1. Heavy Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 1, p.y + 1, p.w, p.h);
+
+            // 2. Heavy Armored Frame Base - Left and Right side jamb posts only (center passage is open!)
+            ctx.fillStyle = frameSteel;
+            ctx.fillRect(p.x - pad, p.y, jambW, p.h);
+            ctx.fillRect(p.x + p.w + pad - jambW, p.y, jambW, p.h);
+            ctx.strokeStyle = frameStroke;
+            ctx.lineWidth = isNarrow ? 1 : 1.4;
+            ctx.strokeRect(p.x - pad, p.y, jambW, p.h);
+            ctx.strokeRect(p.x + p.w + pad - jambW, p.y, jambW, p.h);
 
             // Hazard Stripes on Side Pillars (Black & Yellow diagonal safety warnings)
             const stripeStep = 6;
             ctx.save();
             ctx.beginPath();
-            ctx.rect(p.x - 2, p.y, 4, p.h);
-            ctx.rect(p.x + p.w - 2, p.y, 4, p.h);
+            ctx.rect(p.x - pad, p.y, jambW, p.h);
+            ctx.rect(p.x + p.w + pad - jambW, p.y, jambW, p.h);
             ctx.clip();
             ctx.fillStyle = '#f59e0b'; // Hazard Yellow
             for (let sy = p.y - 10; sy < p.y + p.h + 10; sy += stripeStep * 2) {
                 ctx.beginPath();
-                ctx.moveTo(p.x - 4, sy);
-                ctx.lineTo(p.x + p.w + 4, sy + 8);
-                ctx.lineTo(p.x + p.w + 4, sy + 12);
-                ctx.lineTo(p.x - 4, sy + 4);
+                ctx.moveTo(p.x - pad - 2, sy);
+                ctx.lineTo(p.x + p.w + pad + 2, sy + 8);
+                ctx.lineTo(p.x + p.w + pad + 2, sy + 12);
+                ctx.lineTo(p.x - pad - 2, sy + 4);
                 ctx.closePath();
                 ctx.fill();
             }
             ctx.restore();
 
             // Heavy Top Pneumatic Cylinder Housing
-            ctx.fillStyle = '#1e293b';
-            ctx.fillRect(p.x - 3, p.y, p.w + 6, 10);
-            ctx.strokeStyle = '#f59e0b';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(p.x - 3, p.y, p.w + 6, 10);
+            ctx.fillStyle = cylinderColor;
+            ctx.fillRect(p.x - pad, p.y, p.w + pad * 2, barH);
+            ctx.strokeStyle = isEmeraldTheme ? '#10b981' : '#f59e0b';
+            ctx.lineWidth = 1.1;
+            ctx.strokeRect(p.x - pad, p.y, p.w + pad * 2, barH);
 
             // Hydraulic pressure gauge / status LED
-            ctx.fillStyle = isOpening ? '#22c55e' : '#ef4444'; // Red locked, Green opening
+            ctx.fillStyle = isOpening ? (isEmeraldTheme ? '#10b981' : '#22c55e') : '#ef4444'; // Red locked, Green opening
             ctx.beginPath();
-            ctx.arc(p.x + p.w / 2, p.y + 5, 3, 0, Math.PI * 2);
+            ctx.arc(p.x + p.w / 2, p.y + barH / 2, isNarrow ? 2 : 3, 0, Math.PI * 2);
             ctx.fill();
 
             // Heavy Bottom Reinforced Threshold Rail
-            ctx.fillStyle = '#1e293b';
-            ctx.fillRect(p.x - 3, p.y + p.h - 10, p.w + 6, 10);
-            ctx.strokeStyle = '#64748b';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(p.x - 3, p.y + p.h - 10, p.w + 6, 10);
+            ctx.fillStyle = cylinderColor;
+            ctx.fillRect(p.x - pad, p.y + p.h - barH, p.w + pad * 2, barH);
+            ctx.strokeStyle = isEmeraldTheme ? '#34d399' : '#64748b';
+            ctx.lineWidth = 1.1;
+            ctx.strokeRect(p.x - pad, p.y + p.h - barH, p.w + pad * 2, barH);
 
             // 3. Sliding Blast Door Panels (Top & Bottom heavy armored steel leaves)
-            const trackYTop = p.y + 8;
-            const trackYBot = p.y + p.h - 8;
+            const trackYTop = p.y + barH;
+            const trackYBot = p.y + p.h - barH;
             const totalH = trackYBot - trackYTop;
             const halfH = totalH / 2;
 
-            const maxRetract = halfH - 2;
+            const maxRetract = halfH + 2;
             const slideOffset = maxRetract * openProg;
 
             const topLeafY = trackYTop - slideOffset;
             const botLeafY = trackYTop + halfH + slideOffset;
 
-            const doorX = p.x + 1;
-            const doorW = p.w - 2;
+            const doorX = isNarrow ? (p.x + 0.5) : (p.x + 1);
+            const doorW = isNarrow ? (p.w - 1) : (p.w - 2);
 
-            // Clip sliding leaves within the frame
+            // Clip sliding leaves within the frame and wall pockets
             ctx.save();
             ctx.beginPath();
-            ctx.rect(p.x - 4, p.y - 12, p.w + 8, p.h + 24);
+            ctx.rect(p.x - pad - 1, p.y - 45, p.w + pad * 2 + 2, p.h + 90);
             ctx.clip();
 
             const drawArmoredLeaf = (gy, gh, isTopPanel) => {
                 if (gh <= 1) return;
 
                 // Gunmetal Steel Armor Plate
-                ctx.fillStyle = '#334155';
+                ctx.fillStyle = leafSteel;
                 ctx.fillRect(doorX, gy, doorW, gh);
 
                 // Steel Plate Outer Bezel
-                ctx.strokeStyle = '#94a3b8';
-                ctx.lineWidth = 1.2;
+                ctx.strokeStyle = leafBezel;
+                ctx.lineWidth = isNarrow ? 1 : 1.2;
                 ctx.strokeRect(doorX, gy, doorW, gh);
 
                 // Reinforced Armor Cross Bracing / Ribs
-                ctx.strokeStyle = '#1e293b';
-                ctx.lineWidth = 1.5;
+                ctx.strokeStyle = leafBrace;
+                ctx.lineWidth = isNarrow ? 1 : 1.5;
                 ctx.beginPath();
-                ctx.moveTo(doorX + 2, gy + 3); ctx.lineTo(doorX + doorW - 2, gy + gh - 3);
-                ctx.moveTo(doorX + doorW - 2, gy + 3); ctx.lineTo(doorX + 2, gy + gh - 3);
+                ctx.moveTo(doorX + 1, gy + 3); ctx.lineTo(doorX + doorW - 1, gy + gh - 3);
+                ctx.moveTo(doorX + doorW - 1, gy + 3); ctx.lineTo(doorX + 1, gy + gh - 3);
                 ctx.stroke();
 
                 // Narrow Armored Glass Slit (Tactical observation window)
-                const slitY = gy + gh / 2 - 2;
-                ctx.fillStyle = 'rgba(56, 189, 248, 0.7)'; // Cyan armor glass
-                ctx.fillRect(doorX + 2, slitY, doorW - 4, 4);
-                ctx.strokeStyle = '#0284c7';
+                const slitY = gy + gh / 2 - (isNarrow ? 1.5 : 2);
+                const slitH = isNarrow ? 3 : 4;
+                ctx.fillStyle = glassColor;
+                ctx.fillRect(doorX + 1, slitY, doorW - 2, slitH);
+                ctx.strokeStyle = glassBorder;
                 ctx.lineWidth = 0.8;
-                ctx.strokeRect(doorX + 2, slitY, doorW - 4, 4);
+                ctx.strokeRect(doorX + 1, slitY, doorW - 2, slitH);
 
                 // Heavy Interlocking Steel Lock Teeth at center seam
                 ctx.fillStyle = '#f59e0b';
-                const seamY = isTopPanel ? (gy + gh - 3) : gy;
-                ctx.fillRect(doorX, seamY, doorW, 3);
+                const seamY = isTopPanel ? (gy + gh - 2.5) : gy;
+                ctx.fillRect(doorX, seamY, doorW, 2.5);
             };
 
             drawArmoredLeaf(topLeafY, halfH, true);
@@ -17231,6 +17295,16 @@ function applyObstacleTheme(obs) {
             ctx.strokeStyle = (obs.type === 'low_wall') ? '#34d399' : '#10b981';
             ctx.lineWidth = 2.2;
             ctx.stroke();
+        } else if (levelId === 'level8_test') {
+            // Level 7 Emerald color matching for Level 8 heavy armored walls
+            ctx.fillStyle = (obs.type === 'low_wall') ? '#064e3b' : '#051914';
+            ctx.fill();
+            ctx.strokeStyle = (obs.type === 'low_wall') ? '#34d399' : '#10b981';
+            ctx.lineWidth = 2.2;
+            ctx.stroke();
+            ctx.strokeStyle = 'rgba(52, 211, 153, 0.35)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
         } else {
             ctx.fillStyle = '#0f172a';
             ctx.fill();
@@ -17243,7 +17317,7 @@ function applyObstacleTheme(obs) {
 
 function isWorldRectVisible(x, y, w, h, margin = 150) {
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
-    if (levelId !== 'level0_test' && levelId !== 'level4_yacht' && levelId !== 'level6_train' && levelId !== 'level7_lab') {
+    if (levelId !== 'level0_test' && levelId !== 'level4_yacht' && levelId !== 'level6_train' && levelId !== 'level7_lab' && levelId !== 'level8_test') {
         return true;
     }
     const camX = Math.max(0, window.cameraX || 0);
@@ -17288,6 +17362,34 @@ function drawObstacle(obs) {
             ctx.closePath();
 
             applyObstacleTheme(obs);
+
+            if ((levelId === 'level8_test' || (levelId === 'level7_lab' && obs.label && obs.label.includes('HEAVY ARMORED WALL'))) && obs.points && obs.points.length >= 2) {
+                for (let i = 0; i < obs.points.length; i++) {
+                    const p1 = obs.points[i];
+                    const p2 = obs.points[(i + 1) % obs.points.length];
+                    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                    if (segLen >= 30) {
+                        const numRivets = Math.floor(segLen / 26);
+                        for (let r = 1; r <= numRivets; r++) {
+                            const t = r / (numRivets + 1);
+                            const rx = p1.x + (p2.x - p1.x) * t;
+                            const ry = p1.y + (p2.y - p1.y) * t;
+                            ctx.fillStyle = '#02120e';
+                            ctx.beginPath();
+                            ctx.arc(rx, ry, 2.2, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.fillStyle = '#064e3b';
+                            ctx.beginPath();
+                            ctx.arc(rx - 0.4, ry - 0.4, 1.4, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.fillStyle = '#34d399';
+                            ctx.beginPath();
+                            ctx.arc(rx - 0.6, ry - 0.6, 0.6, 0, Math.PI * 2);
+                            ctx.fill();
+                        }
+                    }
+                }
+            }
         } catch (e) {
             console.error("Error drawing obstacle:", e);
         } finally {
@@ -17456,7 +17558,7 @@ function drawObstacle(obs) {
             grad.addColorStop(1, '#0f172a');
             wallStroke = '#38bdf8';
             gridStroke = 'rgba(56, 189, 248, 0.2)';
-        } else if (levelId === 'level7_lab') {
+        } else if (levelId === 'level7_lab' || levelId === 'level8_test') {
             grad.addColorStop(0, '#06201b');
             grad.addColorStop(1, '#02120e');
             wallStroke = '#10b981';
@@ -20786,9 +20888,9 @@ function draw() {
         const targetCamX = player.x - width / 2;
         window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
         window.cameraY = -(height - mapHeight) / 2;
-    } else if (levelId === 'level7_lab') {
-        const mapWidth = window.level7MapWidth || 3200;
-        const mapHeight = window.level7MapHeight || 2400;
+    } else if (levelId === 'level7_lab' || levelId === 'level8_test') {
+        const mapWidth = window.level8MapWidth || window.level7MapWidth || 3200;
+        const mapHeight = window.level8MapHeight || window.level7MapHeight || 2400;
         const targetCamX = player.x - width / 2;
         window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
         if (mapHeight > height) {
@@ -20807,7 +20909,7 @@ function draw() {
     
     ctx.save();
     try {
-        if (levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') {
+        if (levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab' || levelId === 'level8_test') {
             ctx.translate(-(window.cameraX || 0), -(window.cameraY || 0));
         // 打击感：震屏（juice.js 创伤值系统，2026-11-01）
         try {
@@ -21607,6 +21709,35 @@ function draw() {
         const mapH = window.level7MapHeight || 2400;
         ctx.fillStyle = '#020403';
         ctx.fillRect(-2000, -2000, mapW + 4000, mapH + 4000);
+    } else if (levelId === 'level8_test') {
+        // 8. 隔离测试关卡 · Level 7 中间房间重装甲墙与自动门 100% 复制测试场
+        const mapW = window.level8MapWidth || 3200;
+        const mapH = window.level8MapHeight || 2400;
+
+        // A. 视口背景 (深邃暗调测试场，消除土黄色底色)
+        ctx.fillStyle = '#020403';
+        ctx.fillRect(-2000, -2000, mapW + 4000, mapH + 4000);
+
+        // B. 内部控制室地面：100% 复制 Level 6 防静电科技地板 (x: 1048 ~ 2152, y: 470 ~ 1960)
+        ctx.fillStyle = '#0a101d';
+        ctx.beginPath();
+        ctx.moveTo(1055, 470);
+        ctx.lineTo(2145, 470);
+        ctx.lineTo(2097, 820);
+        ctx.lineTo(1908, 1960);
+        ctx.lineTo(1292, 1960);
+        ctx.lineTo(1103, 820);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.28)';
+        ctx.lineWidth = 1.4;
+        for (let cx = 1040; cx <= 2160; cx += 80) {
+            ctx.beginPath(); ctx.moveTo(cx, 470); ctx.lineTo(cx, 1960); ctx.stroke();
+        }
+        for (let cy = 480; cy <= 1960; cy += 60) {
+            ctx.beginPath(); ctx.moveTo(1040, cy); ctx.lineTo(2160, cy); ctx.stroke();
+        }
     } else {
         // 通用默认背景：浅沙褐色防滑地板 (全屏无缝平铺)
         ctx.fillStyle = '#A88E7D';

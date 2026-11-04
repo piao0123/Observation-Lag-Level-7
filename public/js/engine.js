@@ -45,7 +45,7 @@ function ensureCanvas() {
             height = targetH;
             canvas.width = targetW;
             canvas.height = targetH;
-            initMapLayout();
+            clampEntitiesOnResize();
         }
     }
     return canvas && ctx;
@@ -79,11 +79,12 @@ function getCurrentLevelId() {
     return 'level1_airport';
 }
 
-const LEVEL_TARGET_WAVES = [3, 3, 3, 4, 4, 4, 5, 5];
+const LEVEL_TARGET_WAVES = [3, 3, 3, 4, 4, 4, 5, 5, 1];
 function getLevelTargetWave() {
     if (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) {
         const lvl = levelManager.getCurrentLevel();
         if (lvl && lvl.id === 'level0_test') return 3;
+        if (lvl && lvl.id === 'level8_test') return 1;
     }
     const idx = (typeof levelManager !== 'undefined' && levelManager.currentIndex !== undefined) ? levelManager.currentIndex : 1;
     return LEVEL_TARGET_WAVES[idx] || 3;
@@ -94,6 +95,7 @@ window.__endlessMode = false;
 window.__storyBriefingEnabled = false;
 
 // --- 武器系统 ---
+// 基础武器属性表 (针对第 1 ~ 7 关正式关卡恢复 100% 原始数值)
 const WEAPONS = {
     RIFLE:          { id: 1, name: "步枪",       nameEn: "Rifle", range: 650, cooldown: 9,  damage: 28, speed: 17, radius: 3.5, type: 'bullet' },
     PISTOL:         { id: 2, name: "手枪",       nameEn: "Pistol", range: 450, cooldown: 11, damage: 34, speed: 16, radius: 4.0, type: 'bullet' },
@@ -107,6 +109,28 @@ const WEAPONS = {
     LAVA_CIRCLE:    { id: 10, name: "地狱熔岩阵", nameEn: "Lava Circle", range: 680, cooldown: 65, damage: 170, radius: 95, type: 'lava_circle' },
     SOUL_SIPHON:    { id: 11, name: "灵魂汲取",   nameEn: "Soul Siphon", range: 420, cooldown: 7,  damage: 26, speed: 22, radius: 8, type: 'soul_siphon' }
 };
+
+// 关卡专有武器动态属性适配器 (仅在 Level 0 大地图生效，绝不波及其他关卡)
+function getEffectiveWeapon(wp) {
+    if (!wp) return wp;
+    const isLevel0 = (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test');
+    if (!isLevel0) return wp;
+
+    switch(wp.id) {
+        case 1:  return { ...wp, range: 920, cooldown: 7,  damage: 28, speed: 20 };
+        case 2:  return { ...wp, range: 720, cooldown: 8,  damage: 34, speed: 20 };
+        case 3:  return { ...wp, range: 620, cooldown: 4,  damage: 16, speed: 22 };
+        case 4:  return { ...wp, range: 1600,cooldown: 36, damage: 140,speed: 32 };
+        case 5:  return { ...wp, range: 600, cooldown: 50, damage: 130,speed: 12, blastRadius: 130 };
+        case 6:  return { ...wp, range: 1200,cooldown: 5,  damage: 42, speed: 23 };
+        case 7:  return { ...wp, range: 2500,cooldown: 18, damage: 99999,speed:32, blastRadius: 190 };
+        case 8:  return { ...wp, range: 720, cooldown: 25, damage: 52, pellets: 3, speed: 24, radius: 5.6 };
+        case 9:  return { ...wp, range: 640, cooldown: 30, damage: 44, speed: 18, radius: 16 };
+        case 10: return { ...wp, range: 640, cooldown: 50, damage: 170, radius: 105 }; // 2026-11-01：射程 1000→640，与光镰持平
+        case 11: return { ...wp, range: 680, cooldown: 5,  damage: 26, speed: 25, radius: 8 };
+        default: return wp;
+    }
+}
 
 let currentWeapon = WEAPONS.RIFLE;
 let unlockedWeapons = [WEAPONS.RIFLE.id];
@@ -314,10 +338,18 @@ let cachedIsPlayerInPool = false;
 const mouse = { x: width / 2, y: height / 2 };
 function getWorldMouse() {
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
-    if (levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') {
-        return { x: mouse.x + (window.cameraX || 0), y: mouse.y - (window.cameraY || 0) };
+    if (levelId === 'level4_yacht' || levelId === 'level0_test' || levelId === 'level6_train' || levelId === 'level7_lab' || levelId === 'level8_test') {
+        return { x: mouse.x + (window.cameraX || 0), y: mouse.y + (window.cameraY || 0) };
     }
-    return mouse;
+    const levelW = 1280, levelH = 720;
+    const viewScale = Math.min(width / levelW, height / levelH) || 1;
+    const offsetX = (width - levelW * viewScale) / 2;
+    const offsetY = (height - levelH * viewScale) / 2;
+    // 2026-11-02：钳制到地图范围内，防止点到黑边区时坐标跑到地图外（UAV 粒子错位）
+    return {
+        x: Math.max(0, Math.min(levelW, (mouse.x - offsetX) / viewScale)),
+        y: Math.max(0, Math.min(levelH, (mouse.y - offsetY) / viewScale))
+    };
 }
 const keys = {};
 
@@ -330,6 +362,8 @@ const traps = [];
 const runeScythes = [];
 const lavaCircles = []; 
 const bloodSacrificeSeals = [];
+// 2026-11-02：地狱血祭完成祭坛法阵（复用血祭印风格，粒子升天红→青渐变）
+const hellAltarSeals = [];
 
 // Level 3 specific structures and fog variables
 let lasers = [];
@@ -453,6 +487,7 @@ function setMapData(obs, sec, prp, zns, way, cam, lsr) {
     cachedVisionSegments = null;
     cachedVisionFrame = -1;
     if (typeof navWaypointAdjacency !== 'undefined') navWaypointAdjacency = null;
+    navGrid = null;
     window.obstacles = obstacles;
     window.securityGates = securityGates;
     window.props = props;
@@ -472,6 +507,7 @@ window.cameras = cameras;
 window.enemies = enemies;
 window.lasers = lasers;
 window.player = player;
+window.particles = particles;
 
 function initMapLayout() {
     level3TargetSecured = false;
@@ -515,6 +551,12 @@ function initMapLayout() {
         });
     }
     clampEntitiesOnResize();
+    if (typeof snapCameraToPlayer === 'function') {
+        snapCameraToPlayer();
+    }
+    if (typeof buildNavGrid === 'function') {
+        buildNavGrid();
+    }
 }
 
 function resizeCanvas() {
@@ -558,6 +600,24 @@ function getVisionBlockingSegments() {
         if (obs.type === 'solid' || obs.type === 'low_wall' || obs.type === 'rock' || obs.type === 'poly_wall' || obs.type === 'stalagmite' || obs.type === 'obsidian' || obs.type === 'volcano' || obs.type === 'altar' || obs.type === 'monolith') {
             if (obs.points && Array.isArray(obs.points)) {
                 const pts = obs.points;
+                for (let i = 0; i < pts.length; i++) {
+                    const p1 = pts[i];
+                    const p2 = pts[(i + 1) % pts.length];
+                    const minX = Math.min(p1.x, p2.x), maxX = Math.max(p1.x, p2.x);
+                    const minY = Math.min(p1.y, p2.y), maxY = Math.max(p1.y, p2.y);
+                    segments.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, minX, maxX, minY, maxY });
+                }
+            } else if (obs.circle) {
+                // 2026-11-02：正圆阴影用 48 边形逼近（视觉无棱角）
+                if (!obs._circleCache) {
+                    const pts = [];
+                    for (let i = 0; i < 48; i++) {
+                        const a = (i * Math.PI * 2) / 48;
+                        pts.push({ x: obs.circle.cx + Math.cos(a) * obs.circle.radius, y: obs.circle.cy + Math.sin(a) * obs.circle.radius });
+                    }
+                    obs._circleCache = pts;
+                }
+                const pts = obs._circleCache;
                 for (let i = 0; i < pts.length; i++) {
                     const p1 = pts[i];
                     const p2 = pts[(i + 1) % pts.length];
@@ -611,56 +671,67 @@ function getVisionBlockingSegments() {
 }
 
 function drawTacticalFOV(x, y, angle, fovAngle, maxDist, fillColor, strokeColor) {
-    const camX = window.cameraX || 0;
-    if (x < camX - maxDist - 80 || x > camX + width + maxDist + 80) {
+    if (typeof x !== 'number' || typeof y !== 'number' || isNaN(x) || isNaN(y)) return;
+    const safeAngle = (typeof angle === 'number' && !isNaN(angle)) ? angle : 0;
+    const safeFovAngle = (typeof fovAngle === 'number' && !isNaN(fovAngle) && fovAngle > 0) ? fovAngle : Math.PI / 3;
+    const safeMaxDist = (typeof maxDist === 'number' && !isNaN(maxDist) && maxDist > 0) ? maxDist : 260;
+
+    const camX = Math.max(0, window.cameraX || 0);
+    if (x < camX - safeMaxDist - 120 || x > camX + width + safeMaxDist + 120) {
         return;
     }
     const allSegments = getVisionBlockingSegments();
     
     // Filter segments to only those within range of this field of view to vastly improve performance
-    const segments = allSegments.filter(seg => {
-        if (seg.maxX < x - maxDist - 10 || seg.minX > x + maxDist + 10) return false;
-        if (seg.maxY < y - maxDist - 10 || seg.minY > y + maxDist + 10) return false;
+    const segments = (Array.isArray(allSegments) ? allSegments : []).filter(seg => {
+        if (!seg) return false;
+        if (seg.maxX < x - safeMaxDist - 10 || seg.minX > x + safeMaxDist + 10) return false;
+        if (seg.maxY < y - safeMaxDist - 10 || seg.minY > y + safeMaxDist + 10) return false;
         return true;
     });
 
     const rayCount = 64;
-    const startAngle = angle - fovAngle / 2;
-    const step = fovAngle / rayCount;
+    const startAngle = safeAngle - safeFovAngle / 2;
+    const step = safeFovAngle / rayCount;
 
     ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(x, y);
+    try {
+        ctx.beginPath();
+        ctx.moveTo(x, y);
 
-    for (let i = 0; i <= rayCount; i++) {
-        const a = startAngle + step * i;
-        const ray = { x: x, y: y, dx: Math.cos(a) * maxDist, dy: Math.sin(a) * maxDist };
+        for (let i = 0; i <= rayCount; i++) {
+            const a = startAngle + step * i;
+            const ray = { x: x, y: y, dx: Math.cos(a) * safeMaxDist, dy: Math.sin(a) * safeMaxDist };
 
-        let closestHit = null;
-        let minParam = 1;
+            let closestHit = null;
+            let minParam = 1;
 
-        for (let j = 0; j < segments.length; j++) {
-            const hit = getRayIntersection(ray, segments[j]);
-            if (hit && hit.param < minParam) {
-                minParam = hit.param;
-                closestHit = hit;
+            for (let j = 0; j < segments.length; j++) {
+                const hit = getRayIntersection(ray, segments[j]);
+                if (hit && hit.param < minParam) {
+                    minParam = hit.param;
+                    closestHit = hit;
+                }
             }
+
+            const targetX = closestHit ? closestHit.x : x + ray.dx;
+            const targetY = closestHit ? closestHit.y : y + ray.dy;
+            ctx.lineTo(targetX, targetY);
         }
 
-        const targetX = closestHit ? closestHit.x : x + ray.dx;
-        const targetY = closestHit ? closestHit.y : y + ray.dy;
-        ctx.lineTo(targetX, targetY);
+        ctx.closePath();
+        ctx.fillStyle = fillColor;
+        ctx.fill();
+        if (strokeColor) {
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+        }
+    } catch (e) {
+        console.error("Error in drawTacticalFOV:", e);
+    } finally {
+        ctx.restore();
     }
-
-    ctx.closePath();
-    ctx.fillStyle = fillColor;
-    ctx.fill();
-    if (strokeColor) {
-        ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = 1.6; // 增宽描边厚度以加强可见度与科技质感
-        ctx.stroke();
-    }
-    ctx.restore();
 }
 
 function getVisionConePolygon(originX, originY, angle, fovAngle, maxDist, segments, rayCount) {
@@ -746,7 +817,7 @@ function drawYellowHighlightedOutlines(polyPoints) {
     ctx.restore();
 }
 
-function drawNightShadowMask() {
+function drawNightShadowMask(minScreenX, minScreenY, maxScreenX, maxScreenY) {
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
     if (levelId !== 'level3_bank' || player.hp <= 0 || level3TargetSecured) return;
 
@@ -759,8 +830,12 @@ function drawNightShadowMask() {
 
     ctx.save();
     ctx.beginPath();
-    // 全屏外框路径
-    ctx.rect(0, 0, width, height);
+    // 全屏外框路径 (用 viewport 坐标填满整个屏幕 canvas，无论分辨率与比例)
+    const sMinX = (typeof minScreenX === 'number') ? minScreenX : -500;
+    const sMaxX = (typeof maxScreenX === 'number') ? maxScreenX : 1800;
+    const sMinY = (typeof minScreenY === 'number') ? minScreenY : -500;
+    const sMaxY = (typeof maxScreenY === 'number') ? maxScreenY : 1200;
+    ctx.rect(sMinX, sMinY, sMaxX - sMinX, sMaxY - sMinY);
 
     // 抠出玩家视锥区域
     ctx.moveTo(playerPoly[0].x, playerPoly[0].y);
@@ -784,9 +859,9 @@ function getLevelBounds() {
     if (levelId === 'level3_bank') {
         return {
             minX: 24 + 14,
-            maxX: width - 24 - 14,
+            maxX: 1280 - 24 - 14,
             minY: 80 + 14,
-            maxY: height - 110 - 14
+            maxY: 720 - 110 - 14
         };
     } else if (levelId === 'level0_test') {
         const mapWidth = window.level0MapWidth || 3200;
@@ -808,19 +883,28 @@ function getLevelBounds() {
         };
     } else if (levelId === 'level7_lab') {
         const mapWidth = window.level7MapWidth || 3200;
-        const mapHeight = window.level7MapHeight || 720;
+        const mapHeight = window.level7MapHeight || 2400;
         return {
-            minX: 40 + 12,
-            maxX: mapWidth - 40 - 12,
-            minY: 40 + 12,
-            maxY: mapHeight - 40 - 12
+            minX: 20,
+            maxX: mapWidth - 20,
+            minY: 20,
+            maxY: mapHeight - 20
+        };
+    } else if (levelId === 'level8_test') {
+        const mapWidth = window.level8MapWidth || 3200;
+        const mapHeight = window.level8MapHeight || 2400;
+        return {
+            minX: 20,
+            maxX: mapWidth - 20,
+            minY: 20,
+            maxY: mapHeight - 20
         };
     } else if (levelId === 'level5_hotel') {
         return {
             minX: 40 + 12,
-            maxX: width - 40 - 12,
+            maxX: 1280 - 40 - 12,
             minY: 40 + 12,
-            maxY: height - 40 - 12
+            maxY: 720 - 40 - 12
         };
     } else if (levelId === 'level4_yacht') {
         const mapWidth = window.level4MapWidth || 2400;
@@ -833,9 +917,9 @@ function getLevelBounds() {
     } else { // level1_airport or level2_subway
         return {
             minX: 40 + 12,
-            maxX: width - 40 - 12,
+            maxX: 1280 - 40 - 12,
             minY: 40 + 12,
-            maxY: height - 40 - 12
+            maxY: 720 - 40 - 12
         };
     }
 }
@@ -877,6 +961,33 @@ function pointCircleRectCollision(cx, cy, r, rect) {
     return (dx * dx + dy * dy) <= (r * r);
 }
 
+// 2026-11-02：正圆精确碰撞（点到圆心距离）
+function pointCircleCircleCollision(px, py, pr, circle) {
+    const dx = px - circle.cx;
+    const dy = py - circle.cy;
+    const rr = circle.radius + pr;
+    return (dx * dx + dy * dy) <= (rr * rr);
+}
+
+// 2026-11-02：线段与正圆精确相交（二次方程求解）
+function lineIntersectsCircle(x1, y1, x2, y2, circle) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const fx = x1 - circle.cx, fy = y1 - circle.cy;
+    const a = dx * dx + dy * dy;
+    if (a === 0) {
+        // 退化为点
+        return (fx * fx + fy * fy) <= (circle.radius * circle.radius);
+    }
+    const b = 2 * (fx * dx + fy * dy);
+    const c = fx * fx + fy * fy - circle.radius * circle.radius;
+    let disc = b * b - 4 * a * c;
+    if (disc < 0) return false;
+    disc = Math.sqrt(disc);
+    const t1 = (-b - disc) / (2 * a);
+    const t2 = (-b + disc) / (2 * a);
+    return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1);
+}
+
 function pointCirclePolygonCollision(cx, cy, r, polygon) {
     if (!polygon || polygon.length < 3) return false;
     if (isPointInPolygon(cx, cy, polygon)) return true;
@@ -891,7 +1002,8 @@ function pointCirclePolygonCollision(cx, cy, r, polygon) {
 
 function arcToPolygon(arc) {
     const { cx, cy, radius, startAngle, endAngle, thickness = 14 } = arc;
-    const steps = Math.max(8, Math.ceil(Math.abs(endAngle - startAngle) / (Math.PI / 12)));
+    // 2026-11-02：提高精度到 5°/步（原 15°），避免可见棱角
+    const steps = Math.max(12, Math.ceil(Math.abs(endAngle - startAngle) / (Math.PI / 36)));
     const outerR = radius + thickness / 2;
     const innerR = Math.max(0, radius - thickness / 2);
     
@@ -935,6 +1047,10 @@ function ensureObstacleBBox(obs) {
         const { cx, cy, radius, thickness = 14 } = obs.arc;
         const r = radius + thickness;
         obs._bbox = { minX: cx - r, maxX: cx + r, minY: cy - r, maxY: cy + r, w: r * 2, h: r * 2 };
+    } else if (obs.circle) {
+        // 2026-11-02：正圆类型
+        const { cx, cy, radius } = obs.circle;
+        obs._bbox = { minX: cx - radius, maxX: cx + radius, minY: cy - radius, maxY: cy + radius, w: radius * 2, h: radius * 2 };
     } else {
         const x = obs.x || 0;
         const y = obs.y || 0;
@@ -963,6 +1079,8 @@ function checkObstacleCollision(x, y, radius = 16) {
         }
         if (obs.points && Array.isArray(obs.points)) {
             if (pointCirclePolygonCollision(x, y, radius, obs.points)) return true;
+        } else if (obs.circle) {
+            if (pointCircleCircleCollision(x, y, radius, obs.circle)) return true;
         } else if (obs.arc) {
             if (!obs._polyCache) obs._polyCache = arcToPolygon(obs.arc);
             if (pointCirclePolygonCollision(x, y, radius, obs._polyCache)) return true;
@@ -983,20 +1101,93 @@ function checkObstacleCollision(x, y, radius = 16) {
     return false;
 }
 
+function checkEnemyWallCollision(x, y, radius = 14) {
+    const bounds = getLevelBounds();
+    if (x - radius < bounds.minX || x + radius > bounds.maxX || y - radius < bounds.minY || y + radius > bounds.maxY) {
+        return true;
+    }
+    const minX = x - radius;
+    const maxX = x + radius;
+    const minY = y - radius;
+    const maxY = y + radius;
+
+    for (let obs of obstacles) {
+        if (!obs) continue;
+        if (obs.type === 'pool' || obs.type === 'lava' || obs.type === 'ice_lake' || obs.type === 'ice') continue;
+        // 敌人只受墙体阻挡：实体墙、矮墙、玻璃墙、岩石、石笋、巨石、祭坛、火山等结构墙体，完全无视一般家具掩体
+        const isMajorWall = obs.type === 'solid' || obs.type === 'wall' || obs.type === 'low_wall' || 
+                            obs.type === 'half_wall' || obs.type === 'glass' || obs.type === 'glass_wall' || 
+                            obs.type === 'volcano' || obs.type === 'rock' || obs.type === 'stalagmite' ||
+                            obs.type === 'monolith' || obs.type === 'altar' || obs.type === 'poly_wall' ||
+                            obs.type === 'obsidian';
+        if (!isMajorWall) continue;
+
+        const bb = ensureObstacleBBox(obs);
+        if (bb.maxX < minX || bb.minX > maxX || bb.maxY < minY || bb.minY > maxY) {
+            continue;
+        }
+        if (obs.points && Array.isArray(obs.points)) {
+            if (pointCirclePolygonCollision(x, y, radius, obs.points)) return true;
+        } else if (obs.circle) {
+            if (pointCircleCircleCollision(x, y, radius, obs.circle)) return true;
+        } else if (obs.arc) {
+            if (!obs._polyCache) obs._polyCache = arcToPolygon(obs.arc);
+            if (pointCirclePolygonCollision(x, y, radius, obs._polyCache)) return true;
+        } else if (obs.x !== undefined && obs.w !== undefined && obs.h !== undefined) {
+            if (pointCircleRectCollision(x, y, radius, obs)) return true;
+        }
+    }
+
+    if (typeof props !== 'undefined' && Array.isArray(props)) {
+        for (let p of props) {
+            if (!p || p.noCollision) continue;
+            // 仅未开启的重型防护门/安检门在物理上阻挡敌人，一般桌椅陈设全部无视
+            const isHeavyGate = p.type === 'heavy_auto_door' || p.type === 'security_gate';
+            if (!isHeavyGate) continue;
+            if (p.openProgress !== undefined && p.openProgress > 0.4) continue;
+
+            if (p.points && Array.isArray(p.points)) {
+                if (pointCirclePolygonCollision(x, y, radius, p.points)) return true;
+            } else if (p.w && p.h) {
+                if (x > p.x - radius && x < p.x + p.w + radius && y > p.y - radius && y < p.y + p.h + radius) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 function ensureEntityInBounds(e, radius = 16) {
     if (!e || (typeof e.hp === 'number' && e.hp <= 0)) return;
-    const bounds = getLevelBounds();
-    let clampedX = Math.max(bounds.minX + radius, Math.min(bounds.maxX - radius, e.x));
-    let clampedY = Math.max(bounds.minY + radius, Math.min(bounds.maxY - radius, e.y));
+    const isPlayer = (typeof player !== 'undefined' && e === player);
+    const checkColl = isPlayer ? checkObstacleCollision : checkEnemyWallCollision;
 
-    if (clampedX !== e.x || clampedY !== e.y || checkObstacleCollision(clampedX, clampedY, radius)) {
+    const bounds = getLevelBounds();
+    const effectiveRadius = Math.min(radius, 11.5);
+    let clampedX = Math.max(bounds.minX + effectiveRadius, Math.min(bounds.maxX - effectiveRadius, e.x));
+    let clampedY = Math.max(bounds.minY + effectiveRadius, Math.min(bounds.maxY - effectiveRadius, e.y));
+
+    if (clampedX !== e.x || clampedY !== e.y || checkColl(clampedX, clampedY, effectiveRadius)) {
         let found = false;
-        const searchAngles = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, -3 * Math.PI / 4, -Math.PI / 2, -Math.PI / 4];
-        for (let dist = 4; dist <= 64 && !found; dist += 10) {
+        const volcanoCenterX = 1496, volcanoCenterY = 460;
+        const vecAwayAng = Math.atan2(clampedY - volcanoCenterY, clampedX - volcanoCenterX);
+
+        const searchAngles = [
+            vecAwayAng,
+            vecAwayAng + Math.PI / 8, vecAwayAng - Math.PI / 8,
+            vecAwayAng + Math.PI / 4, vecAwayAng - Math.PI / 4,
+            vecAwayAng + Math.PI / 2, vecAwayAng - Math.PI / 2,
+            0, Math.PI / 8, Math.PI / 4, 3 * Math.PI / 8,
+            Math.PI / 2, 5 * Math.PI / 8, 3 * Math.PI / 4, 7 * Math.PI / 8,
+            Math.PI, -7 * Math.PI / 8, -3 * Math.PI / 4, -5 * Math.PI / 8,
+            -Math.PI / 2, -3 * Math.PI / 8, -Math.PI / 4, -Math.PI / 8
+        ];
+        for (let dist = 4; dist <= 220 && !found; dist += 6) {
             for (let angle of searchAngles) {
                 const tx = clampedX + Math.cos(angle) * dist;
                 const ty = clampedY + Math.sin(angle) * dist;
-                if (!checkObstacleCollision(tx, ty, radius)) {
+                if (!checkColl(tx, ty, effectiveRadius)) {
                     clampedX = tx;
                     clampedY = ty;
                     found = true;
@@ -1006,6 +1197,7 @@ function ensureEntityInBounds(e, radius = 16) {
         }
         e.x = clampedX;
         e.y = clampedY;
+        if (found) e.stuckFrames = 0;
     }
 }
 
@@ -1051,306 +1243,251 @@ function buildNavGraph() {
     }
 }
 
-// 局部几何切线拐角绕行 (Tangent Bug)：
-// 当敌人与目标之间被桌椅、立柱、安检门或墙体阻挡时，直接计算障碍物的外围拐点并绕行
-function getObstacleBypassWaypoint(fromX, fromY, toX, toY, radius = 18) {
-    if (canSee(fromX, fromY, toX, toY)) return null;
-    if (typeof checkLineObstacleIntersection !== 'function') return null;
-    const hitObs = checkLineObstacleIntersection(fromX, fromY, toX, toY);
-    if (!hitObs) return null;
+// 敌人直达物理可行走校验：敌人完全无视一般桌椅陈设障碍物，仅检测是否有实体墙/矮墙/玻璃墙/火山岩石阻挡
+function isDirectPathWalkableForEnemy(fromX, fromY, toX, toY, radius = 12) {
+    const dist = Math.hypot(toX - fromX, toY - fromY);
+    if (dist < 1) return true;
 
-    const corners = [];
-    const buffer = radius + 14; // 外扩安全身位，保证不被障碍物边缘刮擦卡住
-
-    if (hitObs.points && Array.isArray(hitObs.points)) {
-        for (let pt of hitObs.points) {
-            corners.push({ x: pt.x - buffer, y: pt.y - buffer });
-            corners.push({ x: pt.x + buffer, y: pt.y - buffer });
-            corners.push({ x: pt.x + buffer, y: pt.y + buffer });
-            corners.push({ x: pt.x - buffer, y: pt.y + buffer });
-        }
-    } else if (hitObs.x !== undefined && hitObs.w !== undefined && hitObs.h !== undefined) {
-        const rx = hitObs.x, ry = hitObs.y, rw = hitObs.w, rh = hitObs.h;
-        corners.push({ x: rx - buffer, y: ry - buffer });
-        corners.push({ x: rx + rw + buffer, y: ry - buffer });
-        corners.push({ x: rx + rw + buffer, y: ry + rh + buffer });
-        corners.push({ x: rx - buffer, y: ry + rh + buffer });
+    // 沿直线离散步进，仅做墙体检测 checkEnemyWallCollision
+    const step = 24;
+    const numSteps = Math.ceil(dist / step);
+    for (let i = 1; i < numSteps; i++) {
+        const t = i / numSteps;
+        const px = fromX + (toX - fromX) * t;
+        const py = fromY + (toY - fromY) * t;
+        if (checkEnemyWallCollision(px, py, radius)) return false;
     }
-
-    if (corners.length === 0) return null;
-
-    let bestCorner = null;
-    let minCost = Infinity;
-
-    for (let c of corners) {
-        if (checkObstacleCollision(c.x, c.y, radius)) continue;
-        if (!canSee(fromX, fromY, c.x, c.y)) continue;
-
-        const dStart = Math.hypot(c.x - fromX, c.y - fromY);
-        const dTarget = Math.hypot(toX - c.x, toY - c.y);
-        const cost = dStart + dTarget;
-        if (cost < minCost) {
-            minCost = cost;
-            bestCorner = c;
-        }
-    }
-
-    return bestCorner;
+    return !checkEnemyWallCollision(toX, toY, radius);
 }
 
-// 敌人导航目标锁定与路径承诺系统 (Path Commitment System):
-// 解决“在面临多障碍、出口很远时走一半回头、来回徘徊”的致命 Bug
+function isDirectPathWalkable(fromX, fromY, toX, toY, radius = 12) {
+    return isDirectPathWalkableForEnemy(fromX, fromY, toX, toY, radius);
+}
+
+let navGrid = null;
+let navGridCols = 0;
+let navGridRows = 0;
+let navGridCellSize = 40;
+
+function buildNavGrid(mw, mh) {
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
+    let mapW = mw || 1280;
+    let mapH = mh || 720;
+    if (levelId === 'level0_test') {
+        mapW = window.level0MapWidth || 3200;
+        mapH = window.level0MapHeight || 1000;
+    } else if (levelId === 'level4_yacht') {
+        mapW = window.level4MapWidth || 2400;
+        mapH = 700;
+    } else if (levelId === 'level6_train') {
+        mapW = window.level6MapWidth || 7200;
+        mapH = window.level6MapHeight || 240;
+    } else if (levelId === 'level7_lab' || levelId === 'level8_test') {
+        mapW = (levelId === 'level8_test' ? window.level8MapWidth : window.level7MapWidth) || 3200;
+        mapH = (levelId === 'level8_test' ? window.level8MapHeight : window.level7MapHeight) || 2400;
+    }
+    navGridCellSize = 40;
+    navGridCols = Math.ceil(mapW / navGridCellSize);
+    navGridRows = Math.ceil(mapH / navGridCellSize);
+    navGrid = Array.from({ length: navGridRows }, () => new Uint8Array(navGridCols));
+    const effectiveRadius = 13.5;
+    for (let r = 0; r < navGridRows; r++) {
+        const cy = r * navGridCellSize + navGridCellSize / 2;
+        for (let c = 0; c < navGridCols; c++) {
+            const cx = c * navGridCellSize + navGridCellSize / 2;
+            if (checkEnemyWallCollision(cx, cy, effectiveRadius)) {
+                navGrid[r][c] = 1;
+            }
+        }
+    }
+}
+
+// 基于静态墙体网格的轻量级寻路（仅绕墙体与门洞，无视一般桌椅）
+function findNextGridWaypoint(e, toX, toY) {
+    if (!navGrid || navGridRows === 0 || navGridCols === 0) {
+        buildNavGrid(typeof width !== 'undefined' ? width : 1280, typeof height !== 'undefined' ? height : 720);
+    }
+    if (!navGrid || navGridRows === 0 || navGridCols === 0) return { x: toX, y: toY };
+
+    const cSize = navGridCellSize;
+    let startC = Math.max(0, Math.min(navGridCols - 1, Math.floor(e.x / cSize)));
+    let startR = Math.max(0, Math.min(navGridRows - 1, Math.floor(e.y / cSize)));
+    let goalC = Math.max(0, Math.min(navGridCols - 1, Math.floor(toX / cSize)));
+    let goalR = Math.max(0, Math.min(navGridRows - 1, Math.floor(toY / cSize)));
+
+    // 起点落在墙体内时找邻近空闲格
+    if (navGrid[startR][startC] === 1) {
+        let found = false;
+        for (let rad = 1; rad <= 3 && !found; rad++) {
+            for (let dr = -rad; dr <= rad && !found; dr++) {
+                for (let dc = -rad; dc <= rad && !found; dc++) {
+                    const nr = startR + dr, nc = startC + dc;
+                    if (nr >= 0 && nr < navGridRows && nc >= 0 && nc < navGridCols && navGrid[nr][nc] === 0) {
+                        startR = nr; startC = nc; found = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 终点落在墙体内时找邻近空闲格
+    if (navGrid[goalR][goalC] === 1) {
+        let found = false;
+        for (let rad = 1; rad <= 3 && !found; rad++) {
+            for (let dr = -rad; dr <= rad && !found; dr++) {
+                for (let dc = -rad; dc <= rad && !found; dc++) {
+                    const nr = goalR + dr, nc = goalC + dc;
+                    if (nr >= 0 && nr < navGridRows && nc >= 0 && nc < navGridCols && navGrid[nr][nc] === 0) {
+                        goalR = nr; goalC = nc; found = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (startC === goalC && startR === goalR) return { x: toX, y: toY };
+
+    // 轻量级 BFS (Breadth-First Search)
+    const queue = [[startC, startR]];
+    const totalCells = navGridCols * navGridRows;
+    const visited = new Uint8Array(totalCells);
+    const parent = new Int32Array(totalCells).fill(-1);
+    
+    const startIndex = startR * navGridCols + startC;
+    visited[startIndex] = 1;
+
+    let found = false;
+    let iterations = 0;
+    const maxIterations = 800;
+    const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0], [1, 1], [-1, 1], [1, -1], [-1, -1]];
+
+    while (queue.length > 0 && iterations++ < maxIterations) {
+        const [cx, cy] = queue.shift();
+        if (cx === goalC && cy === goalR) {
+            found = true;
+            break;
+        }
+        for (let i = 0; i < 8; i++) {
+            const nx = cx + dirs[i][0];
+            const ny = cy + dirs[i][1];
+            if (nx >= 0 && nx < navGridCols && ny >= 0 && ny < navGridRows) {
+                const nIdx = ny * navGridCols + nx;
+                if (!visited[nIdx] && navGrid[ny][nx] === 0) {
+                    visited[nIdx] = 1;
+                    parent[nIdx] = cy * navGridCols + cx;
+                    queue.push([nx, ny]);
+                }
+            }
+        }
+    }
+
+    if (!found) return { x: toX, y: toY };
+
+    // 回溯路径
+    let curr = goalR * navGridCols + goalC;
+    const path = [];
+    let safety = 0;
+    while (curr !== -1 && safety++ < 300) {
+        const c = curr % navGridCols;
+        const r = Math.floor(curr / navGridCols);
+        path.push({ x: c * cSize + cSize / 2, y: r * cSize + cSize / 2 });
+        if (curr === startIndex) break;
+        curr = parent[curr];
+    }
+    path.reverse();
+
+    if (path.length <= 1) return { x: toX, y: toY };
+
+    // 视线拉直 (String-Pulling): 直接寻找路径上最远可直线行走的拐角航点，实现丝滑过门与绕墙
+    let targetWp = path[1];
+    for (let i = path.length - 1; i >= 1; i--) {
+        if (isDirectPathWalkableForEnemy(e.x, e.y, path[i].x, path[i].y, 12)) {
+            targetWp = path[i];
+            break;
+        }
+    }
+
+    return targetWp;
+}
+
+// 敌人导航目标决策系统 (大幅简化：无视桌椅障碍物，直奔目标，仅绕大墙)
 function updateEnemyNavTarget(e, targetX, targetY) {
-    // 1. 如果对实际目标 (玩家) 拥有清晰直视通道，直接锁定目标，无需中转航点
-    if (canSee(e.x, e.y, targetX, targetY)) {
+    // 1. 若敌人与目标之间没有大墙阻挡（即使有桌子、椅子、沙发、推车等一般障碍物），直接直冲目标！
+    if (isDirectPathWalkableForEnemy(e.x, e.y, targetX, targetY, 12)) {
         e.navLockTarget = null;
         e.navLockTimer = 0;
         return { x: targetX, y: targetY };
     }
 
-    // 2. 航点锁定承诺：敌人一旦选中出口/中转航点，锁定 85 帧 (约 1.4 秒)，绝对禁止走一半中途变轨回头！
-    if (e.navLockTarget && e.navLockTimer > 0) {
+    // 2. 隔墙时：通过网格路径寻找通向过道/门洞的出口航点
+    if (!e.navLockTarget || (e.navLockTimer || 0) <= 0 || (e.stuckFrames && e.stuckFrames > 12)) {
+        const gridWp = findNextGridWaypoint(e, targetX, targetY);
+        e.navLockTarget = gridWp;
+        e.navLockTimer = 30; // 稳定锁定航点 30 帧，防止频繁跳跃
+        return gridWp;
+    } else {
         e.navLockTimer--;
-        const distToLock = Math.hypot(e.navLockTarget.x - e.x, e.navLockTarget.y - e.y);
-        const isLockVisible = canSee(e.x, e.y, e.navLockTarget.x, e.navLockTarget.y);
-        
-        if (distToLock > 24 && isLockVisible && (e.stuckFrames || 0) < 25) {
-            return { x: e.navLockTarget.x, y: e.navLockTarget.y };
+        const d = Math.hypot(e.navLockTarget.x - e.x, e.navLockTarget.y - e.y);
+        if (d < 22) {
+            e.navLockTimer = 0;
         }
+        return e.navLockTarget;
     }
-
-    // 3. 重新检索并锁定新航点
-    const newWp = getNextNavWaypoint(e.x, e.y, targetX, targetY);
-    if (newWp) {
-        e.navLockTarget = { x: newWp.x, y: newWp.y };
-        e.navLockTimer = 85;
-        e.stuckFrames = 0;
-        return { x: newWp.x, y: newWp.y };
-    }
-
-    return { x: targetX, y: targetY };
 }
 
-function getNextNavWaypoint(fromX, fromY, toX, toY) {
-    // 1. 优先全局拓扑路径：跨房间/远距离导航时，优先获得过道/门洞航点
-    let nextGlobalWp = null;
-    if (typeof waypoints !== 'undefined' && waypoints && waypoints.length > 0) {
-        if (!navWaypointAdjacency || navWaypointAdjacency.length !== waypoints.length) {
-            buildNavGraph();
-        }
-        const n = waypoints.length;
-        if (n > 0) {
-            let startWpIdx = -1, minStartDist = Infinity;
-            for (let i = 0; i < n; i++) {
-                const d = Math.hypot(waypoints[i].x - fromX, waypoints[i].y - fromY);
-                if (canSee(fromX, fromY, waypoints[i].x, waypoints[i].y)) {
-                    if (d < minStartDist) { minStartDist = d; startWpIdx = i; }
-                }
-            }
-            if (startWpIdx === -1) {
-                minStartDist = Infinity;
-                for (let i = 0; i < n; i++) {
-                    const d = Math.hypot(waypoints[i].x - fromX, waypoints[i].y - fromY);
-                    if (d < minStartDist) { minStartDist = d; startWpIdx = i; }
-                }
-            }
-
-            let goalWpIdx = -1, minGoalDist = Infinity;
-            for (let i = 0; i < n; i++) {
-                const d = Math.hypot(waypoints[i].x - toX, waypoints[i].y - toY);
-                if (canSee(toX, toY, waypoints[i].x, waypoints[i].y)) {
-                    if (d < minGoalDist) { minGoalDist = d; goalWpIdx = i; }
-                }
-            }
-            if (goalWpIdx === -1) {
-                minGoalDist = Infinity;
-                for (let i = 0; i < n; i++) {
-                    const d = Math.hypot(waypoints[i].x - toX, waypoints[i].y - toY);
-                    if (d < minGoalDist) { minGoalDist = d; goalWpIdx = i; }
-                }
-            }
-
-            if (startWpIdx !== -1 && goalWpIdx !== -1) {
-                if (startWpIdx === goalWpIdx) {
-                    nextGlobalWp = waypoints[startWpIdx];
-                } else {
-                    const dist = new Array(n).fill(Infinity);
-                    const prev = new Array(n).fill(-1);
-                    const visited = new Array(n).fill(false);
-                    dist[startWpIdx] = 0;
-
-                    for (let count = 0; count < n; count++) {
-                        let u = -1, uDist = Infinity;
-                        for (let i = 0; i < n; i++) {
-                            if (!visited[i] && dist[i] < uDist) { uDist = dist[i]; u = i; }
-                        }
-                        if (u === -1 || u === goalWpIdx) break;
-                        visited[u] = true;
-
-                        const neighbors = (navWaypointAdjacency && navWaypointAdjacency[u]) ? navWaypointAdjacency[u] : [];
-                        for (let v of neighbors) {
-                            if (!visited[v]) {
-                                const edgeDist = Math.hypot(waypoints[u].x - waypoints[v].x, waypoints[u].y - waypoints[v].y);
-                                if (dist[u] + edgeDist < dist[v]) {
-                                    dist[v] = dist[u] + edgeDist;
-                                    prev[v] = u;
-                                }
-                            }
-                        }
-                    }
-
-                    let curr = goalWpIdx;
-                    const path = [];
-                    let safety = 0;
-                    while (curr !== -1 && safety++ < n + 2) {
-                        path.push(curr);
-                        if (curr === startWpIdx) break;
-                        curr = prev[curr];
-                    }
-
-                    if (path.length > 0 && path[path.length - 1] === startWpIdx) {
-                        path.reverse();
-                        const startWp = waypoints[path[0]];
-                        const dToStart = Math.hypot(startWp.x - fromX, startWp.y - fromY);
-                        
-                        if (path.length > 1) {
-                            const nextWp = waypoints[path[1]];
-                            if (canSee(fromX, fromY, nextWp.x, nextWp.y) && (dToStart < 35 || Math.hypot(nextWp.x - fromX, nextWp.y - fromY) < dToStart)) {
-                                nextGlobalWp = nextWp;
-                            }
-                        }
-                        if (!nextGlobalWp) {
-                            if (dToStart < 26 && path.length > 1) {
-                                nextGlobalWp = waypoints[path[1]];
-                            } else {
-                                nextGlobalWp = startWp;
-                            }
-                        }
-                    } else if (startWpIdx !== -1) {
-                        nextGlobalWp = waypoints[startWpIdx];
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. 前往全局出口航点时，如果直线路径上有桌椅/掩体等局部障碍，计算切线拐点绕过该局部桌椅
-    const destination = nextGlobalWp || { x: toX, y: toY };
-    const localBypass = getObstacleBypassWaypoint(fromX, fromY, destination.x, destination.y, 18);
-    if (localBypass) {
-        return localBypass;
-    }
-
-    if (nextGlobalWp) {
-        return nextGlobalWp;
-    }
-
-    // 3. 后备局部切线
-    return getObstacleBypassWaypoint(fromX, fromY, toX, toY, 18);
-}
-
-// 核心局部避障切线转向：防止敌人卡墙、沿墙死磕或抽搐
+// 核心局部避墙转向：敌人无视一般桌椅掩体，只检测大墙，平滑行进杜绝抽搐打摆
 function getObstacleSteeredHeading(e, targetX, targetY, speed, radius = 16) {
     const distToTarget = Math.hypot(targetX - e.x, targetY - e.y);
     if (distToTarget < 0.5) return e.angle;
     const desiredAngle = Math.atan2(targetY - e.y, targetX - e.x);
     
-    // 前方探针感知距离：严格限制不能超过到真实目标的距离，避免越过目标检测到其身后的墙体造成开阔地误判抽搐
-    const forwardStepDist = Math.min(Math.max(speed * 3.5, 20), distToTarget);
-    const fx = e.x + Math.cos(desiredAngle) * forwardStepDist;
-    const fy = e.y + Math.sin(desiredAngle) * forwardStepDist;
+    const effectiveRadius = Math.min(radius, 11.5);
+    const stepX = e.x + Math.cos(desiredAngle) * speed;
+    const stepY = e.y + Math.sin(desiredAngle) * speed;
     
-    // 直行完全畅通 (开阔地直行)
-    if (!checkObstacleCollision(fx, fy, radius)) {
-        if (e.navBiasTimer > 0) e.navBiasTimer--;
+    // 1. 直行一步不撞墙，直接沿期望方向前进，绝不转头抽搐！
+    if (!checkEnemyWallCollision(stepX, stepY, effectiveRadius)) {
         return desiredAngle;
     }
     
-    // 遇到障碍！稳定切向偏转（避免左右高频震荡抽搐）
-    if (!e.navBias || e.navBiasTimer <= 0) {
-        let leftClear = false, rightClear = false;
-        let leftAngle = 0, rightAngle = 0;
-        for (let a = 0.25; a <= 1.8; a += 0.25) {
-            const lx = e.x + Math.cos(desiredAngle + a) * forwardStepDist;
-            const ly = e.y + Math.sin(desiredAngle + a) * forwardStepDist;
-            if (!checkObstacleCollision(lx, ly, radius)) {
-                leftClear = true;
-                leftAngle = a;
-                break;
-            }
-        }
-        for (let a = 0.25; a <= 1.8; a += 0.25) {
-            const rx = e.x + Math.cos(desiredAngle - a) * forwardStepDist;
-            const ry = e.y + Math.sin(desiredAngle - a) * forwardStepDist;
-            if (!checkObstacleCollision(rx, ry, radius)) {
-                rightClear = true;
-                rightAngle = a;
-                break;
-            }
-        }
-        if (leftClear && rightClear) {
-            e.navBias = (leftAngle <= rightAngle) ? 1 : -1;
-        } else if (leftClear) {
-            e.navBias = 1;
-        } else if (rightClear) {
-            e.navBias = -1;
-        } else {
-            e.navBias = (Math.random() < 0.5 ? 1 : -1);
-        }
-        e.navBiasTimer = 45; // 持续保持该侧绕障偏置 45 帧，杜绝反复抽搐
-    } else {
-        e.navBiasTimer--;
-    }
-    
-    const bias = e.navBias;
-    const candidateOffsets = [
-        bias * 0.35, bias * 0.70, bias * 1.05, bias * 1.40, bias * 1.75, bias * 2.1,
-        -bias * 0.35, -bias * 0.70, -bias * 1.05, -bias * 1.40, -bias * 1.75
+    // 2. 贴墙时沿墙壁滑动偏航 (偏角从小到大平滑尝试，固定偏向杜绝左右摆头)
+    const bias = e.navBias || 1;
+    const testOffsets = [
+        bias * 0.35, bias * 0.7, bias * 1.05, bias * 1.4,
+        -bias * 0.35, -bias * 0.7, -bias * 1.05, -bias * 1.4
     ];
     
-    for (let offset of candidateOffsets) {
+    for (let offset of testOffsets) {
         const testAngle = desiredAngle + offset;
-        const tx = e.x + Math.cos(testAngle) * forwardStepDist;
-        const ty = e.y + Math.sin(testAngle) * forwardStepDist;
-        if (!checkObstacleCollision(tx, ty, radius)) {
-            const stepX = e.x + Math.cos(testAngle) * speed;
-            const stepY = e.y + Math.sin(testAngle) * speed;
-            if (!checkObstacleCollision(stepX, stepY, radius)) {
-                return testAngle;
-            }
-        }
-    }
-    
-    // 全向脱困扫描
-    for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
-        const testA = desiredAngle + bias * a;
-        const stepX = e.x + Math.cos(testA) * speed;
-        const stepY = e.y + Math.sin(testA) * speed;
-        if (!checkObstacleCollision(stepX, stepY, radius)) {
-            return testA;
+        const tx = e.x + Math.cos(testAngle) * speed;
+        const ty = e.y + Math.sin(testAngle) * speed;
+        if (!checkEnemyWallCollision(tx, ty, effectiveRadius)) {
+            return testAngle;
         }
     }
     
     return desiredAngle;
 }
 
-// 平滑物理移动与连续滑步
+// 平滑物理移动与沿墙滑步 (Smooth Physical Sliding & Anti-Stuck Along Walls)
 function tryMoveEnemy(e, moveX, moveY, radius = 16) {
     if (moveX === 0 && moveY === 0) return false;
+    const bodyTightRadius = 11.5;
+    const effectiveRadius = Math.min(radius, bodyTightRadius);
     const nextX = e.x + moveX;
     const nextY = e.y + moveY;
     
-    // 1. 直行一步
-    if (!checkObstacleCollision(nextX, nextY, radius)) {
+    // 1. 直行一步 (无视一般桌椅掩体，直接走过去；仅受大墙体阻挡)
+    if (!checkEnemyWallCollision(nextX, nextY, effectiveRadius)) {
         e.x = nextX;
         e.y = nextY;
         e.stuckFrames = 0;
         return true;
     }
     
-    // 2. 连续平滑沿墙滑动
-    const canMoveX = moveX !== 0 && !checkObstacleCollision(nextX, e.y, radius);
-    const canMoveY = moveY !== 0 && !checkObstacleCollision(e.x, nextY, radius);
+    // 2. 沿轴墙面连续滑动 (Axial sliding)
+    const canMoveX = moveX !== 0 && !checkEnemyWallCollision(nextX, e.y, effectiveRadius);
+    const canMoveY = moveY !== 0 && !checkEnemyWallCollision(e.x, nextY, effectiveRadius);
     
     if (canMoveX && canMoveY) {
         if (Math.abs(moveX) >= Math.abs(moveY)) {
@@ -1370,94 +1507,7 @@ function tryMoveEnemy(e, moveX, moveY, radius = 16) {
         return true;
     }
 
-    // 2.5 多边形与斜向切线平滑物理滑动 (Polygon Diagonal Edge Sliding)
-    // 解决 Level 0 多边形山石、石笋、熔岩边缘斜向卡墙抽搐问题
-    const bodyTightRadius = 12.5;
-    const diagX1 = moveX + moveY * 0.6, diagY1 = moveY + moveX * 0.6;
-    const diagX2 = moveX - moveY * 0.6, diagY2 = moveY - moveX * 0.6;
-    if (!checkObstacleCollision(e.x + diagX1, e.y + diagY1, bodyTightRadius)) {
-        e.x += diagX1;
-        e.y += diagY1;
-        e.stuckFrames = 0;
-        return true;
-    }
-    if (!checkObstacleCollision(e.x + diagX2, e.y + diagY2, bodyTightRadius)) {
-        e.x += diagX2;
-        e.y += diagY2;
-        e.stuckFrames = 0;
-        return true;
-    }
-
-    // 3. 缝隙与狭窄门洞挤压滑过 (Narrow Pass / Doorway Squeezing):
-    // 解决“缝隙较小/角度不对时卡住抽搐”问题：只要 12.5px 核心碰撞体可以通过，即可自动顺滑穿越门缝/桌缝！
-    if (radius > bodyTightRadius) {
-        if (!checkObstacleCollision(nextX, nextY, bodyTightRadius)) {
-            e.x = nextX;
-            e.y = nextY;
-            e.stuckFrames = 0;
-            return true;
-        }
-        const squeezeX = moveX !== 0 && !checkObstacleCollision(nextX, e.y, bodyTightRadius);
-        const squeezeY = moveY !== 0 && !checkObstacleCollision(e.x, nextY, bodyTightRadius);
-        if (squeezeX && squeezeY) {
-            e.x = nextX;
-            e.y = nextY;
-            e.stuckFrames = 0;
-            return true;
-        } else if (squeezeX) {
-            e.x = nextX;
-            e.stuckFrames = 0;
-            return true;
-        } else if (squeezeY) {
-            e.y = nextY;
-            e.stuckFrames = 0;
-            return true;
-        }
-    }
-
-    // 4. 稳定切向偏转（保持稳定 slideDir 30 帧偏置，禁止高频反转导致的抽搐）
-    const speed = Math.hypot(moveX, moveY);
-    const baseAngle = Math.atan2(moveY, moveX);
-    if (!e.slideDir || (e.slideDirTimer || 0) <= 0) {
-        e.slideDir = (e.navBias || (Math.random() < 0.5 ? 1 : -1));
-        e.slideDirTimer = 30;
-    } else {
-        e.slideDirTimer--;
-    }
-    
-    const offsets = [
-        e.slideDir * 0.35, e.slideDir * 0.7, e.slideDir * 1.05, e.slideDir * 1.4,
-        -e.slideDir * 0.35, -e.slideDir * 0.7, -e.slideDir * 1.05, -e.slideDir * 1.4
-    ];
-    for (let offset of offsets) {
-        const testA = baseAngle + offset;
-        const tx = e.x + Math.cos(testA) * speed;
-        const ty = e.y + Math.sin(testA) * speed;
-        if (!checkObstacleCollision(tx, ty, bodyTightRadius)) {
-            e.x = tx;
-            e.y = ty;
-            e.stuckFrames = 0;
-            return true;
-        }
-    }
-
-    // 5. 仅在深度卡死 (> 18 帧 / 约 0.3 秒) 时尝试反向或多向解困
     e.stuckFrames = (e.stuckFrames || 0) + 1;
-    if (e.stuckFrames > 18) {
-        e.slideDir = -e.slideDir;
-        e.slideDirTimer = 30;
-        for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
-            const ex = e.x + Math.cos(baseAngle + a) * speed;
-            const ey = e.y + Math.sin(baseAngle + a) * speed;
-            if (!checkObstacleCollision(ex, ey, bodyTightRadius)) {
-                e.x = ex;
-                e.y = ey;
-                e.stuckFrames = 0;
-                return true;
-            }
-        }
-    }
-    
     return false;
 }
 
@@ -1476,38 +1526,75 @@ function selectNextWaypoint(e) {
     
     const currInIce = typeof isEntityInIceLake === 'function' ? isEntityInIceLake(e.x, e.y) : false;
     
-    // 优先从视线畅通且距离不过近 (> 40px) 的候选航点中选择，避免在两相邻航点间高频反向抽搐
+    // 记录航点历史与上一次出站航点，彻底杜绝两航点间 A -> B -> A 循环乒乓徘徊
+    if (!e.visitedWaypoints) e.visitedWaypoints = [];
+    if (e.targetWaypoint !== undefined && !e.visitedWaypoints.includes(e.targetWaypoint)) {
+        e.visitedWaypoints.push(e.targetWaypoint);
+        if (e.visitedWaypoints.length > 3) e.visitedWaypoints.shift();
+    }
+    e.lastWaypoint = e.targetWaypoint;
+
     const visibleCandidates = [];
     const nonIceCandidates = [];
+    const freshCandidates = [];
     
     for (let i = 0; i < waypoints.length; i++) {
         if (i === e.targetWaypoint) continue;
         const d = Math.hypot(waypoints[i].x - e.x, waypoints[i].y - e.y);
-        if (d > 40 && canSee(e.x, e.y, waypoints[i].x, waypoints[i].y)) {
+        if (d > 28 && canSee(e.x, e.y, waypoints[i].x, waypoints[i].y)) {
             visibleCandidates.push(i);
-            if (typeof isEntityInIceLake === 'function' && !isEntityInIceLake(waypoints[i].x, waypoints[i].y)) {
+            const inIce = typeof isEntityInIceLake === 'function' && isEntityInIceLake(waypoints[i].x, waypoints[i].y);
+            if (!inIce) {
                 nonIceCandidates.push(i);
+            }
+            if (!e.visitedWaypoints.includes(i)) {
+                freshCandidates.push(i);
             }
         }
     }
     
-    // 若恶魔当前在冰湖中，优先寻找【冰湖外】的干燥陆地航点撤离冰湖；
-    // 若恶魔当前在陆地上，大幅降低前往冰湖内航点的概率 (优先选陆地航点)
-    if (nonIceCandidates.length > 0) {
-        if (currInIce || Math.random() < 0.88) {
-            e.targetWaypoint = nonIceCandidates[Math.floor(Math.random() * nonIceCandidates.length)];
-        } else if (visibleCandidates.length > 0) {
-            e.targetWaypoint = visibleCandidates[Math.floor(Math.random() * visibleCandidates.length)];
+    const freshNonIce = freshCandidates.filter(idx => typeof isEntityInIceLake !== 'function' || !isEntityInIceLake(waypoints[idx].x, waypoints[idx].y));
+    
+    // Level 0 分区域巡逻偏好：敌人优先在其驻防区域内进行常态巡逻
+    if (e.homeSector) {
+        const sectorCandidates = freshNonIce.filter(idx => waypoints[idx].sector === e.homeSector);
+        if (sectorCandidates.length > 0) {
+            e.targetWaypoint = sectorCandidates[Math.floor(Math.random() * sectorCandidates.length)];
+            e.waypointPauseTimer = 22;
+            e.stuckFrames = 0;
+            e.navBiasTimer = 0;
+            return;
         }
+        const anySectorCandidates = visibleCandidates.filter(idx => waypoints[idx].sector === e.homeSector);
+        if (anySectorCandidates.length > 0) {
+            e.targetWaypoint = anySectorCandidates[Math.floor(Math.random() * anySectorCandidates.length)];
+            e.waypointPauseTimer = 22;
+            e.stuckFrames = 0;
+            e.navBiasTimer = 0;
+            return;
+        }
+    }
+    
+    if (currInIce && nonIceCandidates.length > 0) {
+        const pool = freshNonIce.length > 0 ? freshNonIce : nonIceCandidates;
+        e.targetWaypoint = pool[Math.floor(Math.random() * pool.length)];
+    } else if (freshNonIce.length > 0) {
+        e.targetWaypoint = freshNonIce[Math.floor(Math.random() * freshNonIce.length)];
+    } else if (freshCandidates.length > 0) {
+        e.targetWaypoint = freshCandidates[Math.floor(Math.random() * freshCandidates.length)];
+    } else if (nonIceCandidates.length > 0) {
+        const notLast = nonIceCandidates.filter(idx => idx !== e.lastWaypoint);
+        const pool = notLast.length > 0 ? notLast : nonIceCandidates;
+        e.targetWaypoint = pool[Math.floor(Math.random() * pool.length)];
     } else if (visibleCandidates.length > 0) {
-        e.targetWaypoint = visibleCandidates[Math.floor(Math.random() * visibleCandidates.length)];
+        const notLast = visibleCandidates.filter(idx => idx !== e.lastWaypoint);
+        const pool = notLast.length > 0 ? notLast : visibleCandidates;
+        e.targetWaypoint = pool[Math.floor(Math.random() * pool.length)];
     } else {
-        // 无直视航点时，就近恢复到距离最近且有一定间隔的有效航点
-        let bestIdx = 0;
+        let bestIdx = (e.targetWaypoint + 1) % waypoints.length;
         let bestDist = Infinity;
         for (let i = 0; i < waypoints.length; i++) {
-            if (i === e.targetWaypoint && waypoints.length > 1) continue;
-            if (!currInIce && typeof isEntityInIceLake === 'function' && isEntityInIceLake(waypoints[i].x, waypoints[i].y) && Math.random() < 0.8) continue;
+            if (i === e.targetWaypoint || (i === e.lastWaypoint && waypoints.length > 2)) continue;
             const d = Math.hypot(waypoints[i].x - e.x, waypoints[i].y - e.y);
             if (d < bestDist && d > 20) {
                 bestDist = d;
@@ -1516,7 +1603,8 @@ function selectNextWaypoint(e) {
         }
         e.targetWaypoint = bestIdx;
     }
-    e.waypointPauseTimer = 16; // 到达航点后自然稍作停留 16 帧观察，禁止即刻掉头抽搐
+
+    e.waypointPauseTimer = 22; // 到达航点后自然稍作停留 22 帧观察，禁止即刻掉头抽搐
     e.stuckFrames = 0;
     e.navBiasTimer = 0;
 }
@@ -1566,6 +1654,8 @@ function checkLineObstacleIntersection(x1, y1, x2, y2) {
 
     for (let obs of obstacles) {
         if (obs.type === 'pool' || obs.type === 'lava' || obs.type === 'ice_lake' || obs.type === 'ice') continue;
+        // 2026-11-02：子弹只被三种墙体（实体墙/矮墙/玻璃）阻挡，其他障碍物直接越过
+        if (obs.type !== 'solid' && obs.type !== 'low_wall' && obs.type !== 'glass' && obs.type !== 'wall') continue;
         const bb = ensureObstacleBBox(obs);
         if (bb.maxX < minX || bb.minX > maxX || bb.maxY < minY || bb.minY > maxY) {
             continue;
@@ -1573,6 +1663,8 @@ function checkLineObstacleIntersection(x1, y1, x2, y2) {
         let hit = false;
         if (obs.points && Array.isArray(obs.points)) {
             hit = lineIntersectsPolygon(x1, y1, x2, y2, obs.points);
+        } else if (obs.circle) {
+            hit = lineIntersectsCircle(x1, y1, x2, y2, obs.circle);
         } else if (obs.arc) {
             if (!obs._polyCache) obs._polyCache = arcToPolygon(obs.arc);
             hit = lineIntersectsPolygon(x1, y1, x2, y2, obs._polyCache);
@@ -1590,20 +1682,20 @@ function checkLineObstacleIntersection(x1, y1, x2, y2) {
     if (typeof props !== 'undefined' && Array.isArray(props)) {
         for (let p of props) {
             if (p.noCollision || (p.openProgress !== undefined && p.openProgress > 0.4)) continue;
+            // 2026-11-02：子弹只被玻璃门阻挡，其他道具直接越过
+            const _isGlassProp = (p.type === 'glass' || p.type === 'auto_glass_door' || p.type === 'glass_sliding_door' || (p.label && (p.label.includes('AUTO GLASS DOOR') || p.label.includes('AUTO GATE') || p.label.includes('GLASS'))));
+            if (!_isGlassProp) continue;
             if (p.points && Array.isArray(p.points)) {
                 if (lineIntersectsPolygon(x1, y1, x2, y2, p.points)) {
                     const cx = p.x || (p.points[0] ? p.points[0].x : x1);
                     const cy = p.y || (p.points[0] ? p.points[0].y : y1);
                     checkDist(p, cx, cy);
                 }
-            } else {
-                const isGlassDoor = (p.type === 'auto_glass_door' || p.type === 'glass_sliding_door' || (p.label && (p.label.includes('AUTO GLASS DOOR') || p.label.includes('AUTO GATE'))));
-                const isHeavyDoor = (p.type === 'heavy_auto_door' || (p.label && (p.label.includes('HEAVY AUTO DOOR') || p.label.includes('FIREPROOF') || p.label.includes('HEAVY DOOR'))));
-                if (isGlassDoor || isHeavyDoor) {
-                    if (p.x + p.w < minX || p.x > maxX || p.y + p.h < minY || p.y > maxY) continue;
-                    if (lineIntersectsRect(x1, y1, x2, y2, p)) {
-                        checkDist({ ...p, type: isGlassDoor ? 'glass' : 'solid' }, p.x + p.w * 0.5, p.y + p.h * 0.5);
-                    }
+            } else if (p.w && p.h) {
+                if (p.x + p.w < minX || p.x > maxX || p.y + p.h < minY || p.y > maxY) continue;
+                if (lineIntersectsRect(x1, y1, x2, y2, p)) {
+                    const isGlassDoor = (p.type === 'auto_glass_door' || p.type === 'glass_sliding_door' || (p.label && (p.label.includes('AUTO GLASS DOOR') || p.label.includes('AUTO GATE'))));
+                    checkDist({ ...p, type: isGlassDoor ? 'glass' : (p.type || 'prop') }, p.x + p.w * 0.5, p.y + p.h * 0.5);
                 }
             }
         }
@@ -1698,20 +1790,76 @@ function isInFOV(target) {
     return canSee(player.x, player.y, target.x, target.y);
 }
 
-function triggerGlobalAlarm() {
+function triggerGlobalAlarm(sourceX, sourceY, customTextZh, customTextEn) {
     if (typeof soundManager !== 'undefined') {
         soundManager.playAlarm();
     }
     const banner = document.getElementById('alarm-banner');
+    const isEn = (window.__gameLang === 'en');
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+
+    // =========================================================================
+    // LEVEL 0: 分区域警报感知机制 (Sector-Based Infernal Alert System)
+    // 寒冰狱前哨 (x: 0~850) | 焦热熔岩走廊 (x: 850~1700) | 深渊祭坛要塞 (x: 1700~2300)
+    // =========================================================================
+    if (levelId === 'level0_test') {
+        if (!window.level0ActiveSectorAlarms) {
+            window.level0ActiveSectorAlarms = { 1: 0, 2: 0, 3: 0 };
+        }
+
+        const triggerX = (typeof sourceX === 'number' && !isNaN(sourceX)) ? sourceX : (typeof player !== 'undefined' && player ? player.x : 100);
+        let sectorId = 1;
+        let minAlertX = 0, maxAlertX = 880;
+
+        if (triggerX <= 850) {
+            sectorId = 1;
+            minAlertX = 0; maxAlertX = 880;
+        } else if (triggerX <= 1700) {
+            sectorId = 2;
+            minAlertX = 820; maxAlertX = 1750;
+        } else {
+            sectorId = 3;
+            minAlertX = 1680; maxAlertX = 2400;
+        }
+
+        window.level0ActiveSectorAlarms[sectorId] = 320; // 锁定 320 帧 (约 5.3 秒) 区域警戒
+
+        if (banner) {
+            if (customTextZh && customTextEn) {
+                banner.innerText = isEn ? customTextEn : customTextZh;
+            } else {
+                const activeZh = [];
+                const activeEn = [];
+                if (window.level0ActiveSectorAlarms[1] > 0) { activeZh.push("寒冰狱前哨"); activeEn.push("FROZEN COCYTUS"); }
+                if (window.level0ActiveSectorAlarms[2] > 0) { activeZh.push("焦热熔岩走廊"); activeEn.push("MOLTEN CORRIDOR"); }
+                if (window.level0ActiveSectorAlarms[3] > 0) { activeZh.push("深渊祭坛要塞"); activeEn.push("ABYSSAL SANCTUM"); }
+                
+                banner.innerText = isEn 
+                    ? `🚨 SECTOR ALARM: [${activeEn.join(' & ')}] ON HIGH ALERT! 🚨` 
+                    : `🚨 区域警报: [${activeZh.join(' & ')}] 进入戒备！🚨`;
+            }
+            banner.style.display = 'block';
+        }
+
+        // 仅惊醒该区域（及相邻过渡缓冲带内）的恶魔与三头犬，彻底杜绝全图 15+ 敌人一次性全涌上来掉帧！
+        if (typeof enemies !== 'undefined' && Array.isArray(enemies)) {
+            enemies.forEach(e => {
+                if (e.hp > 0 && e.spawnGraceTimer <= 0) {
+                    if (e.x >= minAlertX && e.x <= maxAlertX) {
+                        e.alert = true;
+                        e.alertCooldown = 320;
+                    }
+                }
+            });
+        }
+        return;
+    }
+
     if (banner) {
-        const isEn = (window.__gameLang === 'en');
-        const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
         if (levelId === 'level6_train') {
             banner.innerText = isEn ? "🚨 ARMORED TRAIN ALARM - FULL LOCKDOWN 🚨" : "🚨 装甲列车防务警报 - 全列全面封锁 🚨";
-        } else if (levelId === 'level7_lab') {
-            banner.innerText = isEn ? "🚨 APEX RESEARCH FACILITY ALARM - BIOHAZARD LOCKDOWN 🚨" : "🚨 顶石科研中心警报 - 生化危急封锁 🚨";
         } else if (levelId === 'level0_test') {
-            banner.innerText = isEn ? "🚨 INFERNAL ABYSS ALARM - HIGH ALERT 🚨" : "🚨 地狱深渊警报 - 全域戒备 🚨";
+            banner.innerText = isEn ? "🚨 INFERNAL SECTOR ALARM 🚨" : "🚨 地狱区域警戒 🚨";
         } else if (levelId === 'level5_hotel') {
             banner.innerText = isEn ? "🚨 HOTEL SECURITY ALARM - LOBBY ON HIGH ALERT 🚨" : "🚨 酒店安保警报 - 酒店大堂已进入全面戒备 🚨";
         } else if (levelId === 'level3_bank') {
@@ -1725,7 +1873,6 @@ function triggerGlobalAlarm() {
         }
         banner.style.display = 'block';
     }
-    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
     enemies.forEach(e => {
         if (e.hp > 0 && e.spawnGraceTimer <= 0) {
             e.alert = true;
@@ -1738,7 +1885,7 @@ function triggerGlobalAlarm() {
                     const flankDir = pdx > 0 ? 1 : -1;
                     const targetX = Math.max(60, Math.min(7140, player.x + flankDir * (340 + Math.random() * 160)));
                     const targetY = (targetX >= 2400 && targetX <= 3600) ? 180 : 120;
-                    if (!checkObstacleCollision(targetX, targetY, 16)) {
+                    if (!checkEnemyWallCollision(targetX, targetY, 16)) {
                         e.x = targetX;
                         e.y = targetY;
                         e.angle = Math.atan2(player.y - e.y, player.x - e.x);
@@ -1754,20 +1901,45 @@ function spawnWave() {
     enemies = [];
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
 
+    // 2026-11-02：过波重置警报状态——防止"触发警报后过波，在摄像头附近即便没被扫到也被围攻"
+    // 摄像头粘性（180帧）> 过波间隔（80帧），不重置会导致新波次敌人出生即被全图警报
+    if (typeof cameras !== 'undefined') {
+        cameras.forEach(cam => { cam.detecting = false; cam.cooldownTimer = 0; });
+    }
+    const alarmBanner = document.getElementById('alarm-banner');
+    if (alarmBanner) alarmBanner.style.display = 'none';
+    if (typeof window.level0ActiveSectorAlarms !== 'undefined') {
+        window.level0ActiveSectorAlarms = { 1: 0, 2: 0, 3: 0 };
+    }
+    if (typeof gateAlarmCooldown !== 'undefined') gateAlarmCooldown = 0;
+
     if (levelId === 'level0_test') {
         enemies = [];
         let nextEnemyId = 1;
+        const getSectorWaypoint = (sec) => {
+            if (typeof waypoints === 'undefined' || !waypoints || waypoints.length === 0) return 0;
+            const cands = [];
+            for (let i = 0; i < waypoints.length; i++) {
+                if (waypoints[i].sector === sec) cands.push(i);
+            }
+            if (cands.length > 0) return cands[Math.floor(Math.random() * cands.length)];
+            return Math.floor(Math.random() * waypoints.length);
+        };
 
-        // 循序渐进的波次设计 (Progressive Hell Spawning)
+        // 循序渐进且分区域均匀分布的波次设计 (Progressive & Zoned Hell Spawning)
+        // 区域 1: 寒冰狱前哨 (x < 850) | 区域 2: 焦热熔岩走廊 (850~1700) | 区域 3: 深渊祭坛要塞 (x > 1700)
         if (wave <= 1) {
-            // 第 1 波：6 只先锋恶魔，分布在冰湖与熔岩前哨，难度适中平缓
+            // 第 1 波：6 只先锋恶魔，每区 2 只，分布合理平稳
             const wave1Demons = [
-                { x: 500, y: 320, angle: Math.PI },      // 北侧冰湖崖边
-                { x: 620, y: 700, angle: 0 },            // 南侧冰湖深处
-                { x: 860, y: 480, angle: -Math.PI*0.5 }, // 熔岩桥头连接处
-                { x: 1080, y: 300, angle: Math.PI },     // 北熔岩池过道
-                { x: 1280, y: 680, angle: 0 },           // 南熔岩池通道
-                { x: 1520, y: 500, angle: 0 }            // 火山西侧高台
+                // Zone 1: 寒冰狱前哨 (2 只)
+                { x: 420, y: 320, angle: Math.PI, sector: 1 },
+                { x: 620, y: 680, angle: 0, sector: 1 },
+                // Zone 2: 焦热熔岩走廊 (2 只)
+                { x: 1060, y: 300, angle: Math.PI, sector: 2 },
+                { x: 1320, y: 680, angle: 0, sector: 2 },
+                // Zone 3: 深渊祭坛要塞 (2 只)
+                { x: 1820, y: 480, angle: Math.PI, sector: 3 },
+                { x: 2120, y: 500, angle: Math.PI, sector: 3 }
             ];
 
             wave1Demons.forEach((pos) => {
@@ -1776,6 +1948,7 @@ function spawnWave() {
                     x: pos.x,
                     y: pos.y,
                     angle: pos.angle,
+                    homeSector: pos.sector,
                     hp: 180,
                     maxHp: 180,
                     isDemon: true,
@@ -1786,7 +1959,7 @@ function spawnWave() {
                     alert: false,
                     alertCooldown: 0,
                     pendingDamage: 0,
-                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    targetWaypoint: getSectorWaypoint(pos.sector),
                     stuckFrames: 0,
                     spawnGraceTimer: 60,
                     confusedTimer: 0,
@@ -1799,18 +1972,21 @@ function spawnWave() {
                     deathAlpha: 1.0
                 });
             });
-            addLog("🔥 地狱关卡 [第 1 波] - 6 名地狱先锋恶魔 (DEMON) 已进驻深渊要塞，保持戒备！");
+            addLog("🔥 地狱关卡 [第 1 波] - 6 名地狱先锋恶魔已分区分片进驻要塞，保持戒备！");
             return;
         } else if (wave === 2) {
-            // 第 2 波：7 只恶魔 + 3 只地狱三头犬 (Cerberus)
+            // 第 2 波：7 只恶魔 + 3 只地狱三头犬 (分区域各 1 只三头犬巡逻)
             const wave2Demons = [
-                { x: 520, y: 720, angle: 0 },
-                { x: 740, y: 460, angle: -Math.PI*0.5 },
-                { x: 960, y: 260, angle: Math.PI },
-                { x: 1120, y: 700, angle: 0 },
-                { x: 1420, y: 340, angle: Math.PI*0.5 },
-                { x: 1650, y: 660, angle: -Math.PI*0.5 },
-                { x: 1900, y: 480, angle: Math.PI }
+                // Zone 1: 寒冰狱前哨 (2 只恶魔)
+                { x: 380, y: 320, angle: Math.PI, sector: 1 },
+                { x: 600, y: 660, angle: 0, sector: 1 },
+                // Zone 2: 焦热熔岩走廊 (3 只恶魔)
+                { x: 1040, y: 280, angle: Math.PI, sector: 2 },
+                { x: 1260, y: 700, angle: 0, sector: 2 },
+                { x: 1480, y: 380, angle: Math.PI * 0.5, sector: 2 },
+                // Zone 3: 深渊祭坛要塞 (2 只恶魔)
+                { x: 1780, y: 360, angle: Math.PI * 0.5, sector: 3 },
+                { x: 1820, y: 640, angle: -Math.PI * 0.5, sector: 3 }
             ];
 
             wave2Demons.forEach((pos) => {
@@ -1819,6 +1995,7 @@ function spawnWave() {
                     x: pos.x,
                     y: pos.y,
                     angle: pos.angle,
+                    homeSector: pos.sector,
                     hp: 180,
                     maxHp: 180,
                     isDemon: true,
@@ -1829,7 +2006,7 @@ function spawnWave() {
                     alert: false,
                     alertCooldown: 0,
                     pendingDamage: 0,
-                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    targetWaypoint: getSectorWaypoint(pos.sector),
                     stuckFrames: 0,
                     spawnGraceTimer: 60,
                     confusedTimer: 0,
@@ -1843,11 +2020,11 @@ function spawnWave() {
                 });
             });
 
-            // 刷新 3 只地狱三头犬 (Cerberus)
+            // 3 只地狱三头犬分别镇守 3 大区域
             const cerberusSpawns = [
-                { x: 920, y: 500, angle: 0 },           // 中央熔岩连桥
-                { x: 1350, y: 640, angle: -Math.PI*0.5 },// 火山南侧幽径
-                { x: 1720, y: 380, angle: Math.PI }     // 祭坛西门
+                { x: 760, y: 490, angle: 0, sector: 1 },           // 冰狱东隘口巡视犬
+                { x: 1360, y: 510, angle: 0, sector: 2 },          // 熔岩火山口巡视犬
+                { x: 2020, y: 500, angle: Math.PI, sector: 3 }     // 深渊祭坛守卫犬
             ];
 
             cerberusSpawns.forEach((pos) => {
@@ -1856,26 +2033,27 @@ function spawnWave() {
                     x: pos.x,
                     y: pos.y,
                     angle: pos.angle,
-                    hp: 260,
-                    maxHp: 260,
+                    homeSector: pos.sector,
+                    hp: 400,
+                    maxHp: 400,
                     isDemon: true,
                     isCerberus: true,
                     isObserver: false,
-                    shield: 160,
-                    maxShield: 160,
+                    shield: 220,
+                    maxShield: 220,
                     alert: false,
                     alertCooldown: 0,
                     pendingDamage: 0,
-                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    targetWaypoint: getSectorWaypoint(pos.sector),
                     stuckFrames: 0,
                     spawnGraceTimer: 70,
                     confusedTimer: 0,
                     confusedAngle: 0,
-                    patrolSpeed: 1.4,
+                    patrolSpeed: 1.8,
                     walkCycle: 0,
                     hitTimer: 0,
                     scanAngle: Math.random() * 6,
-                    shootCooldown: 999999, // 无远程手段
+                    shootCooldown: 999999,
                     deathAlpha: 1.0,
                     isPouncing: false,
                     pounceTimer: 0,
@@ -1886,19 +2064,22 @@ function spawnWave() {
                 });
             });
 
-            addLog("🔥 地狱关卡 [第 2 波] - 恶魔结界破损，3 只【地狱三头犬】(CERBERUS) 踏炎现身！小心其龙尾定身与扑咬！");
+            addLog("🔥 地狱关卡 [第 2 波] - 3 只双层高密护盾【地狱三头犬】(CERBERUS) 分别镇守冰狱、熔岩与祭坛三区！");
             return;
         } else {
-            // 第 3 波及后续：8 只恶魔 + 4 只地狱三头犬 (Cerberus)
+            // 第 3 波及后续：8 只恶魔 + 4 只地狱三头犬 (分区域有序部署)
             const wave3Demons = [
-                { x: 600, y: 320, angle: Math.PI },
-                { x: 820, y: 680, angle: 0 },
-                { x: 1100, y: 300, angle: Math.PI },
-                { x: 1320, y: 500, angle: 0 },
-                { x: 1550, y: 700, angle: -Math.PI*0.5 },
-                { x: 1800, y: 350, angle: Math.PI*0.5 },
-                { x: 2020, y: 500, angle: Math.PI },
-                { x: 2260, y: 500, angle: Math.PI }
+                // Zone 1 (2 只)
+                { x: 400, y: 300, angle: Math.PI, sector: 1 },
+                { x: 620, y: 680, angle: 0, sector: 1 },
+                // Zone 2 (3 只)
+                { x: 1020, y: 290, angle: Math.PI, sector: 2 },
+                { x: 1280, y: 720, angle: 0, sector: 2 },
+                { x: 1500, y: 380, angle: Math.PI * 0.5, sector: 2 },
+                // Zone 3 (3 只)
+                { x: 1780, y: 340, angle: Math.PI * 0.5, sector: 3 },
+                { x: 1800, y: 660, angle: -Math.PI * 0.5, sector: 3 },
+                { x: 2200, y: 500, angle: Math.PI, sector: 3 }
             ];
 
             wave3Demons.forEach((pos) => {
@@ -1907,6 +2088,7 @@ function spawnWave() {
                     x: pos.x,
                     y: pos.y,
                     angle: pos.angle,
+                    homeSector: pos.sector,
                     hp: 190,
                     maxHp: 190,
                     isDemon: true,
@@ -1917,7 +2099,7 @@ function spawnWave() {
                     alert: false,
                     alertCooldown: 0,
                     pendingDamage: 0,
-                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    targetWaypoint: getSectorWaypoint(pos.sector),
                     stuckFrames: 0,
                     spawnGraceTimer: 60,
                     confusedTimer: 0,
@@ -1931,12 +2113,12 @@ function spawnWave() {
                 });
             });
 
-            // 刷新 4 只地狱三头犬 (Cerberus)
+            // 4 只地狱三头犬 (Zone 1: 1 只, Zone 2: 1 只, Zone 3: 2 只守卫祭坛要塞)
             const wave3Cerberus = [
-                { x: 950, y: 480, angle: 0 },
-                { x: 1420, y: 340, angle: Math.PI*0.5 },
-                { x: 1780, y: 620, angle: -Math.PI*0.5 },
-                { x: 2150, y: 500, angle: Math.PI }
+                { x: 740, y: 480, angle: 0, sector: 1 },
+                { x: 1380, y: 520, angle: 0, sector: 2 },
+                { x: 1940, y: 440, angle: Math.PI, sector: 3 },
+                { x: 1980, y: 560, angle: Math.PI, sector: 3 }
             ];
 
             wave3Cerberus.forEach((pos) => {
@@ -1945,26 +2127,27 @@ function spawnWave() {
                     x: pos.x,
                     y: pos.y,
                     angle: pos.angle,
-                    hp: 260,
-                    maxHp: 260,
+                    homeSector: pos.sector,
+                    hp: 400,
+                    maxHp: 400,
                     isDemon: true,
                     isCerberus: true,
                     isObserver: false,
-                    shield: 160,
-                    maxShield: 160,
+                    shield: 220,
+                    maxShield: 220,
                     alert: false,
                     alertCooldown: 0,
                     pendingDamage: 0,
-                    targetWaypoint: Math.floor(Math.random() * (waypoints.length || 1)),
+                    targetWaypoint: getSectorWaypoint(pos.sector),
                     stuckFrames: 0,
                     spawnGraceTimer: 70,
                     confusedTimer: 0,
                     confusedAngle: 0,
-                    patrolSpeed: 1.4,
+                    patrolSpeed: 1.8,
                     walkCycle: 0,
                     hitTimer: 0,
                     scanAngle: Math.random() * 6,
-                    shootCooldown: 999999, // 无远程手段
+                    shootCooldown: 999999,
                     deathAlpha: 1.0,
                     isPouncing: false,
                     pounceTimer: 0,
@@ -1975,7 +2158,7 @@ function spawnWave() {
                 });
             });
 
-            addLog(`🔥 地狱关卡 [第 ${wave} 波·深渊决战] - 4 只狂暴【地狱三头犬】伴随恶魔禁卫发起狂暴总攻！`);
+            addLog(`🔥 地狱关卡 [第 ${wave} 波·深渊决战] - 4 只狂暴【地狱三头犬】与各区禁卫严阵以待！`);
             return;
         }
     }
@@ -2012,17 +2195,6 @@ function spawnWave() {
                 const carMaxX = (chosenCar + 1) * 1200 - 80;
                 spawnX = carMinX + Math.random() * (carMaxX - carMinX);
                 spawnY = 55 + Math.random() * 130;
-            } else if (levelId === 'level7_lab') {
-                // 科研中心关卡：按分区刷新安保人员与生化武装守卫
-                const sectorZones = [
-                    { minX: 280, maxX: 680, minY: 150, maxY: 580 },
-                    { minX: 850, maxX: 1350, minY: 150, maxY: 580 },
-                    { minX: 1520, maxX: 1950, minY: 150, maxY: 580 },
-                    { minX: 2450, maxX: 3050, minY: 150, maxY: 580 }
-                ];
-                const sec = sectorZones[Math.floor(Math.random() * sectorZones.length)];
-                spawnX = sec.minX + Math.random() * (sec.maxX - sec.minX);
-                spawnY = sec.minY + Math.random() * (sec.maxY - sec.minY);
             } else if (levelId === 'level3_bank') {
                 // 金库关卡：85%概率刷新在Zone A/B（0.20~0.68），15%概率刷新在Zone C走廊（0.68~0.74），严禁刷新在金库内部（>=0.75）
                 const vaultLeftBoundary = bounds.minX + (bounds.maxX - bounds.minX) * 0.74;
@@ -2043,7 +2215,7 @@ function spawnWave() {
                 spawnY = minSpawnY + Math.random() * (maxSpawnY - minSpawnY);
             }
 
-            if (Math.hypot(spawnX - player.x, spawnY - player.y) > 280 && !checkObstacleCollision(spawnX, spawnY, 20)) {
+            if (Math.hypot(spawnX - player.x, spawnY - player.y) > 280 && !checkEnemyWallCollision(spawnX, spawnY, 20)) {
                 valid = true;
             }
         }
@@ -2286,6 +2458,11 @@ function setupCanvasListeners() {
                     }
                 }
             }
+            // 2026-11-02：点击开火前先同步鼠标坐标，否则 getWorldMouse() 用的是过期位置
+            // （UAV 点敌人却炸到右下角的原因）
+            if (typeof mouse !== 'undefined' && typeof e !== 'undefined' && e.clientX !== undefined) {
+                mouse.x = e.clientX; mouse.y = e.clientY;
+            }
             shoot(); 
         }
     });
@@ -2293,8 +2470,12 @@ function setupCanvasListeners() {
     canvas.addEventListener('dblclick', e => {
         if (blindActive && blindZone) {
             const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
-            const tx = e.clientX + ((levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') ? (window.cameraX || 0) : 0);
-            const ty = e.clientY - ((levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') ? (window.cameraY || 0) : 0);
+            // 2026-11-02：修复缩放关卡瞬移坐标错误——之前直接用屏幕像素当世界坐标，
+            // 导致"往左点却向右瞬移"。现在统一用 getWorldMouse() 做正确的缩放变换+钳制
+            if (typeof mouse !== 'undefined') { mouse.x = e.clientX; mouse.y = e.clientY; }
+            const wm = (typeof getWorldMouse === 'function') ? getWorldMouse() : { x: e.clientX, y: e.clientY };
+            const tx = wm.x;
+            const ty = wm.y;
 
             if (inBlindZone(tx, ty)) {
                 // Prevent accidental teleport when clicking/shooting at enemies, cameras, gates, etc.
@@ -2332,7 +2513,10 @@ function setupCanvasListeners() {
                         maxYBound = (window.level6MapHeight || 240) - 25;
                     } else if (levelId === 'level7_lab') {
                         maxXBound = (window.level7MapWidth || 3200) - 25;
-                        maxYBound = (window.level7MapHeight || 720) - 25;
+                        maxYBound = (window.level7MapHeight || 2400) - 25;
+                    } else if (levelId === 'level8_test') {
+                        maxXBound = (window.level8MapWidth || 3200) - 25;
+                        maxYBound = (window.level8MapHeight || 2400) - 25;
                     }
                     for (let d = 8; d <= 120 && !found; d += 8) {
                         for (let angleIdx = 0; angleIdx < 24; angleIdx++) {
@@ -2368,8 +2552,9 @@ function setupCanvasListeners() {
         e.preventDefault();
         if (blindActive && blindZone && currentWeapon.id === WEAPONS.GRENADE.id) {
             const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
-            const tx = e.clientX + ((levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') ? (window.cameraX || 0) : 0);
-            const ty = e.clientY - ((levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') ? (window.cameraY || 0) : 0);
+            const isScrollLevel = (levelId === 'level4_yacht' || levelId === 'level0_test' || levelId === 'level6_train' || levelId === 'level7_lab' || levelId === 'level8_test');
+            const tx = e.clientX + (isScrollLevel ? (window.cameraX || 0) : 0);
+            const ty = e.clientY + (isScrollLevel ? (window.cameraY || 0) : 0);
             if (inBlindZone(tx, ty)) {
                 if (!checkObstacleCollision(tx, ty, 12)) {
                     traps.push({ x: tx, y: ty, pulseTimer: 0 });
@@ -2394,9 +2579,7 @@ function switchWeapon(wp) {
         player.demonPactTimer = 0;
     }
     addLog(`已装备: ${wp.name}`);
-    if (typeof soundManager !== 'undefined') {
-        soundManager.playReload();
-    }
+    // 2026-11-01：换武器不再播放提示音（playReload 移到第三关机密文件拾取处）
     if (typeof window.onWeaponChange === 'function' && wp) {
         window.onWeaponChange(wp.id);
     }
@@ -2423,6 +2606,7 @@ const WEAPON_NAME_MAP = {
 };
 
 const LEVEL_NAME_MAP = {
+    "地狱隐藏关": "Hell Hidden Level",
     "第 6 关 · 装甲特快列车": "Level 06 · Armored Express Train",
     "装甲特快列车": "Armored Express Train",
     "远东极寒装甲列车": "Polar Armored Express Train",
@@ -2448,6 +2632,30 @@ const LEVEL_NAME_MAP = {
 };
 
 const LOG_TRANSLATION_MAP = {
+    // 2026-11-02：补地狱关/Jammer 相关战斗日志英文翻译
+    "🔥 恶魔血祭完成！祭坛喷发！": "🔥 Demon Blood Rite complete! The altar erupts!",
+    "⚠️ 暗幕干扰者遭受攻击，紧急发动局部盲区并战术变轨闪避！": "⚠️ Jammer under attack! Deploying local blind zone and evasive maneuver!",
+    "⚠️ 诱敌深入！暗幕干扰者近身瞬间引爆局部盲区！": "⚠️ Lured in! Jammer detonates local blind zone at close range!",
+    "🔥 地狱关卡 [第 1 波] - 6 名地狱先锋恶魔已分区分片进驻要塞，保持戒备！": "🔥 Hell Level [Wave 1] - 6 Hell Vanguard Demons deployed across sectors. Stay alert!",
+    "🔥 地狱关卡 [第 2 波] - 3 只双层高密护盾【地狱三头犬】(CERBERUS) 分别镇守冰狱、熔岩与祭坛三区！": "🔥 Hell Level [Wave 2] - 3 double-shielded CERBERUS Hounds guard the Ice, Lava and Altar zones!",
+    "⚠️ 处于暗幕干扰者 (Jammer) 盲区压制内，战术盲区发生器被强力干扰无法启动！": "⚠️ Inside Jammer suppression zone! Blind Zone generator jammed and cannot activate!",
+    "🛡️ 暗幕者的半弧形护盾已碎裂！": "🛡️ Jammer's arc shield shattered!",
+    "⚡ 暗幕干扰者已被击毙，局部盲区消散！": "⚡ Jammer eliminated! Local blind zone dissipated!",
+    "💀 狂暴的地狱三头犬轰然解体！三首湮灭为黑曜石碎屑与熄灭火星！": "💀 The raging Cerberus collapses! Three heads dissolve into obsidian shards and dying embers!",
+    "🔥 召唤地狱熔岩降临法阵！": "🔥 Summoning Hell Lava Descent Array!",
+    "🔥 踏入深渊熔岩！护甲气化，生命值急剧遭熔断灼烧！": "🔥 Stepped into Abyss Lava! Armor vaporized, HP burning away!",
+    "⚠️ 误入暗幕干扰区，便携式盲区发生器遭受严重脉冲干扰，盲区被强行瓦解！": "⚠️ Entered Jammer interference zone! Portable blind generator disrupted, blind zone forcibly collapsed!",
+    "🔥 遭到了恶魔地狱火球的重爆灼烧！": "🔥 Hit by Demon's hellfire blast!",
+    "👻 误入幽冥噬魂魂灯冷光！深渊怨灵尖啸拉响全域警报！": "👻 Caught in Soul-Siphon Lantern's cold light! Abyss wraiths shriek, raising global alarm!",
+    "🗿 触发狱火石像鬼烈焰凝视！恶魔雕像吐出火柱全图戒备！": "🗿 Triggered Hellfire Gargoyle's gaze! Demon statues spew fire pillars, full alert!",
+    "👁️ 暴露在深渊全视魔眼之下！远古邪神之瞳怒视，全图恶魔狂暴！": "👁️ Exposed to the Abyss All-Seeing Eye! Ancient evil god glares, all demons enraged!",
+    "监控警报触发！所有区域戒备！": "Surveillance alarm triggered! All sectors on alert!",
+    "⚠️ 踏入地狱三头犬后方！遭受龙尾毒蛇骨刺反手暴抽，陷入熔火锁链定身 1 秒！": "⚠️ Behind the Cerberus! Tail serpent spines lash out, rooted by molten chains for 1s!",
+    "🐺 遭到地狱三头犬的三首利齿暴烈撕咬！": "🐺 Mauled by Cerberus's three savage maws!",
+    "🔥 遭到了地狱恶魔的烈焰利爪撕咬！": "🔥 Clawed by Hell Demon's blazing talons!",
+    "镰刀回收拾取: 医疗包 (+35 生命值)": "Scythe salvage: Medkit (+35 HP)",
+    "镰刀回收拾取: 补给 (+50 防弹衣 / +40 能量)": "Scythe salvage: Supply (+50 Armor / +40 Energy)",
+    "💾 镰刀回收获取绝密数据芯片！": "💾 Scythe salvage: Classified data chip acquired!",
     "游戏已暂停": "Game paused",
     "游戏已继续": "Game resumed",
     "战术行动已就绪": "Tactical operation ready",
@@ -2508,6 +2716,13 @@ function translateLogMessage(msg) {
             out = out.split(zh).join(en);
         }
         return out;
+    }
+
+    // 2026-11-02：地狱关动态波次消息
+    if (msg.includes("地狱关卡 [第") && msg.includes("波·深渊决战]")) {
+        const m = msg.match(/地狱关卡 \[第 (\d+) 波·深渊决战\]/);
+        const waveNum = m ? m[1] : "?";
+        return `🔥 Hell Level [Wave ${waveNum} · Abyss Showdown] - 4 raging CERBERUS Hounds and sector guards stand ready!`;
     }
 
     // Equipment & pickups
@@ -2857,12 +3072,40 @@ function closeBlindZone(reason = "COLLAPSED") {
     });
 }
 
-function triggerSoulSacrificeEffect(x, y) {
-    bloodSacrificeSeals.push({
+// 2026-11-02：地狱血祭完成 → 祭坛法阵（复用血祭印风格，粒子升天，红→青渐变）
+function triggerHellAltarSeal() {
+    hellAltarSeals.push({
+        x: 1920, y: 500, // 祭坛中心
+        radius: 12, maxRadius: 110,
+        timer: 0, duration: 240, // 4 秒
+        rotation: 0
+    });
+    // 初始爆发：红色粒子
+    for (let i = 0; i < 50; i++) {
+        const sx = 1920 + (Math.random() - 0.5) * 160;
+        const sy = 500 - Math.random() * 40;
+        particles.push({
+            x: sx, y: sy,
+            vx: (Math.random() - 0.5) * 2.5,
+            vy: -3 - Math.random() * 5,
+            life: 70 + Math.random() * 50,
+            maxLife: 120,
+            color: '#f43f5e',
+            size: 3 + Math.random() * 4,
+            isHellRiteParticle: true,
+            spawnY: sy
+        });
+    }
+}
+
+function triggerSoulSacrificeEffect(x, y, healHp = 0, healShield = 0) {    bloodSacrificeSeals.push({
         x: x, y: y,
         radius: 12, maxRadius: 82,
         timer: 0, duration: 150,
-        rotation: Math.random() * Math.PI * 2
+        rotation: Math.random() * Math.PI * 2,
+        // 2026-11-01 地狱改造：击杀回血挂在方阵生命周期内逐帧补给
+        healHp: healHp, healShield: healShield,
+        healedHp: 0, healedShield: 0
     });
 
     for (let k = 0; k < 24; k++) {
@@ -2889,6 +3132,16 @@ function applyDamageToEnemy(enemy, amount, isSoulSiphon = false) {
         amount = Math.round(amount * (1 + player.demonPactStacks * 0.15));
     }
     const wasAlive = enemy.hp > 0;
+
+    // 当敌军遭受伤害受击时，瞬间将其朝向锁定向玩家坐标，并给予掏枪硬直，彻底消除向原巡逻方向错位射击的 Bug
+    if (wasAlive && typeof player !== 'undefined' && player) {
+        enemy.alert = true;
+        enemy.alertCooldown = 300;
+        enemy.angle = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+        if ((enemy.shootCooldown || 0) < 14) {
+            enemy.shootCooldown = 14;
+        }
+    }
 
     // 暗幕干扰者遭受攻击时立即发动局部盲区并在烟雾内战术闪避变轨
     if (enemy.isJammer && wasAlive) {
@@ -2966,13 +3219,37 @@ function applyDamageToEnemy(enemy, amount, isSoulSiphon = false) {
         const isDemonDeath = enemy.isDemon || (currentLevelId === 'level0_test');
         const killedBySoulSiphon = isUsingSoulSiphon && (isSoulSiphon || enemy.killedBySoulSiphon);
         if (isDemonDeath && killedBySoulSiphon) {
-            triggerSoulSacrificeEffect(enemy.x, enemy.y);
+            // 2026-11-01 地狱改造：按敌人强度计算回血/甲（恶魔180→27血/36甲，三头犬400→60血/80甲）
+            const strength = enemy.maxHp || enemy.hp || 100;
+            const healHp = Math.round(strength * 0.15);
+            const healShield = Math.round(strength * 0.20);
+            // 2026-11-01 地狱任务：祭坛区域灵魂汲取击杀计数
+            const hs = window.__hellState;
+            if (hs && hs.active && currentLevelId === 'level0_test' && isInAltarArea(enemy.x, enemy.y)) {
+                hs.altarKills++;
+                if (enemy.isCerberus) hs.altarCerberusKills++;
+                if (typeof addLog !== 'undefined') {
+                    const isEn = (window.__gameLang === 'en');
+                    addLog(isEn
+                        ? `Altar sacrifice: ${hs.altarKills}/5 (Cerberus: ${hs.altarCerberusKills}/1)`
+                        : `祭坛献祭：${hs.altarKills}/5（地狱犬：${hs.altarCerberusKills}/1）`, '#fca5a5');
+                }
+                // 检查任务完成
+                if (checkHellQuestComplete()) {
+                    onHellQuestComplete();
+                }
+            }
+            triggerSoulSacrificeEffect(enemy.x, enemy.y, healHp, healShield);
         } else if (isDemonDeath) {
             createExplosion(enemy.x, enemy.y, 22, Math.random() < 0.6 ? '#ff2200' : '#f43f5e');
         } else {
             createExplosion(enemy.x, enemy.y, 18);
         }
         spawnDropItem(enemy.x, enemy.y);
+    }
+    // 打击感：命中火花 + 击杀顿帧（2026-11-01；伤害数字已移除）
+    if (typeof window.__juiceOnEnemyDamaged === 'function' && wasAlive) {
+        window.__juiceOnEnemyDamaged(enemy, amount, wasAlive, enemy.hp <= 0);
     }
 }
 
@@ -3153,6 +3430,9 @@ function shoot() {
         createExplosion(tx, ty, 30, isLvl0Uav ? '#ff2200' : '#00FF66');
         createExplosion(tx, ty, 25, '#FF5500');
         createExplosion(tx, ty, 15, '#FFFFFF');
+        // UAV 空袭是真爆炸，震屏+爆炸音同步（2026-11-02）
+        if (typeof window.__juiceAddTrauma === 'function') { window.__juiceAddTrauma(0.3); }
+        if (typeof soundManager !== 'undefined') { soundManager.playExplosion(); }
 
         for (let i = 0; i < 25; i++) {
             particles.push({
@@ -3186,7 +3466,8 @@ function shoot() {
         if (level0UavAmmo <= 0) {
             setTimeout(() => {
                 if (currentWeapon.id === WEAPONS.UAV.id) {
-                    if (unlockedWeapons.includes(WEAPONS.MACHINE_GUN.id)) {
+                    // 2026-11-02 修复：延时自动切换也要检查机枪弹药，否则会切到0弹药的机枪上导致无法开火
+                    if (unlockedWeapons.includes(WEAPONS.MACHINE_GUN.id) && level0MgAmmo > 0) {
                         switchWeapon(WEAPONS.MACHINE_GUN);
                     } else {
                         switchWeapon(WEAPONS.RIFLE);
@@ -3197,7 +3478,9 @@ function shoot() {
         return;
     }
     
-    if (cachedIsPlayerInPool && currentWeapon.type !== 'grenade') {
+    const activeWeapon = getEffectiveWeapon(currentWeapon);
+
+    if (cachedIsPlayerInPool && activeWeapon.type !== 'grenade') {
         if (typeof addLog === 'function') {
             addLog("泳池内无法使用枪械");
         }
@@ -3205,52 +3488,58 @@ function shoot() {
     }
     
     if (typeof soundManager !== 'undefined') {
-        soundManager.playShoot(currentWeapon.type);
+        soundManager.playShoot(activeWeapon.type);
     }
     
-    shootCooldownTimer = currentWeapon.cooldown;
-    if (currentWeapon.type !== 'grenade') {
+    shootCooldownTimer = activeWeapon.cooldown;
+    if (activeWeapon.type !== 'grenade') {
         player.flashTimer = 3;
     } else {
         player.flashTimer = 0;
     }
     const worldMouse = getWorldMouse();
     const angle = Math.atan2(worldMouse.y - player.y, worldMouse.x - player.x);
+    // 打击感：枪口火光（2026-11-01）
+    if (typeof window.__juiceMuzzle === 'function' && activeWeapon.type !== 'grenade') {
+        window.__juiceMuzzle(player.x, player.y, angle);
+    }
 
-    if (currentWeapon.type === 'grenade') {
+    const isLevel0 = (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test');
+
+    if (activeWeapon.type === 'grenade') {
         grenades.push({
             x: player.x, y: player.y,
             targetX: worldMouse.x, targetY: worldMouse.y,
             startX: player.x, startY: player.y,
-            vx: Math.cos(angle) * currentWeapon.speed,
-            vy: Math.sin(angle) * currentWeapon.speed,
+            vx: Math.cos(angle) * activeWeapon.speed,
+            vy: Math.sin(angle) * activeWeapon.speed,
             traveled: 0,
-            maxDist: Math.min(currentWeapon.range, Math.hypot(worldMouse.x - player.x, worldMouse.y - player.y)),
-            damage: currentWeapon.damage,
-            blastRadius: currentWeapon.blastRadius
+            maxDist: Math.min(activeWeapon.range, Math.hypot(worldMouse.x - player.x, worldMouse.y - player.y)),
+            damage: activeWeapon.damage,
+            blastRadius: activeWeapon.blastRadius
         });
-    } else if (currentWeapon.type === 'rune_scythe') {
+    } else if (activeWeapon.type === 'rune_scythe') {
         const scytheDist = Math.hypot(worldMouse.x - player.x, worldMouse.y - player.y);
-        const maxD = Math.min(currentWeapon.range, Math.max(160, scytheDist));
+        const maxD = Math.min(activeWeapon.range, Math.max(160, scytheDist));
         runeScythes.push({
             x: player.x + Math.cos(angle) * 20,
             y: player.y + Math.sin(angle) * 20,
             startX: player.x,
             startY: player.y,
-            vx: Math.cos(angle) * currentWeapon.speed,
-            vy: Math.sin(angle) * currentWeapon.speed,
+            vx: Math.cos(angle) * activeWeapon.speed,
+            vy: Math.sin(angle) * activeWeapon.speed,
             traveled: 0,
             maxDist: maxD,
             returning: false,
-            damage: currentWeapon.damage,
-            radius: currentWeapon.radius,
+            damage: activeWeapon.damage,
+            radius: activeWeapon.radius,
             spinAngle: angle,
             hitEnemies: new Set(),
-            speed: currentWeapon.speed
+            speed: activeWeapon.speed
         });
-    } else if (currentWeapon.type === 'lava_circle') {
+    } else if (activeWeapon.type === 'lava_circle') {
         const dist = Math.hypot(worldMouse.x - player.x, worldMouse.y - player.y);
-        const maxR = currentWeapon.range;
+        const maxR = activeWeapon.range;
         let tx = worldMouse.x;
         let ty = worldMouse.y;
         if (dist > maxR) {
@@ -3260,18 +3549,18 @@ function shoot() {
         lavaCircles.push({
             x: tx,
             y: ty,
-            radius: currentWeapon.radius || 95,
+            radius: activeWeapon.radius || 95,
             timer: 0,
             delay: 15,
             duration: 90,
-            damage: currentWeapon.damage,
+            damage: activeWeapon.damage,
             tickTimer: 0
         });
         if (typeof addLog === 'function') {
             addLog("🔥 召唤地狱熔岩降临法阵！");
         }
-    } else if (currentWeapon.type === 'soul_siphon') {
-        const speed = currentWeapon.speed || 22;
+    } else if (activeWeapon.type === 'soul_siphon') {
+        const speed = activeWeapon.speed || 22;
         playerBullets.push({
             x: player.x + Math.cos(angle) * 20,
             y: player.y + Math.sin(angle) * 20,
@@ -3279,42 +3568,69 @@ function shoot() {
             vx: Math.cos(angle) * speed,
             vy: Math.sin(angle) * speed,
             traveled: 0,
-            maxRange: currentWeapon.range,
-            damage: currentWeapon.damage,
-            radius: currentWeapon.radius,
+            maxRange: activeWeapon.range,
+            damage: activeWeapon.damage,
+            radius: activeWeapon.radius,
             penetrations: 1,
             isSoulSiphon: true
         });
-    } else if (currentWeapon.type === 'shotgun') {
-        const pellets = currentWeapon.pellets || 12;
-        const spread = currentWeapon.spread || 0.28;
-        for (let i = 0; i < pellets; i++) {
-            const pelletAngle = angle + (Math.random() - 0.5) * spread;
-            const speedVar = currentWeapon.speed * (0.88 + Math.random() * 0.24);
-            playerBullets.push({
-                x: player.x + Math.cos(angle) * 24,
-                y: player.y + Math.sin(angle) * 24,
-                startX: player.x, startY: player.y,
-                vx: Math.cos(pelletAngle) * speedVar,
-                vy: Math.sin(pelletAngle) * speedVar,
-                traveled: 0,
-                maxRange: currentWeapon.range * (0.85 + Math.random() * 0.3),
-                damage: currentWeapon.damage,
-                radius: currentWeapon.radius,
-                penetrations: 1
-            });
+    } else if (activeWeapon.type === 'shotgun') {
+        if (isLevel0) {
+            // Level 0 专有：重型三管猎枪并列发射 3 发大口径高膛压重弹头 (Parallel 3-Slug Barrage)
+            const perpX = -Math.sin(angle);
+            const perpY = Math.cos(angle);
+            const lateralOffsets = [-9, 0, 9];
+            const angleOffsets = [-0.02, 0, 0.02];
+            for (let i = 0; i < 3; i++) {
+                const off = lateralOffsets[i];
+                const slugAngle = angle + angleOffsets[i];
+                playerBullets.push({
+                    x: player.x + Math.cos(angle) * 24 + perpX * off,
+                    y: player.y + Math.sin(angle) * 24 + perpY * off,
+                    startX: player.x, startY: player.y,
+                    vx: Math.cos(slugAngle) * activeWeapon.speed,
+                    vy: Math.sin(slugAngle) * activeWeapon.speed,
+                    traveled: 0,
+                    maxRange: activeWeapon.range,
+                    damage: activeWeapon.damage,
+                    baseDamage: activeWeapon.damage,
+                    radius: activeWeapon.radius || 5.6,
+                    penetrations: 1,
+                    isShotgunSlug: true
+                });
+            }
+        } else {
+            // 正式关卡 (Level 1~7)：恢复 100% 原始 12 弹丸散射模式
+            const pellets = activeWeapon.pellets || 12;
+            const spread = activeWeapon.spread || 0.28;
+            for (let i = 0; i < pellets; i++) {
+                const pelletAngle = angle + (Math.random() - 0.5) * spread;
+                const speedVar = activeWeapon.speed * (0.88 + Math.random() * 0.24);
+                playerBullets.push({
+                    x: player.x + Math.cos(angle) * 24,
+                    y: player.y + Math.sin(angle) * 24,
+                    startX: player.x, startY: player.y,
+                    vx: Math.cos(pelletAngle) * speedVar,
+                    vy: Math.sin(pelletAngle) * speedVar,
+                    traveled: 0,
+                    maxRange: activeWeapon.range * (0.85 + Math.random() * 0.3),
+                    damage: activeWeapon.damage,
+                    radius: activeWeapon.radius || 3.8,
+                    penetrations: 1
+                });
+            }
         }
     } else {
         playerBullets.push({
             x: player.x + Math.cos(angle) * 24,
             y: player.y + Math.sin(angle) * 24,
             startX: player.x, startY: player.y,
-            vx: Math.cos(angle) * currentWeapon.speed,
-            vy: Math.sin(angle) * currentWeapon.speed,
+            vx: Math.cos(angle) * activeWeapon.speed,
+            vy: Math.sin(angle) * activeWeapon.speed,
             traveled: 0,
-            maxRange: currentWeapon.range,
-            damage: currentWeapon.damage,
-            radius: currentWeapon.radius,
+            maxRange: activeWeapon.range,
+            damage: activeWeapon.damage,
+            radius: activeWeapon.radius,
             penetrations: 1
         });
     }
@@ -3329,16 +3645,38 @@ function shoot() {
 }
 
 function triggerGameOver(success) {
-    if (!success) {
-        const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
-        if (currentLevelId === 'level0_test') {
-            player.hp = player.maxHp;
-            player.shield = player.maxShield;
-            return;
-        }
-    }
-    isGameOver = true;
+    const currentLevelId = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+    const isHell = (currentLevelId === 'level0_test');
     const isEn = (window.__gameLang === 'en');
+
+    // 2026-11-01 地狱隐藏关：普通关死亡 → 保存进度并跳转地狱
+    if (!success && !isHell) {
+        window.__hellState = {
+            fromLevelIndex: (window.levelManager && window.levelManager.currentIndex) || 1,
+            fromWave: (typeof wave !== 'undefined') ? wave : 1,
+            fromKillCount: (typeof killCount !== 'undefined') ? killCount : 0,
+            wavesSurvived: 0,
+            altarKills: 0,
+            altarCerberusKills: 0,
+            active: false
+        };
+        // 跳转到地狱（L0）
+        if (typeof window.__launchGameLevel === 'function') {
+            window.__launchGameLevel(0);
+        }
+        // 弹出地狱选择
+        showHellChoicePopup();
+        return;
+    }
+
+    // 2026-11-01 地狱隐藏关：地狱中死亡 → 战绩弹窗，确认后回主菜单（2026-11-02 改）
+    if (!success && isHell) {
+        isGameOver = true;
+        showHellDeathPopup();
+        return;
+    }
+
+    isGameOver = true;
     const screen = document.getElementById('game-over-screen');
     const title = document.getElementById('over-title');
     const desc = document.getElementById('over-desc');
@@ -3358,37 +3696,346 @@ function triggerGameOver(success) {
     }
 }
 
-function resetGame() {
-    wave = 1; killCount = 0; isGameOver = false; isPaused = false; gateAlarmCooldown = 0;
-    waveTransitionTimer = 0;
-    window.__levelObjectiveAchieved = false;
-    window.__endlessMode = false;
-    const curLvlReset = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
-    if (curLvlReset === 'level0_test') {
-        unlockedWeapons = [WEAPONS.TRIPLE_SHOTGUN.id, WEAPONS.RUNE_SCYTHE.id, WEAPONS.LAVA_CIRCLE.id, WEAPONS.SOUL_SIPHON.id];
-        currentWeapon = WEAPONS.TRIPLE_SHOTGUN;
-    } else {
-        unlockedWeapons = [WEAPONS.RIFLE.id];
-        currentWeapon = WEAPONS.RIFLE;
-    }
-    window.currentWeapon = currentWeapon;
-    if (typeof window.onWeaponChange === 'function' && currentWeapon) {
-        window.onWeaponChange(currentWeapon.id);
-    }
-    const banner = document.getElementById('alarm-banner');
-    if (banner) banner.style.display = 'none';
-    player.hp = 100; player.shield = 100; player.shieldActive = true; player.lastHitTimer = 0;
-    
-    blindActive = false; blindEnergy = MAX_BLIND_ENERGY; blindZone = null;
-    playerBullets.length = 0; grenades.length = 0; enemyBullets.length = 0; particles.length = 0; dropItems.length = 0; traps.length = 0;
-    runeScythes.length = 0; lavaCircles.length = 0; bloodSacrificeSeals.length = 0;
-    const screen = document.getElementById('game-over-screen');
-    if (screen) screen.style.display = 'none';
+// =====================================================================
+// 地狱隐藏关系统 (2026-11-01)
+// =====================================================================
 
-    initMapLayout();
-    spawnWave();
-    if (typeof window.onGamePauseChange === 'function') {
-        window.onGamePauseChange(isPaused);
+// 祭坛区域判定：中心 (1920, 500)，半径 150
+function isInAltarArea(x, y) {
+    return Math.hypot(x - 1920, y - 500) < 150;
+}
+
+// 显示地狱选择弹窗（2026-11-01：样式对齐游戏 UI：tactical mono + 辉光 + 描边按钮）
+function showHellChoicePopup() {
+    const isEn = (window.__gameLang === 'en');
+    const old = document.getElementById('hell-choice-popup');
+    if (old) old.remove();
+
+    const TACTICAL_FONT = `ui-monospace, "SF Mono", Monaco, Menlo, Consolas, "Cascadia Code", "Roboto Mono", "PingFang SC", "Microsoft YaHei", "Source Han Sans CN", monospace`;
+
+    const popup = document.createElement('div');
+    popup.id = 'hell-choice-popup';
+    popup.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(2, 6, 4, 0.94); z-index: 10000;
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        font-family: ${TACTICAL_FONT};
+        text-shadow: 0 0 10px #FF3344;
+    `;
+    popup.innerHTML = `
+        <h1 style="font-size: 42px; margin-bottom: 10px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
+            ${isEn ? 'YOU HAVE DIED' : '你 已 阵 亡'}
+        </h1>
+        <p style="font-size: 16px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
+            ${isEn ? '// SOUL DRAGGED INTO THE ABYSS' : '// 灵魂坠入地狱深渊'}
+        </p>
+        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #FF3344;">
+            ${isEn
+                ? 'Survive <span style="color:#FF3344">3 WAVES</span>, then in the <span style="color:#FF3344">ALTAR AREA</span> use <span style="color:#FF3344">SOUL SIPHON</span> to slay <span style="color:#FF3344">5 ENEMIES</span> (incl. <span style="color:#FF3344">1 CERBERUS</span>)<br>to return with wave progress intact.<br>Leave now, or die in Hell — back to main menu.'
+                : '在地狱坚持 <span style="color:#FF3344">3 波</span>，并在<span style="color:#FF3344">祭坛区域</span>使用<span style="color:#FF3344">灵魂汲取</span>击杀 <span style="color:#FF3344">5 名敌人</span><br>（至少包括 <span style="color:#FF3344">1 只地狱犬</span>），即可返回原关卡并保留波次。<br>若选择离开，或在地狱中死亡，将直接返回主菜单。'}
+        </p>
+        <div style="display: flex; gap: 24px;">
+            <button id="hell-stay-btn" style="
+                background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
+                padding: 12px 30px; font-weight: bold; cursor: pointer;
+                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
+                box-shadow: 0 0 15px rgba(255,51,68,0.3); transition: all 0.2s;
+            ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
+            <button id="hell-leave-btn" style="
+                background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
+                padding: 12px 30px; font-weight: bold; cursor: pointer;
+                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
+                box-shadow: 0 0 15px rgba(0,255,102,0.3); transition: all 0.2s;
+            ">${isEn ? '[ LEAVE ]' : '[ 离 开 ]'}</button>
+        </div>
+    `;
+    document.body.appendChild(popup);
+
+    // hover 效果对齐 .restart-btn
+    const stayBtn = document.getElementById('hell-stay-btn');
+    const leaveBtn = document.getElementById('hell-leave-btn');
+    stayBtn.onmouseenter = () => { stayBtn.style.background = '#FF3344'; stayBtn.style.color = '#000'; };
+    stayBtn.onmouseleave = () => { stayBtn.style.background = 'rgba(255, 51, 68, 0.15)'; stayBtn.style.color = '#FF3344'; };
+    leaveBtn.onmouseenter = () => { leaveBtn.style.background = '#00FF66'; leaveBtn.style.color = '#000'; };
+    leaveBtn.onmouseleave = () => { leaveBtn.style.background = 'rgba(0, 255, 102, 0.15)'; leaveBtn.style.color = '#00FF66'; };
+
+    stayBtn.onclick = () => {
+        popup.remove();
+        if (window.__hellState) window.__hellState.active = true;
+    };
+    leaveBtn.onclick = () => {
+        popup.remove();
+        window.__hellState = null;
+        if (typeof window.__returnToMenu === 'function') {
+            window.__returnToMenu();
+        }
+    };
+}
+
+// 2026-11-02：地狱血祭完成弹窗（三选一：留在地狱 / 返回原关卡 / 主菜单）
+function showHellCompletePopup() {
+    const isEn = (window.__gameLang === 'en');
+    const old = document.getElementById('hell-complete-popup');
+    if (old) old.remove();
+
+    const TACTICAL_FONT = `ui-monospace, "SF Mono", Monaco, Menlo, Consolas, "Cascadia Code", "Roboto Mono", "PingFang SC", "Microsoft YaHei", "Source Han Sans CN", monospace`;
+
+    const hs = window.__hellState || {};
+    const waves = hs.wavesSurvived || 0;
+    const kills = (typeof killCount !== 'undefined') ? killCount : 0;
+
+    const popup = document.createElement('div');
+    popup.id = 'hell-complete-popup';
+    popup.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(2, 6, 4, 0.94); z-index: 10000;
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        font-family: ${TACTICAL_FONT};
+        text-shadow: 0 0 10px #22d3ee;
+    `;
+    popup.innerHTML = `
+        <h1 style="font-size: 42px; margin-bottom: 10px; color: #22d3ee; letter-spacing: 4px; font-weight: bold;">
+            ${isEn ? 'DEMON BLOOD RITE COMPLETE' : '恶 魔 血 祭 已 完 成'}
+        </h1>
+        <p style="font-size: 16px; color: #a5f3fc; margin-bottom: 12px; letter-spacing: 2px;">
+            ${isEn ? '// THE ALTAR HAS DRUNK ITS FILL' : '// 祭坛已饮饱鲜血'}
+        </p>
+        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #22d3ee;">
+            ${isEn
+                ? `Survived <span style="color:#22d3ee">${waves} WAVES</span> · Altar sacrifices complete.<br>Total Kills: <span style="color:#22d3ee">${kills}</span><br>Choose your path:`
+                : `在地狱坚持 <span style="color:#22d3ee">${waves} 波</span> · 祭坛献祭完成。<br>总击杀数：<span style="color:#22d3ee">${kills}</span><br>选择你的去路：`}
+        </p>
+        <div style="display: flex; gap: 24px;">
+            <button id="hellc-stay-btn" style="
+                background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
+                padding: 12px 30px; font-weight: bold; cursor: pointer;
+                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
+                box-shadow: 0 0 15px rgba(34,211,238,0.3); transition: all 0.2s;
+            ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
+            <button id="hellc-return-btn" style="
+                background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
+                padding: 12px 30px; font-weight: bold; cursor: pointer;
+                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
+                box-shadow: 0 0 15px rgba(34,211,238,0.3); transition: all 0.2s;
+            ">${isEn ? '[ RETURN TO ORIGIN ]' : '[ 返回原关卡 ]'}</button>
+            <button id="hellc-menu-btn" style="
+                background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
+                padding: 12px 30px; font-weight: bold; cursor: pointer;
+                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
+                box-shadow: 0 0 15px rgba(0,255,102,0.3); transition: all 0.2s;
+            ">${isEn ? '[ MAIN MENU ]' : '[ 主菜单 ]'}</button>
+        </div>
+    `;
+    document.body.appendChild(popup);
+
+    const stayBtn = document.getElementById('hellc-stay-btn');
+    const returnBtn = document.getElementById('hellc-return-btn');
+    const menuBtn = document.getElementById('hellc-menu-btn');
+    stayBtn.onmouseenter = () => { stayBtn.style.background = '#22d3ee'; stayBtn.style.color = '#000'; };
+    stayBtn.onmouseleave = () => { stayBtn.style.background = 'rgba(34, 211, 238, 0.15)'; stayBtn.style.color = '#22d3ee'; };
+    returnBtn.onmouseenter = () => { returnBtn.style.background = '#22d3ee'; returnBtn.style.color = '#000'; };
+    returnBtn.onmouseleave = () => { returnBtn.style.background = 'rgba(34, 211, 238, 0.15)'; returnBtn.style.color = '#22d3ee'; };
+    menuBtn.onmouseenter = () => { menuBtn.style.background = '#00FF66'; menuBtn.style.color = '#000'; };
+    menuBtn.onmouseleave = () => { menuBtn.style.background = 'rgba(0, 255, 102, 0.15)'; menuBtn.style.color = '#00FF66'; };
+
+    stayBtn.onclick = () => {
+        popup.remove();
+        // 留在地狱：继续游玩（任务已完成，不再重复触发）
+        if (window.__hellState) window.__hellState.questDone = true;
+    };
+    returnBtn.onclick = () => {
+        popup.remove();
+        returnFromHell();
+    };
+    menuBtn.onclick = () => {
+        popup.remove();
+        window.__hellState = null;
+        if (typeof window.__returnToMenu === 'function') {
+            window.__returnToMenu();
+        }
+    };
+}
+
+// 2026-11-02：地狱中死亡 → 战绩弹窗（波次/击杀），确认后回主菜单
+function showHellDeathPopup() {
+    const isEn = (window.__gameLang === 'en');
+    const old = document.getElementById('hell-death-popup');
+    if (old) old.remove();
+
+    const TACTICAL_FONT = `ui-monospace, "SF Mono", Monaco, Menlo, Consolas, "Cascadia Code", "Roboto Mono", "PingFang SC", "Microsoft YaHei", "Source Han Sans CN", monospace`;
+
+    const hs = window.__hellState || {};
+    const waves = hs.wavesSurvived || 0;
+    const altarK = hs.altarKills || 0;
+    const cerbK = hs.altarCerberusKills || 0;
+    const kills = (typeof killCount !== 'undefined') ? killCount : 0;
+
+    const popup = document.createElement('div');
+    popup.id = 'hell-death-popup';
+    popup.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(2, 6, 4, 0.94); z-index: 10000;
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        font-family: ${TACTICAL_FONT};
+        text-shadow: 0 0 10px #FF3344;
+    `;
+    popup.innerHTML = `
+        <h1 style="font-size: 42px; margin-bottom: 10px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
+            ${isEn ? 'YOU DIED IN HELL' : '葬 身 地 狱'}
+        </h1>
+        <p style="font-size: 16px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
+            ${isEn ? '// THE ABYSS CLAIMS ANOTHER SOUL' : '// 深渊又吞噬了一个灵魂'}
+        </p>
+        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #FF3344;">
+            ${isEn
+                ? `Waves survived: <span style="color:#FF3344">${waves}</span><br>Altar sacrifices: <span style="color:#FF3344">${altarK}/5</span> (Cerberus: <span style="color:#FF3344">${cerbK}/1</span>)<br>Total Kills: <span style="color:#FF3344">${kills}</span>`
+                : `坚持波次：<span style="color:#FF3344">${waves}</span><br>祭坛献祭：<span style="color:#FF3344">${altarK}/5</span>（地狱犬：<span style="color:#FF3344">${cerbK}/1</span>）<br>总击杀数：<span style="color:#FF3344">${kills}</span>`}
+        </p>
+        <div style="display: flex; gap: 24px;">
+            <button id="helld-menu-btn" style="
+                background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
+                padding: 12px 30px; font-weight: bold; cursor: pointer;
+                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
+                box-shadow: 0 0 15px rgba(255,51,68,0.3); transition: all 0.2s;
+            ">${isEn ? '[ RETURN TO MENU ]' : '[ 返回主菜单 ]'}</button>
+        </div>
+    `;
+    document.body.appendChild(popup);
+
+    const menuBtn = document.getElementById('helld-menu-btn');
+    menuBtn.onmouseenter = () => { menuBtn.style.background = '#FF3344'; menuBtn.style.color = '#000'; };
+    menuBtn.onmouseleave = () => { menuBtn.style.background = 'rgba(255, 51, 68, 0.15)'; menuBtn.style.color = '#FF3344'; };
+    menuBtn.onclick = () => {
+        popup.remove();
+        window.__hellState = null;
+        isGameOver = true;
+        if (typeof window.__returnToMenu === 'function') {
+            window.__returnToMenu();
+        }
+    };
+}
+
+// 检查地狱任务是否完成
+function checkHellQuestComplete() {
+    const hs = window.__hellState;
+    if (!hs || !hs.active || hs.questDone) return false;
+    return hs.wavesSurvived >= 3 && hs.altarKills >= 5 && hs.altarCerberusKills >= 1;
+}
+
+// 2026-11-02：任务完成 → 祭坛法阵动画 + 完成弹窗（三选一），不再自动返回
+function onHellQuestComplete() {
+    const isEn = (window.__gameLang === 'en');
+    if (typeof addLog !== 'undefined') {
+        addLog(isEn ? '🔥 Demon Blood Rite complete! The altar erupts!' : '🔥 恶魔血祭完成！祭坛喷发！', '#22d3ee');
+    }
+    triggerHellAltarSeal();
+    if (window.__hellState) window.__hellState.questDone = true;
+    // 法阵动画播 1.5 秒后弹选择窗
+    setTimeout(() => showHellCompletePopup(), 1500);
+}
+
+// 从地狱返回原关卡（保留波次）
+function returnFromHell() {
+    const hs = window.__hellState;
+    if (!hs) return;
+
+    const fromIndex = hs.fromLevelIndex;
+    const fromWave = hs.fromWave;
+
+    window.__hellState = null;
+
+    // 启动原关卡
+    if (typeof window.__launchGameLevel === 'function') {
+        window.__launchGameLevel(fromIndex);
+    }
+
+    // 恢复波次（launchGameLevel 会 resetGame 把 wave 设为 1，需要覆盖）
+    setTimeout(() => {
+        if (typeof wave !== 'undefined' && fromWave > 1) {
+            wave = fromWave;
+            // 重新生成对应波次的敌人
+            if (typeof spawnWave === 'function') {
+                // 清空当前敌人
+                if (typeof enemies !== 'undefined') enemies.length = 0;
+                spawnWave();
+            }
+        }
+        // 提示玩家
+        if (typeof addLog !== 'undefined') {
+            const isEn = (window.__gameLang === 'en');
+            addLog(isEn ? 'Returned from Hell. Wave progress restored.' : '已从地狱返回，波次进度已保留。', '#00FF66');
+        }
+    }, 100);
+}
+
+function snapCameraToPlayer() {
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    const currentW = (typeof width !== 'undefined' && width > 0) ? width : (window.innerWidth || 1280);
+    const currentH = (typeof height !== 'undefined' && height > 0) ? height : (window.innerHeight || 720);
+    const px = (typeof player !== 'undefined' && typeof player.x === 'number') ? player.x : 80;
+    const py = (typeof player !== 'undefined' && typeof player.y === 'number') ? player.y : 500;
+
+    let mapWidth = 1280;
+    let mapHeight = 720;
+    if (levelId === 'level0_test') { mapWidth = window.level0MapWidth || 3200; mapHeight = window.level0MapHeight || 1000; }
+    else if (levelId === 'level6_train') { mapWidth = window.level6MapWidth || 7200; mapHeight = window.level6MapHeight || 240; }
+    else if (levelId === 'level4_yacht') { mapWidth = window.level4MapWidth || 2400; mapHeight = 720; }
+    else if (levelId === 'level7_lab') { mapWidth = window.level7MapWidth || 3200; mapHeight = window.level7MapHeight || 2400; }
+    else if (levelId === 'level8_test') { mapWidth = window.level8MapWidth || 3200; mapHeight = window.level8MapHeight || 2400; }
+
+    if (mapWidth > currentW) {
+        const targetCamX = px - currentW / 2;
+        window.cameraX = Math.max(0, Math.min(mapWidth - currentW, targetCamX));
+    } else {
+        window.cameraX = -(currentW - mapWidth) / 2;
+    }
+
+    if (mapHeight > currentH) {
+        const targetCamY = py - currentH / 2;
+        window.cameraY = Math.max(0, Math.min(mapHeight - currentH, targetCamY));
+    } else {
+        window.cameraY = -(currentH - mapHeight) / 2;
+    }
+}
+window.snapCameraToPlayer = snapCameraToPlayer;
+
+function resetGame() {
+    window.__isResettingGame = true;
+    try {
+        wave = 1; killCount = 0; isGameOver = false; isPaused = false; gateAlarmCooldown = 0;
+        waveTransitionTimer = 0;
+        window.__levelObjectiveAchieved = false;
+        window.__endlessMode = false;
+        const curLvlReset = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+        if (curLvlReset === 'level0_test') {
+            unlockedWeapons = [WEAPONS.TRIPLE_SHOTGUN.id, WEAPONS.RUNE_SCYTHE.id, WEAPONS.LAVA_CIRCLE.id, WEAPONS.SOUL_SIPHON.id];
+            currentWeapon = WEAPONS.TRIPLE_SHOTGUN;
+        } else {
+            unlockedWeapons = [WEAPONS.RIFLE.id];
+            currentWeapon = WEAPONS.RIFLE;
+        }
+        window.currentWeapon = currentWeapon;
+        if (typeof window.onWeaponChange === 'function' && currentWeapon) {
+            window.onWeaponChange(currentWeapon.id);
+        }
+        const banner = document.getElementById('alarm-banner');
+        if (banner) banner.style.display = 'none';
+        player.hp = 100; player.shield = 100; player.shieldActive = true; player.lastHitTimer = 0;
+        
+        blindActive = false; blindEnergy = MAX_BLIND_ENERGY; blindZone = null;
+        playerBullets.length = 0; grenades.length = 0; enemyBullets.length = 0; particles.length = 0; dropItems.length = 0; traps.length = 0;
+        runeScythes.length = 0; lavaCircles.length = 0; bloodSacrificeSeals.length = 0; hellAltarSeals.length = 0;
+        const screen = document.getElementById('game-over-screen');
+        if (screen) screen.style.display = 'none';
+
+        initMapLayout();
+        spawnWave();
+        snapCameraToPlayer();
+        if (typeof window.onGamePauseChange === 'function') {
+            window.onGamePauseChange(isPaused);
+        }
+    } finally {
+        window.__isResettingGame = false;
     }
 }
 
@@ -3403,14 +4050,14 @@ function update() {
     if (typeof soundManager !== 'undefined') {
         soundManager.updateGameState(isGameOver, isPaused);
     }
-    if (isGameOver || isPaused) return;
+    const ff = (typeof window.__frameFactor === 'number' && !isNaN(window.__frameFactor)) ? window.__frameFactor : 1.0;
     if (shootCooldownTimer > 0) {
-        shootCooldownTimer--;
+        shootCooldownTimer -= ff;
     } else if (isMouseDown) {
         shoot();
     }
-    if (gateAlarmCooldown > 0) gateAlarmCooldown--;
-    if (typeof laserAlarmCooldown !== 'undefined' && laserAlarmCooldown > 0) laserAlarmCooldown--;
+    if (gateAlarmCooldown > 0) gateAlarmCooldown -= ff;
+    if (typeof laserAlarmCooldown !== 'undefined' && laserAlarmCooldown > 0) laserAlarmCooldown -= ff;
 
     const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
 
@@ -3422,19 +4069,42 @@ function update() {
                 
                 let nearEntity = false;
                 
-                // Detect player proximity to door bounding box
-                const pdx = Math.max(p.x - player.x, 0, player.x - (p.x + p.w));
-                const pdy = Math.max(p.y - player.y, 0, player.y - (p.y + p.h));
-                const distPlayer = Math.hypot(pdx, pdy);
-                if (distPlayer < 65) {
+                // Detect proximity to door (supports line segment and center coordinates for angled/slanted doors)
+                let distPlayer = 9999;
+                if (p.topX !== undefined && p.botX !== undefined && p.topY !== undefined && p.botY !== undefined) {
+                    const segDx = p.botX - p.topX, segDy = p.botY - p.topY;
+                    const segLenSq = segDx * segDx + segDy * segDy;
+                    let t = Math.max(0, Math.min(1, ((player.x - p.topX) * segDx + (player.y - p.topY) * segDy) / (segLenSq || 1)));
+                    distPlayer = Math.hypot(player.x - (p.topX + t * segDx), player.y - (p.topY + t * segDy));
+                } else if (p.cx !== undefined && p.cy !== undefined) {
+                    distPlayer = Math.hypot(player.x - p.cx, player.y - p.cy);
+                } else {
+                    const pdx = Math.max(p.x - player.x, 0, player.x - (p.x + p.w));
+                    const pdy = Math.max(p.y - player.y, 0, player.y - (p.y + p.h));
+                    distPlayer = Math.hypot(pdx, pdy);
+                }
+
+                const triggerDist = (p.topX !== undefined) ? 80 : (p.cx !== undefined ? 115 : 65);
+                if (distPlayer < triggerDist) {
                     nearEntity = true;
                 } else if (typeof enemies !== 'undefined' && Array.isArray(enemies)) {
                     // Detect alive enemies proximity
                     for (let e of enemies) {
                         if (e.hp > 0) {
-                            const edx = Math.max(p.x - e.x, 0, e.x - (p.x + p.w));
-                            const edy = Math.max(p.y - e.y, 0, e.y - (p.y + p.h));
-                            if (Math.hypot(edx, edy) < 60) {
+                            let distE = 9999;
+                            if (p.topX !== undefined && p.botX !== undefined && p.topY !== undefined && p.botY !== undefined) {
+                                const segDx = p.botX - p.topX, segDy = p.botY - p.topY;
+                                const segLenSq = segDx * segDx + segDy * segDy;
+                                let t = Math.max(0, Math.min(1, ((e.x - p.topX) * segDx + (e.y - p.topY) * segDy) / (segLenSq || 1)));
+                                distE = Math.hypot(e.x - (p.topX + t * segDx), e.y - (p.topY + t * segDy));
+                            } else if (p.cx !== undefined && p.cy !== undefined) {
+                                distE = Math.hypot(e.x - p.cx, e.y - p.cy);
+                            } else {
+                                const edx = Math.max(p.x - e.x, 0, e.x - (p.x + p.w));
+                                const edy = Math.max(p.y - e.y, 0, e.y - (p.y + p.h));
+                                distE = Math.hypot(edx, edy);
+                            }
+                            if (distE < triggerDist) {
                                 nearEntity = true;
                                 break;
                             }
@@ -3631,7 +4301,7 @@ function update() {
                 vx: (Math.random() - 0.5) * 1.5,
                 vy: (Math.random() - 0.5) * 1.5,
                 life: 14, maxLife: 14,
-                color: Math.random() < 0.5 ? '#10b981' : '#9333ea'
+                color: Math.random() < 0.6 ? '#dc2626' : (Math.random() < 0.85 ? '#ea580c' : '#f97316')
             });
         }
     } else {
@@ -3647,8 +4317,8 @@ function update() {
         if (typeof soundManager !== 'undefined') soundManager.playFootstep();
     } else { player.walkCycle = 0; }
     
-    let nextX = player.x + dx * moveSpeed;
-    let nextY = player.y + dy * moveSpeed;
+    let nextX = player.x + dx * moveSpeed * ff;
+    let nextY = player.y + dy * moveSpeed * ff;
 
     let collidesWithLaser = false;
     if (currentLevelId === 'level3_bank' && typeof lasers !== 'undefined') {
@@ -3668,8 +4338,14 @@ function update() {
     }
 
     if (!checkObstacleCollision(nextX, nextY, 18) && !collidesWithLaser) {
-        let maxXVal = width - 20;
-        let maxYVal = height - 20;
+        // 2026-11-02 修复空气墙：之前用 width/height（屏幕像素）卡玩家坐标，
+        // 在缩放关卡中导致窗口不够宽时玩家被卡在世界坐标 1180 而不是 1228。
+        // 现在统一用 getLevelBounds()（世界坐标）作为上限。
+        const _bnds = (typeof getLevelBounds === 'function') ? getLevelBounds() : null;
+        let maxXVal = _bnds ? _bnds.maxX - 11.5 : width - 20;
+        let maxYVal = _bnds ? _bnds.maxY - 11.5 : height - 20;
+        let minXVal = _bnds ? _bnds.minX + 11.5 : 20;
+        let minYVal = _bnds ? _bnds.minY + 11.5 : 15;
         if (currentLevelId === 'level4_yacht') {
             maxXVal = (window.level4MapWidth || 2400) - 20;
             maxYVal = 700 - 20;
@@ -3679,9 +4355,12 @@ function update() {
         } else if (currentLevelId === 'level6_train') {
             maxXVal = (window.level6MapWidth || 7200) - 20;
             maxYVal = (window.level6MapHeight || 240) - 20;
+        } else if (currentLevelId === 'level7_lab' || currentLevelId === 'level8_test') {
+            maxXVal = ((currentLevelId === 'level8_test' ? window.level8MapWidth : window.level7MapWidth) || 3200) - 20;
+            maxYVal = ((currentLevelId === 'level8_test' ? window.level8MapHeight : window.level7MapHeight) || 2400) - 20;
         }
-        player.x = Math.max(20, Math.min(maxXVal, nextX));
-        player.y = Math.max(15, Math.min(maxYVal, nextY));
+        player.x = Math.max(minXVal, Math.min(maxXVal, nextX));
+        player.y = Math.max(minYVal, Math.min(maxYVal, nextY));
     }
     const worldMouse = getWorldMouse();
     player.angle = Math.atan2(worldMouse.y - player.y, worldMouse.x - player.x);
@@ -3779,8 +4458,13 @@ function update() {
                 switchWeapon(wp);
                 createExplosion(player.x, player.y, 12, '#FFFF00');
             } else if (item.type === 'classified_drive' || item.type === 'gold_vault_crown') {
-                level3TargetSecured = true;
-                addLog("💾 已获取绝密数据芯片！区域主电源已重启，照明系统恢复。");
+                // 2026-11-01：机密文件逻辑只在第三关生效（防其他关误触）
+                var _cid = (typeof getCurrentLevelId === 'function' ? getCurrentLevelId() : '');
+                if (_cid === 'level3_bank') {
+                    level3TargetSecured = true;
+                    addLog("💾 已获取绝密数据芯片！区域主电源已重启，照明系统恢复。");
+                    if (typeof soundManager !== 'undefined') { soundManager.playReload(); }
+                }
                 createExplosion(player.x, player.y, 35, '#00CCFF');
                 for (let j = 0; j < 30; j++) {
                     particles.push({
@@ -3806,6 +4490,12 @@ function update() {
             p.vy += (player.y - p.y) * 0.008;
             p.vx *= 0.94;
             p.vy *= 0.94;
+        }
+        // 2026-11-02：地狱血祭粒子升天，红→青平滑渐变
+        if (p.isHellRiteParticle) {
+            const risen = (p.spawnY - p.y) / 350;
+            p.color = hellRiteColor(risen, HELL_RITE_MAIN[0], HELL_RITE_MAIN[1]);
+            p.vx *= 0.995;
         }
         p.life--;
         if (p.life <= 0) particles.splice(i, 1);
@@ -3853,6 +4543,8 @@ function update() {
         if (g.traveled >= g.maxDist) {
             const isExplosionInPool = isEntityInPool(g.x, g.y);
             createExplosion(g.x, g.y, isExplosionInPool ? 15 : 35, isExplosionInPool ? '#00E5FF' : '#FF5500');
+            // 真爆炸才震屏（2026-11-01）
+            if (typeof window.__juiceAddTrauma === 'function') { window.__juiceAddTrauma(0.3); }
             if (typeof soundManager !== 'undefined') {
                 soundManager.playExplosion();
             }
@@ -3922,7 +4614,14 @@ function update() {
         }
         for (let e of enemies) {
             if (e.hp <= 0) continue;
-            if (Math.hypot(b.x - e.x, b.y - e.y) < 22) {
+            const hitThreshold = 22 + (b.radius ? Math.max(0, b.radius - 3.5) : 0);
+            if (Math.hypot(b.x - e.x, b.y - e.y) < hitThreshold) {
+                let effectiveDamage = b.damage;
+                if (b.isShotgunSlug) {
+                    const distRatio = Math.min(1, b.traveled / (b.maxRange || 680));
+                    // 霰弹重弹头随射程衰减极少 (仅 15% 衰减)，保持近距离高杀伤且远程依然具备充沛压制力
+                    effectiveDamage = Math.max(38, Math.round((b.baseDamage || b.damage) * (1 - distRatio * 0.15)));
+                }
                 const isObsSeesPlayer = (e.isObserver || e.isJammer) && inBlindZone(player.x, player.y) && (function() {
                     const pdx = player.x - e.x, pdy = player.y - e.y;
                     const dist = Math.hypot(pdx, pdy);
@@ -3935,28 +4634,30 @@ function update() {
                     return false;
                 })();
 
+                // 灵魂汲取特技（2026-11-01 地狱改造）：命中不再直接回血，只做视觉+标记；
+                // 回血改为击杀后按敌人强度缓慢补给（见 applyDamageToEnemy 击杀分支）
+                if (b.isSoulSiphon && currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id) {
+                    createExplosion(e.x, e.y, 8, '#f43f5e');
+                    particles.push({
+                        x: e.x, y: e.y,
+                        vx: (player.x - e.x) * 0.08,
+                        vy: (player.y - e.y) * 0.08,
+                        life: 16, maxLife: 16,
+                        color: '#fb7185',
+                        isSoulStreamer: true
+                    });
+                    e.killedBySoulSiphon = true;
+                }
+
                 if (inBlindZone(e.x, e.y) && !isObsSeesPlayer) {
-                    e.pendingDamage += b.damage;
-                    if (b.isSoulSiphon && currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id) {
-                        e.killedBySoulSiphon = true;
-                    }
+                    e.pendingDamage += effectiveDamage;
                 } else {
-                    applyDamageToEnemy(e, b.damage, !!b.isSoulSiphon);
+                    applyDamageToEnemy(e, effectiveDamage, !!b.isSoulSiphon);
                     e.hitTimer = 6;
                     if (b.isSoulSiphon && currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id) {
-                        player.hp = Math.min(player.maxHp, player.hp + 2);
-                        player.shield = Math.min(player.maxShield, player.shield + 4);
-                        createExplosion(e.x, e.y, 8, '#f43f5e');
-                        particles.push({
-                            x: e.x, y: e.y,
-                            vx: (player.x - e.x) * 0.08,
-                            vy: (player.y - e.y) * 0.08,
-                            life: 16, maxLife: 16,
-                            color: '#fb7185'
-                        });
                         if (e.hp <= 0) {
                             player.demonPactStacks = Math.min((player.demonPactStacks || 0) + 1, 5);
-                            player.demonPactTimer = 240;
+                            player.demonPactTimer = 600;
                             if (typeof addLog === 'function') {
                                 addLog(`😈 恶魔血祭! 层数: ${player.demonPactStacks}/5 (移速+${player.demonPactStacks * 10}%, 攻击+${player.demonPactStacks * 15}%)`);
                             }
@@ -4009,15 +4710,19 @@ function update() {
             if (typeof soundManager !== 'undefined') soundManager.playHit();
             player.lastHitTimer = 180; // set 3 second delay on regeneration
             const dmgMult = (eb.damageMultiplier !== undefined) ? eb.damageMultiplier : 1.0;
+            const isLvl0 = (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test');
             if (eb.isHellfire) {
                 createExplosion(eb.x, eb.y, 16, '#ff2200');
+                // 2026-11-01：L0 伤害再下调（35→22，15→9），贴近普通关
+                const shieldDmg = isLvl0 ? 22 : 20;
+                const hpDmg = isLvl0 ? 9 : 8;
                 if (player.shield > 0) {
-                    player.shield = Math.max(0, player.shield - 20 * dmgMult);
-                    player.hp = Math.max(0, player.hp - 8 * dmgMult);
+                    player.shield = Math.max(0, player.shield - shieldDmg * dmgMult);
+                    player.hp = Math.max(0, player.hp - hpDmg * dmgMult);
                 } else {
-                    player.hp = Math.max(0, player.hp - 20 * dmgMult);
+                    player.hp = Math.max(0, player.hp - (shieldDmg + 5) * dmgMult);
                 }
-                addLog("🔥 遭到了恶魔地狱火球的灼烧爆破！");
+                addLog("🔥 遭到了恶魔地狱火球的重爆灼烧！");
             } else if (player.shield > 0) {
                 const isPlayerInPool = cachedIsPlayerInPool;
                 const shieldLoss = (isPlayerInPool ? 15 * 1.5 : 15) * dmgMult;
@@ -4034,12 +4739,18 @@ function update() {
     }
     
     let anyCameraDetecting = false;
-    cameras.forEach(cam => {
+    const activeCams = Array.isArray(cameras) ? cameras.slice() : [];
+    activeCams.forEach(cam => {
+        if (!cam || typeof cam !== 'object') return;
+        if (typeof cam.x !== 'number' || isNaN(cam.x) || typeof cam.y !== 'number' || isNaN(cam.y)) return;
+        if (cam.baseAngle === undefined || isNaN(cam.baseAngle)) cam.baseAngle = 0;
+        if (cam.sweepSpeed === undefined || isNaN(cam.sweepSpeed)) cam.sweepSpeed = 0.015;
+        if (cam.sweepRange === undefined || isNaN(cam.sweepRange)) cam.sweepRange = Math.PI / 4;
+        if (cam.sweepTimer === undefined || isNaN(cam.sweepTimer)) cam.sweepTimer = 0;
+        if (cam.currentAngle === undefined || isNaN(cam.currentAngle)) cam.currentAngle = cam.baseAngle;
+
         if (cam.type === 'infernal_eye' || (cam.sweepRange && cam.sweepRange >= Math.PI * 1.9)) {
             // 360度单向匀速旋转：以恒定角速度平滑推进，彻底消除正弦波极值造成的忽慢忽快
-            if (cam.currentAngle === undefined) {
-                cam.currentAngle = cam.baseAngle || 0;
-            }
             cam.currentAngle += (cam.sweepSpeed || 0.009);
             if (cam.currentAngle >= Math.PI * 2) cam.currentAngle -= Math.PI * 2;
             if (cam.currentAngle < 0) cam.currentAngle += Math.PI * 2;
@@ -4071,7 +4782,17 @@ function update() {
             const wasDetecting = cam.detecting;
             cam.detecting = true;
             cam.cooldownTimer = 180;
-            triggerGlobalAlarm();
+            const isLvl0 = (typeof currentLevelId !== 'undefined' && currentLevelId === 'level0_test') || (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel && levelManager.getCurrentLevel().id === 'level0_test');
+            if (isLvl0) {
+                let sectorZh = "寒冰狱前哨", sectorEn = "FROZEN COCYTUS";
+                if (cam.x > 1700) { sectorZh = "深渊祭坛要塞"; sectorEn = "ABYSSAL SANCTUM"; }
+                else if (cam.x > 850) { sectorZh = "焦热熔岩走廊"; sectorEn = "MOLTEN CORRIDOR"; }
+                const customZh = `🚨 [区域警报: ${sectorZh} - ${cam.label || '警戒装置'}] 发现入侵！🚨`;
+                const customEn = `🚨 [SECTOR ALARM: ${sectorEn} - ${cam.type || 'WATCHER'}] INTRUDER SPOTTED! 🚨`;
+                triggerGlobalAlarm(cam.x, cam.y, customZh, customEn);
+            } else {
+                triggerGlobalAlarm(cam.x, cam.y);
+            }
             if (!wasDetecting) {
                 if (cam.type === 'soul_lantern') {
                     if (typeof addLog === 'function') addLog("👻 误入幽冥噬魂魂灯冷光！深渊怨灵尖啸拉响全域警报！");
@@ -4097,11 +4818,29 @@ function update() {
         if (cam.detecting) anyCameraDetecting = true;
     });
 
-    if (!anyCameraDetecting && gateAlarmCooldown <= 0) {
-        const banner = document.getElementById('alarm-banner');
-        if (banner) banner.style.display = 'none';
-        if (typeof soundManager !== 'undefined') {
-            soundManager.stopAlarm();
+    const isLvl0Game = (typeof currentLevelId !== 'undefined' && currentLevelId === 'level0_test') || (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel && levelManager.getCurrentLevel().id === 'level0_test');
+    if (isLvl0Game) {
+        let anySectorActive = false;
+        if (window.level0ActiveSectorAlarms) {
+            for (let s in window.level0ActiveSectorAlarms) {
+                if (window.level0ActiveSectorAlarms[s] > 0) {
+                    window.level0ActiveSectorAlarms[s]--;
+                    anySectorActive = true;
+                }
+            }
+        }
+        if (!anyCameraDetecting && !anySectorActive && gateAlarmCooldown <= 0) {
+            const banner = document.getElementById('alarm-banner');
+            if (banner) banner.style.display = 'none';
+            if (typeof soundManager !== 'undefined') soundManager.stopAlarm();
+        }
+    } else {
+        if (!anyCameraDetecting && gateAlarmCooldown <= 0) {
+            const banner = document.getElementById('alarm-banner');
+            if (banner) banner.style.display = 'none';
+            if (typeof soundManager !== 'undefined') {
+                soundManager.stopAlarm();
+            }
         }
     }
     
@@ -4123,14 +4862,14 @@ function update() {
                 
                 const e1x = e1.x - nx * push;
                 const e1y = e1.y - ny * push;
-                if (!checkObstacleCollision(e1x, e1y, 15.5)) {
+                if (!checkEnemyWallCollision(e1x, e1y, 14)) {
                     e1.x = e1x;
                     e1.y = e1y;
                 }
 
                 const e2x = e2.x + nx * push;
                 const e2y = e2.y + ny * push;
-                if (!checkObstacleCollision(e2x, e2y, 15.5)) {
+                if (!checkEnemyWallCollision(e2x, e2y, 14)) {
                     e2.x = e2x;
                     e2.y = e2y;
                 }
@@ -4139,17 +4878,19 @@ function update() {
     }
 
     let aliveCount = 0;
-    enemies.forEach(e => {
+    const activeEnemiesUpdate = Array.isArray(enemies) ? enemies.slice() : [];
+    activeEnemiesUpdate.forEach(e => {
+        if (!e || typeof e !== 'object' || typeof e.hp !== 'number') return;
         if (e.hp <= 0) {
-            if (e.deathAlpha > 0) e.deathAlpha -= 0.08;
+            if (typeof e.deathAlpha === 'number' && e.deathAlpha > 0) e.deathAlpha -= 0.08;
             return;
         }
         aliveCount++;
         ensureEntityInBounds(e, 16);
-        if (e.hitTimer > 0) e.hitTimer--;
-        if (e.flashTimer > 0) e.flashTimer--;
-        if (e.shootCooldown > 0) e.shootCooldown--;
-        if (e.spawnGraceTimer > 0) e.spawnGraceTimer--;
+        if (e.hitTimer > 0) e.hitTimer -= ff;
+        if (e.flashTimer > 0) e.flashTimer -= ff;
+        if (e.shootCooldown > 0) e.shootCooldown -= ff;
+        if (e.spawnGraceTimer > 0) e.spawnGraceTimer -= ff;
 
         // 盲区推迟伤害结算校验：若盲区不处于激活状态，或敌人已离开盲区，立即重挫并结算推迟伤害！
         if (e.pendingDamage > 0) {
@@ -4168,69 +4909,9 @@ function update() {
         const enemyInLava = isEntityInLava(e.x, e.y, 16);
         const playerInIce = isEntityInIceLake(player.x, player.y, 16);
 
-        // =========================================================
-        // 冰湖恐慌逃跑核心状态机 (COCYTUS ICE LAKE PANIC ESCAPE STATE MACHINE)
-        // 彻底根除: 1. 盲区激活时跳过恐惧 2. 临界线 1px 高频翻转导致的无遮挡原地踌躇卡死
-        // =========================================================
         const pdx = player.x - e.x, pdy = player.y - e.y;
         const distToPlayer = Math.hypot(pdx, pdy) || 1;
         const dist = distToPlayer;
-
-        // 触发恐慌逃跑标准：恶魔或撒旦在冰湖中且距离 < 380px，或已处于恐慌逃跑锁定状态中
-        const shouldTriggerPanic = (enemyInIce || playerInIce) && distToPlayer < 380;
-        if (shouldTriggerPanic) {
-            e.panicTimer = Math.max(e.panicTimer || 0, 90); // 锁定至少 90 帧 (1.5秒) 持续奔逃，禁止高频掉头踌躇
-            e.panicSourceX = player.x;
-            e.panicSourceY = player.y;
-        }
-
-        if (e.panicTimer && e.panicTimer > 0) {
-            e.panicTimer--;
-            const panicSrcX = (e.panicSourceX !== undefined) ? e.panicSourceX : player.x;
-            const panicSrcY = (e.panicSourceY !== undefined) ? e.panicSourceY : player.y;
-            const escapeDx = e.x - panicSrcX;
-            const escapeDy = e.y - panicSrcY;
-            const escapeDist = Math.hypot(escapeDx, escapeDy) || 1;
-
-            // 逃跑矢量方向：沿背对撒旦方向延伸 320px
-            const escapeTargetX = e.x + (escapeDx / escapeDist) * 320;
-            const escapeTargetY = e.y + (escapeDy / escapeDist) * 320;
-            
-            // 冰湖内速度打折 (1.2px/f)，一旦逃出冰湖登上陆地加速奔逃 (2.2px/f)
-            let panicSpeed = enemyInIce ? 1.2 : 2.2;
-            
-            const escapeAngle = getObstacleSteeredHeading(e, escapeTargetX, escapeTargetY, panicSpeed, 16);
-            const mx = Math.cos(escapeAngle) * panicSpeed;
-            const my = Math.sin(escapeAngle) * panicSpeed;
-            const oldX = e.x, oldY = e.y;
-            
-            tryMoveEnemy(e, mx, my, 16);
-            
-            const movedDist = Math.hypot(e.x - oldX, e.y - oldY);
-            if (movedDist > 0.15) {
-                const actualMoveAngle = Math.atan2(e.y - oldY, e.x - oldX);
-                e.angle = turnAngleTowards(e.angle, actualMoveAngle, 0.22);
-                e.walkCycle += 0.14;
-            } else {
-                e.angle = turnAngleTowards(e.angle, escapeAngle, 0.22);
-            }
-
-            if (Math.random() < 0.25 && particles.length < 100) {
-                particles.push({
-                    x: e.x + (Math.random() - 0.5) * 10,
-                    y: e.y + (Math.random() - 0.5) * 10,
-                    vx: (Math.random() - 0.5) * 2.5,
-                    vy: (Math.random() - 0.5) * 2.5,
-                    life: 14, maxLife: 14,
-                    color: '#93c5fd'
-                });
-            }
-            if (!window._lastPanicLogTime || Date.now() - window._lastPanicLogTime > 4000) {
-                window._lastPanicLogTime = Date.now();
-                if (typeof addLog === 'function') addLog("😱 恶魔靠近冰湖与撒旦，陷入极度恐慌慌张逃出冰湖！");
-            }
-            return; // 优先全力奔逃，绕过盲区定身与盲目追击
-        }
 
         // 暗幕者 (Jammer) 局部盲区技能维护循环：
         // 规则：登场不默认开启，受到攻击时发动，或被玩家近身 (距离 < 200) 时发动；冷却结束后不自动开启
@@ -4262,10 +4943,10 @@ function update() {
 
         // 地狱三头犬专有技能冷却与身尾反击判定
         if (e.isCerberus && e.hp > 0) {
-            if (e.pounceCooldown > 0) e.pounceCooldown--;
-            if (e.tailCooldown > 0) e.tailCooldown--;
-            if (e.tailLashAnim > 0) e.tailLashAnim--;
-            if (e.meleeCooldown > 0) e.meleeCooldown--;
+            if (e.pounceCooldown > 0) e.pounceCooldown -= ff;
+            if (e.tailCooldown > 0) e.tailCooldown -= ff;
+            if (e.tailLashAnim > 0) e.tailLashAnim -= ff;
+            if (e.meleeCooldown > 0) e.meleeCooldown -= ff;
 
             // 身后接近反击机制：如果玩家从身后接近 (rear ~140度扇形，距离 < 88px)，先受其龙尾抽击并定身
             const angleToPlayer = Math.atan2(pdy, pdx);
@@ -4284,9 +4965,10 @@ function update() {
                 player.rootTimer = 55; // 定身约 0.9 秒！
 
                 if (typeof soundManager !== 'undefined') soundManager.playExplosion();
-                createExplosion(player.x, player.y, 22, '#10b981'); // 龙尾蛇毒爆裂
-                createExplosion(player.x, player.y, 16, '#9333ea'); // 毒藤荆棘束缚
-                if (typeof addLog === 'function') addLog("⚠️ 踏入地狱三头犬后方！遭受龙尾毒蛇骨刺反手暴抽，陷入剧毒定身 1 秒！");
+                if (typeof window.__juiceAddTrauma === 'function') window.__juiceAddTrauma(0.3);
+                createExplosion(player.x, player.y, 22, '#dc2626'); // 龙尾地狱血棘爆裂
+                createExplosion(player.x, player.y, 16, '#ea580c'); // 熔岩余烬锁链束缚
+                if (typeof addLog === 'function') addLog("⚠️ 踏入地狱三头犬后方！遭受龙尾毒蛇骨刺反手暴抽，陷入熔火锁链定身 1 秒！");
 
                 // 受到尾部攻击后，三头犬立刻转身快速近身扑咬！
                 e.angle = angleToPlayer;
@@ -4300,10 +4982,17 @@ function update() {
             }
         }
 
+        // 地狱熔岩阵定身：被熔岩阵命中的敌人短暂无法移动（2026-11-01 地狱隐藏关改造）
+        if (e.rootTimer > 0) {
+            e.rootTimer--;
+            return;
+        }
+
         // 普通敌人 (非 Observer，非 Jammer，非 Cerberus)：
         // 误入玩家盲区 OR 误入暗幕者局部盲区 -> 被定住并缓慢迷茫游走
-        // 注意：暗幕者自身 (e.isJammer) 与三头犬 (e.isCerberus) 不受迷茫定身限制！
-        if ((inZone || inJammerZone) && !e.isObserver && !e.isJammer && !e.isCerberus) {
+        // 注意：暗幕者自身 (e.isJammer)、三头犬 (e.isCerberus)、恶魔 (e.isDemon) 不受迷茫定身限制！
+        // 2026-11-02：恶魔不再被定住，只减视野+减速（用户要求）
+        if ((inZone || inJammerZone) && !e.isObserver && !e.isJammer && !e.isCerberus && !e.isDemon) {
             if (Math.random() < 0.1) e.confusedAngle = e.angle + (Math.random() - 0.5) * 2.2;
             e.angle += (e.confusedAngle - e.angle) * 0.12;
             // 盲区定住/减速并缓慢迷茫游走
@@ -4338,14 +5027,22 @@ function update() {
         // 视角度数与观察距离必须与渲染的黄色/红光/紫光战术 FOV 完全一致
         let fovAngle = Math.PI / 3; // 60 度视角扇形
         let fovRange = 260;
-        if (e.isCerberus) {
+        if (e.isCerberus && (inZone || inJammerZone)) {
+            // 2026-11-02：三头犬在盲区内视野大幅缩小（之前只有减速）
+            fovAngle = Math.PI / 6;
+            fovRange = 110;
+        } else if (e.isCerberus) {
             fovAngle = Math.PI * 0.72; // 三头犬三首拥有 130 度宽广猎杀全景视锥
             fovRange = 290;
-        } else if (e.isObserver && (playerInBlind || inJammerZone)) {
+        } else if (e.isObserver && (playerInBlind || inJammerZone || inZone)) {
             fovAngle = Math.PI / 6; // 30 度受限视角
             fovRange = 110;
-        } else if (e.isJammer && playerInBlind) {
+        } else if (e.isJammer && (playerInBlind || inZone)) {
             fovAngle = Math.PI / 6; // 30 度受限视角
+            fovRange = 110;
+        } else if (e.isDemon && (inZone || inJammerZone)) {
+            // 2026-11-02：恶魔在盲区内视野大幅缩小，但仍能发现/攻击进入视野的玩家
+            fovAngle = Math.PI / 6;
             fovRange = 110;
         }
 
@@ -4360,7 +5057,11 @@ function update() {
             }
         }
 
-        if (((e.isObserver || e.isJammer) && playerInBlind) || (e.isObserver && inJammerZone)) {
+        if (((e.isObserver || e.isJammer) && (playerInBlind || inZone)) || (e.isObserver && inJammerZone)) {
+            playerIsHidden = !inEnemyFOV;
+        }
+        if (e.isDemon && (inZone || inJammerZone)) {
+            // 2026-11-02：恶魔在盲区内，玩家进入其缩小视野仍会被发现
             playerIsHidden = !inEnemyFOV;
         }
         if (e.isCerberus) {
@@ -4380,9 +5081,23 @@ function update() {
             e.alertCooldown = 400; 
         }
         
+        const isLvl0Enemy = (typeof currentLevelId !== 'undefined' && currentLevelId === 'level0_test') || (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel && levelManager.getCurrentLevel().id === 'level0_test');
         if (isGlobalAlarmActive) {
-            e.alert = true;
-            e.alertCooldown = 300;
+            if (isLvl0Enemy) {
+                const eSec = e.x <= 850 ? 1 : (e.x <= 1700 ? 2 : 3);
+                if (window.level0ActiveSectorAlarms && window.level0ActiveSectorAlarms[eSec] > 0) {
+                    e.alert = true;
+                    e.alertCooldown = 300;
+                } else if (e.alert) {
+                    if (!checkVisible() || playerIsHidden) {
+                        e.alertCooldown--;
+                        if (e.alertCooldown <= 0) e.alert = false;
+                    }
+                }
+            } else {
+                e.alert = true;
+                e.alertCooldown = 300;
+            }
         } else if (e.alert) {
             if (!checkVisible() || playerIsHidden) {
                 e.alertCooldown--;
@@ -4415,6 +5130,8 @@ function update() {
                 if (typeof soundManager !== 'undefined') {
                     soundManager.playExplosion();
                 }
+                // 陷阱爆炸也加震屏，与音效同步（2026-11-02）
+                if (typeof window.__juiceAddTrauma === 'function') { window.__juiceAddTrauma(0.3); }
                 applyDamageToEnemy(e, e.maxHp + 100);
                 
                 const tIndex = traps.indexOf(attractedToTrap);
@@ -4443,11 +5160,16 @@ function update() {
 
             let moveSpeed = e.isDemon ? 2.6 : 1.5;
             if (e.isCerberus) {
-                moveSpeed = 2.95; // 行动中至快（比恶魔 2.6 略快）
+                moveSpeed = 2.95; // 三头犬猎杀追击移速
             }
             if (((e.isObserver || e.isJammer) && playerInBlind) || (e.isObserver && inJammerZone)) moveSpeed = 0.5;
             if (e.isCerberus && (playerInBlind || inZone || inJammerZone)) {
-                moveSpeed *= 0.65; // 三头犬虽然视线看破盲区，但进入盲区行动仍受阻碍！
+                // 2026-11-01：减速 50%→70%，盲区内真正慢下来 (2.95→0.89)
+                moveSpeed *= 0.30;
+            }
+            if (e.isDemon && (inZone || inJammerZone)) {
+                // 2026-11-02：恶魔在盲区内减速（不再被定住，改用减速+缩视野）
+                moveSpeed *= 0.30;
             }
             if (enemyInPool) moveSpeed *= 0.5;
 
@@ -4464,7 +5186,11 @@ function update() {
 
                 if (e.isPouncing && e.pounceTimer > 0) {
                     e.pounceTimer--;
-                    moveSpeed = 4.65; // 瞬间爆发极速猛扑
+                    moveSpeed = 5.8; // 瞬间爆发极速猛扑 (极速冲锋)
+                    if (e.isCerberus && (playerInBlind || inZone || inJammerZone)) {
+                        // 2026-11-01：猛扑在盲区内也受70%减速 (5.8→1.74)
+                        moveSpeed *= 0.30;
+                    }
                     if (Math.random() < 0.6 && particles.length < 130) {
                         particles.push({
                             x: e.x + (Math.random() - 0.5) * 16,
@@ -4562,7 +5288,7 @@ function update() {
                     if (e.stragglerTimer > 70 || (e.stuckFrames && e.stuckFrames > 20)) {
                         const targetAdvX = Math.max(80, Math.min(7120, player.x - Math.sign(pdx) * 520));
                         const targetAdvY = (targetAdvX >= 2400 && targetAdvX <= 3600) ? 180 : 120;
-                        if (!checkObstacleCollision(targetAdvX, targetAdvY, 16)) {
+                        if (!checkEnemyWallCollision(targetAdvX, targetAdvY, 16)) {
                             e.x = targetAdvX;
                             e.y = targetAdvY;
                             e.stuckFrames = 0;
@@ -4581,8 +5307,8 @@ function update() {
 
             if (!e.isHoldingDistance || (e.isJammer && e.jammerBlindActive)) {
                 const moveAngle = getObstacleSteeredHeading(e, steerTargetX, steerTargetY, moveSpeed, 16);
-                const mx = Math.cos(moveAngle) * moveSpeed;
-                const my = Math.sin(moveAngle) * moveSpeed;
+                const mx = Math.cos(moveAngle) * moveSpeed * ff;
+                const my = Math.sin(moveAngle) * moveSpeed * ff;
                 const oldX = e.x, oldY = e.y;
                 let moved = tryMoveEnemy(e, mx, my, 16);
                 const movedDist = Math.hypot(e.x - oldX, e.y - oldY);
@@ -4593,7 +5319,16 @@ function update() {
                     e.stuckFrames = 0;
                 } else {
                     e.stuckFrames = (e.stuckFrames || 0) + 1;
-                    e.angle = turnAngleTowards(e.angle, moveAngle, 0.16);
+                    // 严禁抽搐打摆与慌张摆头！面向玩家或目标方向，保持冷静专注姿态
+                    if (typeof player !== 'undefined' && player) {
+                        const toPlayerAngle = Math.atan2(player.y - e.y, player.x - e.x);
+                        e.angle = turnAngleTowards(e.angle, toPlayerAngle, 0.14);
+                    }
+                    if (e.stuckFrames % 30 === 1) {
+                        e.navLockTimer = 0;
+                        e.navBias = -(e.navBias || 1);
+                        e.navBiasTimer = 35;
+                    }
                 }
             } else {
                 e.angle = turnAngleTowards(e.angle, Math.atan2(pdy, pdx), 0.16);
@@ -4603,6 +5338,7 @@ function update() {
             if (e.isCerberus && distToPlayer < 65 && checkVisible() && (e.meleeCooldown || 0) <= 0) {
                 e.meleeCooldown = 38;
                 if (typeof soundManager !== 'undefined') soundManager.playExplosion();
+                if (typeof window.__juiceAddTrauma === 'function') window.__juiceAddTrauma(0.3);
                 createExplosion(player.x, player.y, 28, '#ff2200');
                 createExplosion(player.x, player.y, 18, '#f97316');
                 // 伤害极高但留足容错 (总计 34 点伤害，避免单次秒杀)
@@ -4615,10 +5351,11 @@ function update() {
                 player.lastHitTimer = 180;
                 addLog("🐺 遭到地狱三头犬的三首利齿暴烈撕咬！");
                 if (player.hp <= 0) { triggerGameOver(false); return; }
-            } else if (e.isDemon && !e.isCerberus && distToPlayer < 65 && checkVisible() && (e.meleeCooldown || 0) <= 0) {
-                // 普通恶魔近战利爪
+            } else if (e.isDemon && !e.isCerberus && distToPlayer < 40 && checkVisible() && (e.meleeCooldown || 0) <= 0) {
+                // 普通恶魔近战利爪（2026-11-02：65→40，必须贴身才触发）
                 e.meleeCooldown = 35;
                 if (typeof soundManager !== 'undefined') soundManager.playExplosion();
+                if (typeof window.__juiceAddTrauma === 'function') window.__juiceAddTrauma(0.3);
                 createExplosion(player.x, player.y, 25, '#ff2200');
                 if (player.shield > 0) {
                     player.shield = Math.max(0, player.shield - 25);
@@ -4634,19 +5371,25 @@ function update() {
 
             // 远程射击：地狱三头犬无远程手段 (Pure Melee Only)
             if (checkVisible() && e.shootCooldown <= 0 && !enemyInPool && !e.isCerberus) {
+                // 确保开火瞬间 100% 精准对准玩家位置，杜绝向旧巡逻方向空射
+                if (typeof player !== 'undefined' && player) {
+                    e.angle = Math.atan2(player.y - e.y, player.x - e.x);
+                }
+                const isLvl0 = (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test');
                 if (e.isDemon) {
-                    e.shootCooldown = 28; // 恶魔快速连发地狱火弹
+                    // Level 0: 2026-11-01 下调——射速更慢 (42帧)，散布放宽，弹速降低；仍略强于普通关
+                    e.shootCooldown = isLvl0 ? 42 : 28;
                     e.flashTimer = 4;
                     if (typeof soundManager !== 'undefined') soundManager.playEnemyShoot();
-                    // 恶魔 3 连地狱火散射 (3-Orb Spread Hellfire Volley)
-                    const spreads = [-0.22, 0, 0.22];
+                    const spreads = isLvl0 ? [-0.12, 0, 0.12] : [-0.22, 0, 0.22];
+                    const bulletSpeed = isLvl0 ? 11.0 : 10.0;
                     spreads.forEach(spreadAng => {
                         const fireAng = e.angle + spreadAng;
                         enemyBullets.push({
                             x: e.x + Math.cos(fireAng) * 20,
                             y: e.y + Math.sin(fireAng) * 20,
-                            vx: Math.cos(fireAng) * 10,
-                            vy: Math.sin(fireAng) * 10,
+                            vx: Math.cos(fireAng) * bulletSpeed,
+                            vy: Math.sin(fireAng) * bulletSpeed,
                             penetrations: 1,
                             isHellfire: true
                         });
@@ -4712,7 +5455,13 @@ function update() {
                 }
                 if (enemyInPool) speed *= 0.5;
 
-                const moveAngle = getObstacleSteeredHeading(e, target.x, target.y, speed, 16);
+                let steerTarget = target;
+                if (!isDirectPathWalkableForEnemy(e.x, e.y, target.x, target.y, 12)) {
+                    const nextWp = findNextGridWaypoint(e, target.x, target.y);
+                    if (nextWp) steerTarget = nextWp;
+                }
+
+                const moveAngle = getObstacleSteeredHeading(e, steerTarget.x, steerTarget.y, speed, 16);
                 const mx = Math.cos(moveAngle) * speed;
                 const my = Math.sin(moveAngle) * speed;
                 const oldX = e.x, oldY = e.y;
@@ -4729,8 +5478,12 @@ function update() {
                     e.stuckFrames = 0;
                 } else {
                     e.stuckFrames = (e.stuckFrames || 0) + 1;
-                    if (e.stuckFrames > 25) {
+                    // 稳定朝向航点目标，杜绝抽搐打摆
+                    const toTargetAngle = Math.atan2(steerTarget.y - e.y, steerTarget.x - e.x);
+                    e.angle = turnAngleTowards(e.angle, toTargetAngle, 0.08);
+                    if (e.stuckFrames > 20) {
                         selectNextWaypoint(e);
+                        e.stuckFrames = 0;
                     }
                 }
             }
@@ -4807,6 +5560,15 @@ function update() {
             togglePause(true);
         } else if (waveTransitionTimer > 80) {
             wave++; waveTransitionTimer = 0;
+            // 2026-11-01 地狱任务：记录存活波次
+            const hs = window.__hellState;
+            if (hs && hs.active && getCurrentLevelId() === 'level0_test') {
+                hs.wavesSurvived++;
+                // 检查任务完成
+                if (checkHellQuestComplete()) {
+                    onHellQuestComplete();
+                }
+            }
             spawnWave();
         }
     }
@@ -4902,12 +5664,12 @@ function drawZones() {
         // Background pill badge for zone name so it stays clean and readable
         ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
         ctx.fillRect(badgeX - 5, labelY - 8, txtW + 10, 12);
-        ctx.strokeStyle = levelId === 'level7_lab' ? 'rgba(16,185,129,0.6)' : (levelId === 'level1_airport' ? 'rgba(0,255,102,0.4)' : ((levelId === 'level0_test' || levelId === 'level6_train') ? 'rgba(56,189,248,0.6)' : ((levelId === 'level5_hotel' || levelId === 'level4_test') ? 'rgba(236,72,153,0.6)' : (levelId === 'level4_yacht' ? 'rgba(6,182,212,0.5)' : (levelId === 'level2_subway' ? 'rgba(245,158,11,0.4)' : 'rgba(59,130,246,0.4)')))));
+        ctx.strokeStyle = levelId === 'level1_airport' ? 'rgba(0,255,102,0.4)' : ((levelId === 'level0_test' || levelId === 'level6_train') ? 'rgba(56,189,248,0.6)' : ((levelId === 'level5_hotel' || levelId === 'level4_test') ? 'rgba(236,72,153,0.6)' : (levelId === 'level4_yacht' ? 'rgba(6,182,212,0.5)' : (levelId === 'level2_subway' ? 'rgba(245,158,11,0.4)' : 'rgba(59,130,246,0.4)'))));
         ctx.lineWidth = 0.8;
         ctx.setLineDash([]);
         ctx.strokeRect(badgeX - 5, labelY - 8, txtW + 10, 12);
 
-        ctx.fillStyle = levelId === 'level7_lab' ? '#10B981' : (levelId === 'level1_airport' ? '#00FF66' : ((levelId === 'level0_test' || levelId === 'level6_train') ? '#38BDF8' : ((levelId === 'level5_hotel' || levelId === 'level4_test') ? '#F43F5E' : (levelId === 'level4_yacht' ? '#06B6D4' : (levelId === 'level2_subway' ? '#FBBF24' : '#93C5FD')))));
+        ctx.fillStyle = levelId === 'level1_airport' ? '#00FF66' : ((levelId === 'level0_test' || levelId === 'level6_train') ? '#38BDF8' : ((levelId === 'level5_hotel' || levelId === 'level4_test') ? '#F43F5E' : (levelId === 'level4_yacht' ? '#06B6D4' : (levelId === 'level2_subway' ? '#FBBF24' : '#93C5FD'))));
         ctx.textAlign = align;
         ctx.fillText(z.name, labelX, labelY);
         ctx.restore();
@@ -4946,7 +5708,7 @@ function drawPropTagLabel(p) {
     if (p.tagYOffset) tagY += p.tagYOffset;
 
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
-    const limitWidth = levelId === 'level7_lab' ? (window.level7MapWidth || 3200) : (levelId === 'level4_yacht' ? (window.level4MapWidth || 2400) : (levelId === 'level0_test' ? (window.level0MapWidth || 3200) : (levelId === 'level6_train' ? (window.level6MapWidth || 7200) : width)));
+    const limitWidth = levelId === 'level4_yacht' ? (window.level4MapWidth || 2400) : (levelId === 'level0_test' ? (window.level0MapWidth || 3200) : (levelId === 'level6_train' ? (window.level6MapWidth || 7200) : (levelId === 'level7_lab' ? (window.level7MapWidth || 3200) : width)));
     tagX = Math.max(4, Math.min(limitWidth - txtW - 6, tagX));
 
     ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
@@ -4994,7 +5756,7 @@ function drawProps() {
 
         const currentLevelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
         const isHotelLevel = (currentLevelId === 'level5_hotel');
-        const isTrainLevel = ((currentLevelId === 'level0_test' || currentLevelId === 'level6_train'));
+        const isTrainLevel = ((currentLevelId === 'level0_test' || currentLevelId === 'level6_train' || currentLevelId === 'level8_test'));
         const isYachtLevel = (currentLevelId === 'level4_yacht');
         const isSubwayLevel = (currentLevelId === 'level2_subway');
         const isBankLevel = (currentLevelId === 'level3_bank');
@@ -5283,109 +6045,136 @@ function drawProps() {
             const openProg = p.openProgress !== undefined ? p.openProgress : 0;
             const isOpening = openProg > 0.05;
 
-            // 1. Heavy Drop Shadow
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-            ctx.fillRect(p.x + 3, p.y + 3, p.w, p.h);
+            // Support rotation for doors on slanted walls
+            const doorCx = p.cx !== undefined ? p.cx : (p.x + p.w / 2);
+            const doorCy = p.cy !== undefined ? p.cy : (p.y + p.h / 2);
+            if (p.angle) {
+                ctx.translate(doorCx, doorCy);
+                ctx.rotate(p.angle);
+                ctx.translate(-doorCx, -doorCy);
+            }
 
-            // 2. Heavy Armored Frame Base
-            ctx.fillStyle = '#0f172a'; // Deep slate dark steel
-            ctx.fillRect(p.x - 2, p.y, p.w + 4, p.h);
-            ctx.strokeStyle = '#334155';
-            ctx.lineWidth = 1.6;
-            ctx.strokeRect(p.x - 2, p.y, p.w + 4, p.h);
+            const isEmeraldTheme = (currentLevelId === 'level8_test' || currentLevelId === 'level7_lab');
+            const frameSteel = isEmeraldTheme ? '#051914' : '#0f172a';
+            const frameStroke = isEmeraldTheme ? '#10b981' : '#38bdf8';
+            const cylinderColor = isEmeraldTheme ? '#064e3b' : '#1e293b';
+            const leafSteel = isEmeraldTheme ? '#06201b' : '#334155';
+            const leafBezel = isEmeraldTheme ? '#34d399' : '#94a3b8';
+            const leafBrace = isEmeraldTheme ? '#02120e' : '#1e293b';
+            const glassColor = isEmeraldTheme ? 'rgba(16, 185, 129, 0.8)' : 'rgba(56, 189, 248, 0.7)';
+            const glassBorder = isEmeraldTheme ? '#10b981' : '#0284c7';
+
+            const isNarrow = isEmeraldTheme || (p.w <= 16);
+            const pad = isNarrow ? 1 : 3;
+            const jambW = isNarrow ? 2 : 4;
+            const barH = isNarrow ? 7 : 10;
+
+            // 1. Heavy Drop Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.fillRect(p.x + 1, p.y + 1, p.w, p.h);
+
+            // 2. Heavy Armored Frame Base - Left and Right side jamb posts only (center passage is open!)
+            ctx.fillStyle = frameSteel;
+            ctx.fillRect(p.x - pad, p.y, jambW, p.h);
+            ctx.fillRect(p.x + p.w + pad - jambW, p.y, jambW, p.h);
+            ctx.strokeStyle = frameStroke;
+            ctx.lineWidth = isNarrow ? 1 : 1.4;
+            ctx.strokeRect(p.x - pad, p.y, jambW, p.h);
+            ctx.strokeRect(p.x + p.w + pad - jambW, p.y, jambW, p.h);
 
             // Hazard Stripes on Side Pillars (Black & Yellow diagonal safety warnings)
             const stripeStep = 6;
             ctx.save();
             ctx.beginPath();
-            ctx.rect(p.x - 2, p.y, 4, p.h);
-            ctx.rect(p.x + p.w - 2, p.y, 4, p.h);
+            ctx.rect(p.x - pad, p.y, jambW, p.h);
+            ctx.rect(p.x + p.w + pad - jambW, p.y, jambW, p.h);
             ctx.clip();
             ctx.fillStyle = '#f59e0b'; // Hazard Yellow
             for (let sy = p.y - 10; sy < p.y + p.h + 10; sy += stripeStep * 2) {
                 ctx.beginPath();
-                ctx.moveTo(p.x - 4, sy);
-                ctx.lineTo(p.x + p.w + 4, sy + 8);
-                ctx.lineTo(p.x + p.w + 4, sy + 12);
-                ctx.lineTo(p.x - 4, sy + 4);
+                ctx.moveTo(p.x - pad - 2, sy);
+                ctx.lineTo(p.x + p.w + pad + 2, sy + 8);
+                ctx.lineTo(p.x + p.w + pad + 2, sy + 12);
+                ctx.lineTo(p.x - pad - 2, sy + 4);
                 ctx.closePath();
                 ctx.fill();
             }
             ctx.restore();
 
             // Heavy Top Pneumatic Cylinder Housing
-            ctx.fillStyle = '#1e293b';
-            ctx.fillRect(p.x - 3, p.y, p.w + 6, 10);
-            ctx.strokeStyle = '#f59e0b';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(p.x - 3, p.y, p.w + 6, 10);
+            ctx.fillStyle = cylinderColor;
+            ctx.fillRect(p.x - pad, p.y, p.w + pad * 2, barH);
+            ctx.strokeStyle = isEmeraldTheme ? '#10b981' : '#f59e0b';
+            ctx.lineWidth = 1.1;
+            ctx.strokeRect(p.x - pad, p.y, p.w + pad * 2, barH);
 
             // Hydraulic pressure gauge / status LED
-            ctx.fillStyle = isOpening ? '#22c55e' : '#ef4444'; // Red locked, Green opening
+            ctx.fillStyle = isOpening ? (isEmeraldTheme ? '#10b981' : '#22c55e') : '#ef4444'; // Red locked, Green opening
             ctx.beginPath();
-            ctx.arc(p.x + p.w / 2, p.y + 5, 3, 0, Math.PI * 2);
+            ctx.arc(p.x + p.w / 2, p.y + barH / 2, isNarrow ? 2 : 3, 0, Math.PI * 2);
             ctx.fill();
 
             // Heavy Bottom Reinforced Threshold Rail
-            ctx.fillStyle = '#1e293b';
-            ctx.fillRect(p.x - 3, p.y + p.h - 10, p.w + 6, 10);
-            ctx.strokeStyle = '#64748b';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(p.x - 3, p.y + p.h - 10, p.w + 6, 10);
+            ctx.fillStyle = cylinderColor;
+            ctx.fillRect(p.x - pad, p.y + p.h - barH, p.w + pad * 2, barH);
+            ctx.strokeStyle = isEmeraldTheme ? '#34d399' : '#64748b';
+            ctx.lineWidth = 1.1;
+            ctx.strokeRect(p.x - pad, p.y + p.h - barH, p.w + pad * 2, barH);
 
             // 3. Sliding Blast Door Panels (Top & Bottom heavy armored steel leaves)
-            const trackYTop = p.y + 8;
-            const trackYBot = p.y + p.h - 8;
+            const trackYTop = p.y + barH;
+            const trackYBot = p.y + p.h - barH;
             const totalH = trackYBot - trackYTop;
             const halfH = totalH / 2;
 
-            const maxRetract = halfH - 2;
+            const maxRetract = halfH + 2;
             const slideOffset = maxRetract * openProg;
 
             const topLeafY = trackYTop - slideOffset;
             const botLeafY = trackYTop + halfH + slideOffset;
 
-            const doorX = p.x + 1;
-            const doorW = p.w - 2;
+            const doorX = isNarrow ? (p.x + 0.5) : (p.x + 1);
+            const doorW = isNarrow ? (p.w - 1) : (p.w - 2);
 
-            // Clip sliding leaves within the frame
+            // Clip sliding leaves within the frame and wall pockets
             ctx.save();
             ctx.beginPath();
-            ctx.rect(p.x - 4, p.y - 12, p.w + 8, p.h + 24);
+            ctx.rect(p.x - pad - 1, p.y - 45, p.w + pad * 2 + 2, p.h + 90);
             ctx.clip();
 
             const drawArmoredLeaf = (gy, gh, isTopPanel) => {
                 if (gh <= 1) return;
 
                 // Gunmetal Steel Armor Plate
-                ctx.fillStyle = '#334155';
+                ctx.fillStyle = leafSteel;
                 ctx.fillRect(doorX, gy, doorW, gh);
 
                 // Steel Plate Outer Bezel
-                ctx.strokeStyle = '#94a3b8';
-                ctx.lineWidth = 1.2;
+                ctx.strokeStyle = leafBezel;
+                ctx.lineWidth = isNarrow ? 1 : 1.2;
                 ctx.strokeRect(doorX, gy, doorW, gh);
 
                 // Reinforced Armor Cross Bracing / Ribs
-                ctx.strokeStyle = '#1e293b';
-                ctx.lineWidth = 1.5;
+                ctx.strokeStyle = leafBrace;
+                ctx.lineWidth = isNarrow ? 1 : 1.5;
                 ctx.beginPath();
-                ctx.moveTo(doorX + 2, gy + 3); ctx.lineTo(doorX + doorW - 2, gy + gh - 3);
-                ctx.moveTo(doorX + doorW - 2, gy + 3); ctx.lineTo(doorX + 2, gy + gh - 3);
+                ctx.moveTo(doorX + 1, gy + 3); ctx.lineTo(doorX + doorW - 1, gy + gh - 3);
+                ctx.moveTo(doorX + doorW - 1, gy + 3); ctx.lineTo(doorX + 1, gy + gh - 3);
                 ctx.stroke();
 
                 // Narrow Armored Glass Slit (Tactical observation window)
-                const slitY = gy + gh / 2 - 2;
-                ctx.fillStyle = 'rgba(56, 189, 248, 0.7)'; // Cyan armor glass
-                ctx.fillRect(doorX + 2, slitY, doorW - 4, 4);
-                ctx.strokeStyle = '#0284c7';
+                const slitY = gy + gh / 2 - (isNarrow ? 1.5 : 2);
+                const slitH = isNarrow ? 3 : 4;
+                ctx.fillStyle = glassColor;
+                ctx.fillRect(doorX + 1, slitY, doorW - 2, slitH);
+                ctx.strokeStyle = glassBorder;
                 ctx.lineWidth = 0.8;
-                ctx.strokeRect(doorX + 2, slitY, doorW - 4, 4);
+                ctx.strokeRect(doorX + 1, slitY, doorW - 2, slitH);
 
                 // Heavy Interlocking Steel Lock Teeth at center seam
                 ctx.fillStyle = '#f59e0b';
-                const seamY = isTopPanel ? (gy + gh - 3) : gy;
-                ctx.fillRect(doorX, seamY, doorW, 3);
+                const seamY = isTopPanel ? (gy + gh - 2.5) : gy;
+                ctx.fillRect(doorX, seamY, doorW, 2.5);
             };
 
             drawArmoredLeaf(topLeafY, halfH, true);
@@ -16303,11 +17092,12 @@ function drawDetailedRock(ctx, obs) {
 }
 
 function drawDetailedIceLake(ctx, obs) {
+    if (!obs) return;
     const time = Date.now() * 0.001;
     let cx = 0, cy = 0;
-    const pts = obs.points || [];
+    const pts = (obs.points && Array.isArray(obs.points)) ? obs.points : [];
     if (pts.length > 0) {
-        pts.forEach(p => { cx += p.x; cy += p.y; });
+        pts.forEach(p => { if (p) { cx += p.x; cy += p.y; } });
         cx /= pts.length;
         cy /= pts.length;
     } else {
@@ -16315,78 +17105,87 @@ function drawDetailedIceLake(ctx, obs) {
     }
 
     ctx.save();
+    try {
+        // 1. Deep frosted ice blue fill with glowing radial aura
+        ctx.fillStyle = 'rgba(12, 74, 110, 0.55)';
+        ctx.fill();
 
-    // 1. Deep frosted ice blue fill with glowing radial aura
-    ctx.fillStyle = 'rgba(12, 74, 110, 0.55)';
-    ctx.fill();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
 
-    ctx.strokeStyle = '#38bdf8';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
+        // 2. Animated ice crack lattice & glowing frost veins
+        if (pts.length >= 3) {
+            const numCracks = Math.min(pts.length, 6);
+            for (let i = 0; i < numCracks; i += 2) {
+                const p1 = pts[i];
+                const p2 = pts[(i + Math.floor(pts.length / 2)) % pts.length];
+                const p3 = pts[(i + 1) % pts.length];
+                if (!p1 || !p2 || !p3) continue;
 
-    // 2. Animated ice crack lattice & glowing frost veins
-    if (pts.length > 0) {
-        const numCracks = Math.min(pts.length, 6);
-        for (let i = 0; i < numCracks; i += 2) {
-            const p1 = pts[i];
-            const p2 = pts[(i + Math.floor(pts.length / 2)) % pts.length];
-            const p3 = pts[(i + 1) % pts.length];
+                const crackGlow = 0.4 + Math.sin(time * 2.2 + i) * 0.35;
+                ctx.strokeStyle = `rgba(186, 230, 254, ${crackGlow})`;
+                ctx.lineWidth = 1.4;
 
-            const crackGlow = 0.4 + Math.sin(time * 2.2 + i) * 0.35;
-            ctx.strokeStyle = `rgba(186, 230, 254, ${crackGlow})`;
-            ctx.lineWidth = 1.4;
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.quadraticCurveTo(cx + Math.sin(time + i) * 12, cy + Math.cos(time + i) * 12, p2.x, p2.y);
+                ctx.stroke();
 
-            ctx.beginPath();
-            ctx.moveTo(p1.x, p1.y);
-            ctx.quadraticCurveTo(cx + Math.sin(time + i) * 12, cy + Math.cos(time + i) * 12, p2.x, p2.y);
-            ctx.stroke();
+                // Branching crack line
+                ctx.beginPath();
+                ctx.moveTo((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
+                ctx.lineTo(p3.x, p3.y);
+                ctx.stroke();
+            }
 
-            // Branching crack line
-            ctx.beginPath();
-            ctx.moveTo((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
-            ctx.lineTo(p3.x, p3.y);
-            ctx.stroke();
+            // 3. Dynamic floating frost sparkles / ice crystals shimmering
+            for (let s = 0; s < 7; s++) {
+                const sparkleAng = time * 0.7 + s * 0.9;
+                const sparkleR = 40 + Math.sin(time * 1.5 + s) * 35;
+                const sx = cx + Math.cos(sparkleAng) * sparkleR;
+                const sy = cy + Math.sin(sparkleAng) * sparkleR * 0.6;
+
+                const alpha = 0.3 + Math.sin(time * 3 + s) * 0.3;
+                ctx.fillStyle = `rgba(186, 230, 254, ${alpha})`;
+                ctx.beginPath();
+                ctx.arc(sx, sy, 2 + Math.sin(time * 4 + s), 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
-
-        // 3. Dynamic floating frost sparkles / ice crystals shimmering
-        for (let s = 0; s < 7; s++) {
-            const sparkleAng = time * 0.7 + s * 0.9;
-            const sparkleR = 40 + Math.sin(time * 1.5 + s) * 35;
-            const sx = cx + Math.cos(sparkleAng) * sparkleR;
-            const sy = cy + Math.sin(sparkleAng) * sparkleR * 0.6;
-
-            const alpha = 0.3 + Math.sin(time * 3 + s) * 0.3;
-            ctx.fillStyle = `rgba(186, 230, 254, ${alpha})`;
-            ctx.beginPath();
-            ctx.arc(sx, sy, 2 + Math.sin(time * 4 + s), 0, Math.PI * 2);
-            ctx.fill();
-        }
+    } catch (e) {
+        console.error("Error in drawDetailedIceLake:", e);
+    } finally {
+        ctx.restore();
     }
 
-    ctx.restore();
-
-    // 4. Render Cocytus Satan at ice lake center (Culled if Satan is offscreen)
+    // 4. Render Cocytus Satan at ice lake center (Generous bounds to prevent false culling)
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
     if (levelId === 'level0_test') {
-        const satanX = 500, satanY = 480, satanR = 240;
-        const camX = window.cameraX || 0;
-        const camY = window.cameraY || 0;
+        const satanX = 500, satanY = 480, satanR = 360;
+        const camX = Math.max(0, window.cameraX || 0);
+        const camY = Math.max(0, window.cameraY || 0);
         const viewL = camX - satanR;
         const viewR = camX + (typeof width !== 'undefined' ? width : 1200) + satanR;
-        const viewT = -camY - satanR;
-        const viewB = -camY + (typeof height !== 'undefined' ? height : 720) + satanR;
+        const viewT = camY - satanR;
+        const viewB = camY + (typeof height !== 'undefined' ? height : 720) + satanR;
         if (satanX >= viewL && satanX <= viewR && satanY >= viewT && satanY <= viewB) {
-            drawFrozenSatan(ctx, satanX, satanY);
+            try {
+                drawFrozenSatan(ctx, satanX, satanY);
+            } catch (err) {
+                console.error("Error drawing frozen satan:", err);
+            }
         }
     }
 }
 
 function drawDetailedLava(ctx, obs) {
+    if (!obs) return;
     const time = Date.now() * 0.001;
     let cx = 0, cy = 0;
-    const pts = obs.points || [];
+    const pts = (obs.points && Array.isArray(obs.points)) ? obs.points : [];
     if (pts.length > 0) {
-        pts.forEach(p => { cx += p.x; cy += p.y; });
+        pts.forEach(p => { if (p) { cx += p.x; cy += p.y; } });
         cx /= pts.length;
         cy /= pts.length;
     } else {
@@ -16394,69 +17193,74 @@ function drawDetailedLava(ctx, obs) {
     }
 
     ctx.save();
+    try {
+        // 1. Molten magma fill with pulsing glowing core
+        const lavaPulse = 0.8 + Math.sin(time * 3.2 + cx * 0.02) * 0.18;
+        ctx.fillStyle = `rgba(220, 38, 38, ${lavaPulse})`;
+        ctx.fill();
 
-    // 1. Molten magma fill with pulsing glowing core
-    const lavaPulse = 0.8 + Math.sin(time * 3.2 + cx * 0.02) * 0.18;
-    ctx.fillStyle = `rgba(220, 38, 38, ${lavaPulse})`;
-    ctx.fill();
+        // Incandescent magma bank stroke
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 3;
+        ctx.stroke();
 
-    // Incandescent magma bank stroke
-    ctx.strokeStyle = '#f97316';
-    ctx.lineWidth = 3;
-    ctx.stroke();
+        // Inner bright yellow crust outline
+        ctx.strokeStyle = '#fef08a';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
 
-    // Inner bright yellow crust outline
-    ctx.strokeStyle = '#fef08a';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
+        // 2. Animated flowing magma current ripples
+        if (pts.length >= 2) {
+            ctx.lineWidth = 2;
+            const numRipples = Math.min(pts.length, 8);
+            for (let i = 0; i < numRipples; i += 2) {
+                const p1 = pts[i];
+                const p2 = pts[(i + 1) % pts.length];
+                if (!p1 || !p2) continue;
 
-    // 2. Animated flowing magma current ripples
-    if (pts.length > 0) {
-        ctx.lineWidth = 2;
-        const numRipples = Math.min(pts.length, 8);
-        for (let i = 0; i < numRipples; i += 2) {
-            const p1 = pts[i];
-            const p2 = pts[(i + 1) % pts.length];
+                const flowAlpha = 0.5 + Math.sin(time * 4 + i) * 0.3;
+                ctx.strokeStyle = `rgba(254, 240, 138, ${flowAlpha})`;
 
-            const flowAlpha = 0.5 + Math.sin(time * 4 + i) * 0.3;
-            ctx.strokeStyle = `rgba(254, 240, 138, ${flowAlpha})`;
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.quadraticCurveTo(
+                    (p1.x + p2.x) * 0.5 + Math.sin(time * 2 + i) * 15,
+                    (p1.y + p2.y) * 0.5 + Math.cos(time * 2 + i) * 15,
+                    p2.x, p2.y
+                );
+                ctx.stroke();
+            }
 
-            ctx.beginPath();
-            ctx.moveTo(p1.x, p1.y);
-            ctx.quadraticCurveTo(
-                (p1.x + p2.x) * 0.5 + Math.sin(time * 2 + i) * 15,
-                (p1.y + p2.y) * 0.5 + Math.cos(time * 2 + i) * 15,
-                p2.x, p2.y
-            );
-            ctx.stroke();
+            // 3. Popping lava bubbles & floating embers
+            for (let b = 0; b < 5; b++) {
+                const bubbleProgress = (time * 1.5 + b * 0.4) % 1.0;
+                const bp1 = pts[b % pts.length];
+                const bp2 = pts[(b + 3) % pts.length] || pts[0];
+                if (!bp1 || !bp2) continue;
+                const bx = bp1.x + (bp2.x - bp1.x) * bubbleProgress;
+                const by = bp1.y + (bp2.y - bp1.y) * bubbleProgress;
+
+                // Popping bubble ring
+                const bubbleR = 2 + bubbleProgress * 6;
+                const bubbleAlpha = 1.0 - bubbleProgress;
+
+                ctx.strokeStyle = `rgba(255, 255, 255, ${bubbleAlpha})`;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.arc(bx, by, bubbleR, 0, Math.PI * 2);
+                ctx.stroke();
+
+                ctx.fillStyle = `rgba(254, 240, 138, ${bubbleAlpha})`;
+                ctx.beginPath();
+                ctx.arc(bx, by - bubbleProgress * 12, 1.8, 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
-
-        // 3. Popping lava bubbles & floating embers
-        for (let b = 0; b < 5; b++) {
-            const bubbleProgress = (time * 1.5 + b * 0.4) % 1.0;
-            const bp1 = pts[b % pts.length];
-            const bp2 = pts[(b + 3) % pts.length];
-            const bx = bp1.x + (bp2.x - bp1.x) * bubbleProgress;
-            const by = bp1.y + (bp2.y - bp1.y) * bubbleProgress;
-
-            // Popping bubble ring
-            const bubbleR = 2 + bubbleProgress * 6;
-            const bubbleAlpha = 1.0 - bubbleProgress;
-
-            ctx.strokeStyle = `rgba(255, 255, 255, ${bubbleAlpha})`;
-            ctx.lineWidth = 1.5;
-            ctx.beginPath();
-            ctx.arc(bx, by, bubbleR, 0, Math.PI * 2);
-            ctx.stroke();
-
-            ctx.fillStyle = `rgba(254, 240, 138, ${bubbleAlpha})`;
-            ctx.beginPath();
-            ctx.arc(bx, by - bubbleProgress * 12, 1.8, 0, Math.PI * 2);
-            ctx.fill();
-        }
+    } catch (e) {
+        console.error("Error in drawDetailedLava:", e);
+    } finally {
+        ctx.restore();
     }
-
-    ctx.restore();
 }
 
 function applyObstacleTheme(obs) {
@@ -16485,58 +17289,112 @@ function applyObstacleTheme(obs) {
         ctx.stroke();
         ctx.setLineDash([]);
     } else {
-        ctx.fillStyle = '#0f172a';
-        ctx.fill();
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+        if (levelId === 'level7_lab') {
+            ctx.fillStyle = (obs.type === 'low_wall') ? '#064e3b' : '#051914';
+            ctx.fill();
+            ctx.strokeStyle = (obs.type === 'low_wall') ? '#34d399' : '#10b981';
+            ctx.lineWidth = 2.2;
+            ctx.stroke();
+        } else if (levelId === 'level8_test') {
+            // Level 7 Emerald color matching for Level 8 heavy armored walls
+            ctx.fillStyle = (obs.type === 'low_wall') ? '#064e3b' : '#051914';
+            ctx.fill();
+            ctx.strokeStyle = (obs.type === 'low_wall') ? '#34d399' : '#10b981';
+            ctx.lineWidth = 2.2;
+            ctx.stroke();
+            ctx.strokeStyle = 'rgba(52, 211, 153, 0.35)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        } else {
+            ctx.fillStyle = '#0f172a';
+            ctx.fill();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
     }
 }
 
 function isWorldRectVisible(x, y, w, h, margin = 150) {
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
-    if (levelId !== 'level0_test' && levelId !== 'level4_yacht' && levelId !== 'level6_train' && levelId !== 'level7_lab') {
+    if (levelId !== 'level0_test' && levelId !== 'level4_yacht' && levelId !== 'level6_train' && levelId !== 'level7_lab' && levelId !== 'level8_test') {
         return true;
     }
-    const camX = window.cameraX || 0;
-    const camY = window.cameraY || 0;
-    const viewL = camX - margin;
-    const viewR = camX + (typeof width !== 'undefined' ? width : 1200) + margin;
-    const viewT = -camY - margin;
-    const viewB = -camY + (typeof height !== 'undefined' ? height : 720) + margin;
+    const camX = Math.max(0, window.cameraX || 0);
+    const camY = Math.max(0, window.cameraY || 0);
+    const effMargin = (levelId === 'level0_test') ? 350 : margin;
+    const viewL = camX - effMargin;
+    const viewR = camX + (typeof width !== 'undefined' ? width : 1200) + effMargin;
+    const viewT = camY - effMargin;
+    const viewB = camY + (typeof height !== 'undefined' ? height : 720) + effMargin;
 
     return (x + w >= viewL && x <= viewR && y + h >= viewT && y <= viewB);
 }
 
 function drawObstacle(obs) {
-    const camX = window.cameraX || 0;
-    const camY = window.cameraY || 0;
+    if (!obs) return;
+    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
+    const camX = Math.max(0, window.cameraX || 0);
+    const camY = Math.max(0, window.cameraY || 0);
     const bb = ensureObstacleBBox(obs);
 
-    const margin = 150;
+    const margin = (levelId === 'level0_test') ? 350 : 150;
     if (bb.maxX < camX - margin || bb.minX > camX + width + margin) return;
-    if (bb.maxY < -camY - margin || bb.minY > -camY + height + margin) return;
+    if (bb.maxY < camY - margin || bb.minY > camY + height + margin) return;
 
-    if (obs.points && Array.isArray(obs.points)) {
+    if (obs.points && Array.isArray(obs.points) && obs.points.length > 0 && obs.points[0]) {
         ctx.save();
-        ctx.fillStyle = 'rgba(0,0,0,0.35)';
-        ctx.beginPath();
-        ctx.moveTo(obs.points[0].x + 3, obs.points[0].y + 3);
-        for (let i = 1; i < obs.points.length; i++) {
-            ctx.lineTo(obs.points[i].x + 3, obs.points[i].y + 3);
-        }
-        ctx.closePath();
-        ctx.fill();
+        try {
+            ctx.fillStyle = 'rgba(0,0,0,0.35)';
+            ctx.beginPath();
+            ctx.moveTo(obs.points[0].x + 3, obs.points[0].y + 3);
+            for (let i = 1; i < obs.points.length; i++) {
+                if (obs.points[i]) ctx.lineTo(obs.points[i].x + 3, obs.points[i].y + 3);
+            }
+            ctx.closePath();
+            ctx.fill();
 
-        ctx.beginPath();
-        ctx.moveTo(obs.points[0].x, obs.points[0].y);
-        for (let i = 1; i < obs.points.length; i++) {
-            ctx.lineTo(obs.points[i].x, obs.points[i].y);
-        }
-        ctx.closePath();
+            ctx.beginPath();
+            ctx.moveTo(obs.points[0].x, obs.points[0].y);
+            for (let i = 1; i < obs.points.length; i++) {
+                if (obs.points[i]) ctx.lineTo(obs.points[i].x, obs.points[i].y);
+            }
+            ctx.closePath();
 
-        applyObstacleTheme(obs);
-        ctx.restore();
+            applyObstacleTheme(obs);
+
+            if ((levelId === 'level8_test' || (levelId === 'level7_lab' && obs.label && obs.label.includes('HEAVY ARMORED WALL'))) && obs.points && obs.points.length >= 2) {
+                for (let i = 0; i < obs.points.length; i++) {
+                    const p1 = obs.points[i];
+                    const p2 = obs.points[(i + 1) % obs.points.length];
+                    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                    if (segLen >= 30) {
+                        const numRivets = Math.floor(segLen / 26);
+                        for (let r = 1; r <= numRivets; r++) {
+                            const t = r / (numRivets + 1);
+                            const rx = p1.x + (p2.x - p1.x) * t;
+                            const ry = p1.y + (p2.y - p1.y) * t;
+                            ctx.fillStyle = '#02120e';
+                            ctx.beginPath();
+                            ctx.arc(rx, ry, 2.2, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.fillStyle = '#064e3b';
+                            ctx.beginPath();
+                            ctx.arc(rx - 0.4, ry - 0.4, 1.4, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.fillStyle = '#34d399';
+                            ctx.beginPath();
+                            ctx.arc(rx - 0.6, ry - 0.6, 0.6, 0, Math.PI * 2);
+                            ctx.fill();
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.error("Error drawing obstacle:", e);
+        } finally {
+            ctx.restore();
+        }
         return;
     }
 
@@ -16566,10 +17424,45 @@ function drawObstacle(obs) {
         return;
     }
 
+    // 2026-11-02：正圆（canvas arc 绘制，完美光滑无棱角）
+    if (obs.circle) {
+        const { cx, cy, radius } = obs.circle;
+        ctx.save();
+        // 阴影
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        ctx.arc(cx + 3, cy + 3, radius, 0, Math.PI * 2);
+        ctx.fill();
+        // 本体
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        applyObstacleTheme(obs);
+
+        // 如果存在内部同心圆环（如 Level 7 圆桌上的悬空灯环）
+        if (obs.innerRing || (levelId === 'level7_lab' && obs.circle)) {
+            const ringR = obs.innerRing ? obs.innerRing.radius : (radius - 12);
+            const ringW = obs.innerRing ? obs.innerRing.width : 8;
+            ctx.beginPath();
+            ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+            ctx.strokeStyle = '#34d399';
+            ctx.lineWidth = ringW;
+            ctx.stroke();
+
+            // 发光细高光线
+            ctx.beginPath();
+            ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+            ctx.strokeStyle = '#e6fffa';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        ctx.restore();
+        return;
+    }
+
     if (obs.x + obs.w < camX - 150 || obs.x > camX + width + 150) {
         return;
     }
-    const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : 'level1_airport';
     if (levelId === 'level3_bank' && !obs.isOuterBorder) {
         if (typeof isObjectRevealed === 'function' && !isObjectRevealed(obs.x, obs.y, obs.w, obs.h)) {
             return;
@@ -16659,18 +17552,17 @@ function drawObstacle(obs) {
             grad.addColorStop(1, '#0c4a6e'); // 深蓝底
             wallStroke = '#00e5ff'; // 亮青高光池边
             gridStroke = 'rgba(0, 229, 255, 0.25)'; // 水波网格线
-        } else if (levelId === 'level7_lab') {
-            // 顶石科研综合体：高科钛金装甲墙 + 翡翠生化荧光战术描边
-            grad.addColorStop(0, '#0f172a');
-            grad.addColorStop(1, '#022c22');
-            wallStroke = '#10b981';
-            gridStroke = 'rgba(16, 185, 129, 0.25)';
         } else if ((levelId === 'level0_test' || levelId === 'level6_train')) {
             // 军用特别快车装甲车体外壳：暗黑装甲钢 + 冰蓝战术描边
             grad.addColorStop(0, '#1c1917');
             grad.addColorStop(1, '#0f172a');
             wallStroke = '#38bdf8';
             gridStroke = 'rgba(56, 189, 248, 0.2)';
+        } else if (levelId === 'level7_lab' || levelId === 'level8_test') {
+            grad.addColorStop(0, '#06201b');
+            grad.addColorStop(1, '#02120e');
+            wallStroke = '#10b981';
+            gridStroke = 'rgba(16, 185, 129, 0.2)';
         } else if (levelId === 'level5_hotel') {
             // 闪灵红酒店大堂：奢华暗红色实心墙（深度极高，极易辨识）
             grad.addColorStop(0, '#360407'); // 深绛红色/红褐玛瑙
@@ -17748,6 +18640,9 @@ function drawWeaponIcons() {
     const gap = 10;
     const startX = 25;
     const startY = height - 62;
+    // 2026-11-02 修复：键位标签错位——显式设置文本对齐，防止继承残留的 center/middle
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
 
     const isLevel0 = (getCurrentLevelId() === 'level0_test');
 
@@ -17958,14 +18853,22 @@ function drawWeaponIcons() {
 }
 
 function drawInfernalWatcher(cam) {
-    ctx.save();
-    ctx.translate(cam.x, cam.y);
+    if (!cam || typeof cam !== 'object') return;
+    if (typeof cam.x !== 'number' || typeof cam.y !== 'number' || isNaN(cam.x) || isNaN(cam.y)) return;
     
-    const range = cam.fovRange || 450;
-    const halfAngle = cam.fovAngle ? (cam.fovAngle / 2) : 0.42;
-    const ang = cam.currentAngle;
-    const isDetecting = cam.detecting;
+    const baseAng = (typeof cam.baseAngle === 'number' && !isNaN(cam.baseAngle)) ? cam.baseAngle : 0;
+    if (cam.currentAngle === undefined || isNaN(cam.currentAngle)) {
+        cam.currentAngle = baseAng;
+    }
+    const range = (typeof cam.fovRange === 'number' && !isNaN(cam.fovRange) && cam.fovRange > 0) ? cam.fovRange : 450;
+    const halfAngle = (typeof cam.fovAngle === 'number' && !isNaN(cam.fovAngle) && cam.fovAngle > 0) ? (cam.fovAngle / 2) : 0.42;
+    const ang = (typeof cam.currentAngle === 'number' && !isNaN(cam.currentAngle)) ? cam.currentAngle : baseAng;
+    const isDetecting = !!cam.detecting;
     const type = cam.type || 'soul_lantern';
+
+    ctx.save();
+    try {
+        ctx.translate(cam.x, cam.y);
 
     // =========================================================
     // 1. 扫描视锥绘制 (TACTICAL INFERNAL SCAN CONE WITH RUNE RINGS)
@@ -18098,7 +19001,7 @@ function drawInfernalWatcher(cam) {
 
         // 折叠暗黑石翼
         ctx.save();
-        ctx.rotate(cam.baseAngle + Math.sin(timeNow * 1.5) * 0.05);
+        ctx.rotate(baseAng + Math.sin(timeNow * 1.5) * 0.05);
         ctx.fillStyle = '#221915';
         ctx.strokeStyle = '#0f0a08';
         ctx.lineWidth = 1.8;
@@ -18205,17 +19108,27 @@ function drawInfernalWatcher(cam) {
         ctx.fill();
         ctx.restore();
     }
-
-    ctx.restore();
+    } catch (e) {
+        console.error("Error in drawInfernalWatcher:", e);
+    } finally {
+        ctx.restore();
+    }
 }
 
 function drawCamera(cam) {
+    if (!cam || typeof cam !== 'object') return;
+    if (typeof cam.x !== 'number' || typeof cam.y !== 'number' || isNaN(cam.x) || isNaN(cam.y)) return;
+    if (cam.baseAngle === undefined || isNaN(cam.baseAngle)) cam.baseAngle = 0;
+    if (cam.currentAngle === undefined || isNaN(cam.currentAngle)) {
+        cam.currentAngle = cam.baseAngle;
+    }
     if (cam.type === 'soul_lantern' || cam.type === 'gargoyle_sentinel' || cam.type === 'infernal_eye' || (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test')) {
         drawInfernalWatcher(cam);
         return;
     }
     ctx.save();
-    ctx.translate(cam.x, cam.y);
+    try {
+        ctx.translate(cam.x, cam.y);
     
     // 1. 监控扇区视觉：显著加强的半透明锥形光，保留高对比度原色且十分凸显 (Highly visible scan cone)
     ctx.fillStyle = cam.detecting ? 'rgba(255, 51, 51, 0.32)' : 'rgba(0, 255, 102, 0.16)';
@@ -18328,7 +19241,11 @@ function drawCamera(cam) {
     ctx.arc(4, -3, 1.5, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.restore();
+    } catch (e) {
+        console.error("Error in drawCamera:", e);
+    } finally {
+        ctx.restore();
+    }
 }
 
 function drawDropItems() {
@@ -18816,33 +19733,40 @@ function drawFrozenSatan(ctx, cx, cy) {
 // 地狱三头犬 (CERBERUS) 专属高度写实美术渲染系统 (三头·蛇毛·龙尾·双层护甲)
 // =========================================================================
 function drawCerberus(e) {
-    const x = e.x, y = e.y, angle = e.angle;
-    const hp = e.hp, maxHp = e.maxHp || 260;
-    const shield = e.shield || 0, maxShield = e.maxShield || 160;
-    const walkCycle = e.walkCycle || 0;
-    const isAlert = e.alert;
-    const hitFlash = e.hitTimer > 0;
-    const alpha = (e.deathAlpha !== undefined) ? Math.max(0, e.deathAlpha) : 1.0;
-    const isPouncing = e.isPouncing;
-    const tailLash = e.tailLashAnim || 0;
+    if (!e || typeof e !== 'object') return;
+    if (typeof e.x !== 'number' || typeof e.y !== 'number' || isNaN(e.x) || isNaN(e.y)) return;
+
+    const x = e.x, y = e.y;
+    const angle = (typeof e.angle === 'number' && !isNaN(e.angle)) ? e.angle : 0;
+    const hp = (typeof e.hp === 'number' && !isNaN(e.hp)) ? e.hp : 0;
+    const maxHp = (typeof e.maxHp === 'number' && !isNaN(e.maxHp) && e.maxHp > 0) ? e.maxHp : 260;
+    const shield = (typeof e.shield === 'number' && !isNaN(e.shield)) ? e.shield : 0;
+    const maxShield = (typeof e.maxShield === 'number' && !isNaN(e.maxShield) && e.maxShield > 0) ? e.maxShield : 160;
+    const walkCycle = (typeof e.walkCycle === 'number' && !isNaN(e.walkCycle)) ? e.walkCycle : 0;
+    const isAlert = !!e.alert;
+    const hitFlash = typeof e.hitTimer === 'number' && e.hitTimer > 0;
+    const alpha = (typeof e.deathAlpha === 'number' && !isNaN(e.deathAlpha)) ? Math.max(0, e.deathAlpha) : 1.0;
+    const isPouncing = !!e.isPouncing;
+    const tailLash = (typeof e.tailLashAnim === 'number' && !isNaN(e.tailLashAnim)) ? e.tailLashAnim : 0;
 
     ctx.save();
-    ctx.globalAlpha = alpha;
+    try {
+        ctx.globalAlpha = alpha;
 
     const isInBlind = inBlindZone(x, y);
 
     // 1. 盲区紫色战术高亮轮廓 (Purple Outline in Blind Zone)
     if (isInBlind) {
         ctx.save();
-        ctx.strokeStyle = '#c084fc';
-        ctx.shadowColor = '#a855f7';
+        ctx.strokeStyle = '#dc2626';
+        ctx.shadowColor = '#991b1b';
         ctx.shadowBlur = 18;
         ctx.lineWidth = 3.2;
         ctx.beginPath();
         ctx.ellipse(x, y, 38, 28, angle, 0, Math.PI * 2);
         ctx.stroke();
 
-        ctx.strokeStyle = '#f3e8ff';
+        ctx.strokeStyle = '#fca5a5';
         ctx.setLineDash([5, 4]);
         ctx.lineWidth = 1.5;
         ctx.beginPath();
@@ -18868,13 +19792,22 @@ function drawCerberus(e) {
         ctx.shadowBlur = 4;
         ctx.fillText('🐺 CERBERUS · 地狱三头犬', 0, barY - 4);
 
+        if (e.pendingDamage && e.pendingDamage > 0 && (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test')) {
+            ctx.font = 'bold 10px monospace';
+            ctx.fillStyle = '#c084fc';
+            ctx.shadowColor = '#a855f7';
+            ctx.shadowBlur = 12;
+            ctx.fillText(`⚡ 盲区存伤: +${e.pendingDamage}`, 0, barY - 16);
+            ctx.shadowBlur = 0;
+        }
+
         // Frame
         ctx.fillStyle = 'rgba(10, 10, 15, 0.88)';
         ctx.fillRect(barX - 1.5, barY - 1, barW + 3, 11);
 
-        // Upper Bar: Demonic Crest Armor / Shield (Cyan-Violet)
+        // Upper Bar: Demonic Crest Armor / Shield (Molten Ember)
         const sPct = Math.max(0, Math.min(1, shield / maxShield));
-        ctx.fillStyle = '#818cf8';
+        ctx.fillStyle = '#ea580c';
         ctx.fillRect(barX, barY, barW * sPct, 4);
 
         // Lower Bar: Infernal Flesh HP (Deep Crimson)
@@ -18897,9 +19830,9 @@ function drawCerberus(e) {
     if (shield > 0) {
         ctx.save();
         const pulse = 1 + Math.sin(Date.now() * 0.008) * 0.05;
-        ctx.strokeStyle = 'rgba(129, 140, 248, 0.65)';
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.75)';
         ctx.lineWidth = 1.8;
-        ctx.shadowColor = '#818cf8';
+        ctx.shadowColor = '#dc2626';
         ctx.shadowBlur = 14;
         ctx.beginPath();
         // Hexagonal runic shield boundary
@@ -18914,7 +19847,7 @@ function drawCerberus(e) {
         ctx.stroke();
 
         // 3 floating infernal ward runes
-        ctx.fillStyle = 'rgba(192, 132, 252, 0.7)';
+        ctx.fillStyle = 'rgba(249, 115, 22, 0.85)';
         for (let i = 0; i < 3; i++) {
             const ra = (i * Math.PI * 2 / 3) + Date.now() * 0.002;
             ctx.beginPath();
@@ -19054,13 +19987,13 @@ function drawCerberus(e) {
     ctx.closePath();
     ctx.fill();
 
-    // Toxic venom eye
-    ctx.fillStyle = '#10b981';
+    // Molten amber dragon-viper eye
+    ctx.fillStyle = '#f59e0b';
     ctx.beginPath();
     ctx.arc(3, -1.8, 1.2, 0, Math.PI * 2);
     ctx.fill();
 
-    // Open jaw & dripping poison fangs
+    // Open jaw & dripping magma fangs
     ctx.strokeStyle = '#f87171';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -19068,8 +20001,8 @@ function drawCerberus(e) {
     ctx.lineTo(8, 3.5); // lower viper jaw
     ctx.stroke();
 
-    // Green poison drip particle
-    ctx.fillStyle = '#34d399';
+    // Molten magma drip particle
+    ctx.fillStyle = '#ea580c';
     ctx.beginPath();
     ctx.arc(8, 4.2, 1.4, 0, Math.PI * 2);
     ctx.fill();
@@ -19121,7 +20054,7 @@ function drawCerberus(e) {
     }
     ctx.restore();
 
-    // 3.6 蛇毛 (Serpentine Venomous Mane along Neck and Shoulders)
+    // 3.6 蛇毛 (Serpentine Scorched Mane along Neck and Shoulders)
     // 8 writhing viper heads emerging from the neck ridge and shoulders
     ctx.save();
     const snakeOffsets = [
@@ -19143,22 +20076,22 @@ function drawCerberus(e) {
         const headX = snk.bx + Math.cos(totalAngle) * snk.len;
         const headY = snk.by + Math.sin(totalAngle) * snk.len;
 
-        // Snake slender body
-        ctx.strokeStyle = (idx % 2 === 0) ? '#064e3b' : '#047857';
+        // Snake slender body (Scorched charcoal and deep crimson)
+        ctx.strokeStyle = (idx % 2 === 0) ? '#18181b' : '#450a0a';
         ctx.lineWidth = 1.8;
         ctx.beginPath();
         ctx.moveTo(snk.bx, snk.by);
         ctx.quadraticCurveTo(midX, midY, headX, headY);
         ctx.stroke();
 
-        // Tiny diamond viper head
-        ctx.fillStyle = '#065f46';
+        // Tiny diamond viper head (Deep volcanic red)
+        ctx.fillStyle = '#3b0f0f';
         ctx.beginPath();
         ctx.arc(headX, headY, 2.2, 0, Math.PI * 2);
         ctx.fill();
 
-        // Emerald glowing viper eye
-        ctx.fillStyle = '#34d399';
+        // Molten ember glowing viper eye
+        ctx.fillStyle = '#f97316';
         ctx.beginPath();
         ctx.arc(headX + Math.cos(totalAngle) * 1.2, headY + Math.sin(totalAngle) * 1.2, 0.8, 0, Math.PI * 2);
         ctx.fill();
@@ -19186,18 +20119,27 @@ function drawCerberus(e) {
     }
 
     ctx.restore(); // Restore local entity transform
-    ctx.restore(); // Restore global context
+    } catch (err) {
+        console.error("Error in drawCerberus:", err);
+    } finally {
+        ctx.restore(); // Restore global context
+    }
 }
 
 // 独立犬首绘制函数 (Individual Hound Head Renderer)
 function drawHoundHead(ctx, hx, hy, baseAng, walkCycle, isPouncing, hitFlash, isAlpha) {
+    if (!ctx) return;
+    const safeHx = (typeof hx === 'number' && !isNaN(hx)) ? hx : 0;
+    const safeHy = (typeof hy === 'number' && !isNaN(hy)) ? hy : 0;
+    const safeAng = (typeof baseAng === 'number' && !isNaN(baseAng)) ? baseAng : 0;
     ctx.save();
-    ctx.translate(hx, hy);
-    const snarlJitter = isPouncing ? (Math.random() - 0.5) * 0.08 : 0;
-    ctx.rotate(baseAng + snarlJitter);
+    try {
+        ctx.translate(safeHx, safeHy);
+        const snarlJitter = isPouncing ? (Math.random() - 0.5) * 0.08 : 0;
+        ctx.rotate(safeAng + snarlJitter);
 
-    const scale = isAlpha ? 1.25 : 1.0;
-    ctx.scale(scale, scale);
+        const scale = isAlpha ? 1.25 : 1.0;
+        ctx.scale(scale, scale);
 
     // Muscular neck connection
     ctx.fillStyle = '#18181b';
@@ -19205,8 +20147,8 @@ function drawHoundHead(ctx, hx, hy, baseAng, walkCycle, isPouncing, hitFlash, is
     ctx.ellipse(-6, 0, 8, 6, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Backward sweeping demonic horns
-    ctx.fillStyle = '#3f3f46';
+    // Backward sweeping obsidian demonic horns with molten crimson accents
+    ctx.fillStyle = '#1c1917';
     // Top Horn
     ctx.beginPath();
     ctx.moveTo(-2, -5);
@@ -19214,6 +20156,10 @@ function drawHoundHead(ctx, hx, hy, baseAng, walkCycle, isPouncing, hitFlash, is
     ctx.quadraticCurveTo(-7, -8, 0, -4);
     ctx.closePath();
     ctx.fill();
+    ctx.strokeStyle = '#991b1b';
+    ctx.lineWidth = 0.9;
+    ctx.stroke();
+
     // Bottom Horn
     ctx.beginPath();
     ctx.moveTo(-2, 5);
@@ -19221,6 +20167,9 @@ function drawHoundHead(ctx, hx, hy, baseAng, walkCycle, isPouncing, hitFlash, is
     ctx.quadraticCurveTo(-7, 8, 0, 4);
     ctx.closePath();
     ctx.fill();
+    ctx.strokeStyle = '#991b1b';
+    ctx.lineWidth = 0.9;
+    ctx.stroke();
 
     // Hound Skull
     ctx.fillStyle = '#27272a';
@@ -19280,7 +20229,11 @@ function drawHoundHead(ctx, hx, hy, baseAng, walkCycle, isPouncing, hitFlash, is
     ctx.fillRect(eyeX - 0.3, eyeY - 1, 0.6, 2);
     ctx.restore();
 
-    ctx.restore();
+    } catch (err) {
+        console.error("Error in drawHoundHead:", err);
+    } finally {
+        ctx.restore();
+    }
 }
 
 function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendingDamage, alpha = 1.0, isObserver = false, enemyShield = 0, maxShield = 80, alert = false, flashTimer = 0, isDemon = false, isJammer = false) {
@@ -19356,6 +20309,16 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
                 ctx.fillStyle = isJammer ? '#C084FC' : '#00CCFF';
                 ctx.fillRect(-20, -42, (enemyShield / maxShield) * 40, 4);
             }
+        }
+
+        if (!isPlayer && pendingDamage && pendingDamage > 0 && (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test')) {
+            ctx.font = 'bold 9.5px monospace';
+            ctx.fillStyle = '#c084fc';
+            ctx.shadowColor = '#a855f7';
+            ctx.shadowBlur = 10;
+            ctx.textAlign = 'center';
+            ctx.fillText(`⚡ 盲区存伤: +${pendingDamage}`, 0, isDemon ? -58 : -48);
+            ctx.shadowBlur = 0;
         }
     }
 
@@ -19907,52 +20870,94 @@ function draw() {
         const mapWidth = window.level4MapWidth || 2400;
         const targetCamX = player.x - width / 2;
         window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
-        window.cameraY = height > 700 ? (height - 700) / 2 : 0;
+        window.cameraY = height > 700 ? -(height - 700) / 2 : 0;
     } else if (levelId === 'level0_test') {
-        const mapWidth = window.level0MapWidth || 3200;
+        const mapWidth = window.level0MapWidth || 2300;
         const mapHeight = window.level0MapHeight || 1000;
         const targetCamX = player.x - width / 2;
         window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
         if (mapHeight > height) {
             const targetCamY = player.y - height / 2;
-            const clampY = Math.max(0, Math.min(mapHeight - height, targetCamY));
-            window.cameraY = -clampY;
+            window.cameraY = Math.max(0, Math.min(mapHeight - height, targetCamY));
         } else {
-            window.cameraY = (height - mapHeight) / 2;
+            window.cameraY = 0; // Prevent negative Y inversion on 1080p / high-res displays
         }
     } else if (levelId === 'level6_train') {
         const mapWidth = window.level6MapWidth || 7200;
         const mapHeight = window.level6MapHeight || 240;
         const targetCamX = player.x - width / 2;
         window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
-        window.cameraY = (height - mapHeight) / 2;
-    } else if (levelId === 'level7_lab') {
-        const mapWidth = window.level7MapWidth || 3200;
-        const mapHeight = window.level7MapHeight || 720;
+        window.cameraY = -(height - mapHeight) / 2;
+    } else if (levelId === 'level7_lab' || levelId === 'level8_test') {
+        const mapWidth = window.level8MapWidth || window.level7MapWidth || 3200;
+        const mapHeight = window.level8MapHeight || window.level7MapHeight || 2400;
         const targetCamX = player.x - width / 2;
         window.cameraX = Math.max(0, Math.min(Math.max(0, mapWidth - width), targetCamX));
-        window.cameraY = height > mapHeight ? (height - mapHeight) / 2 : 0;
+        if (mapHeight > height) {
+            const targetCamY = player.y - height / 2;
+            window.cameraY = Math.max(0, Math.min(mapHeight - height, targetCamY));
+        } else {
+            window.cameraY = -(height - mapHeight) / 2;
+        }
     } else {
         window.cameraX = 0;
         window.cameraY = 0;
     }
 
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, width, height);
     
     ctx.save();
-    if (levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab') {
-        ctx.translate(-(window.cameraX || 0), window.cameraY || 0);
-    }
+    try {
+        if (levelId === 'level4_yacht' || (levelId === 'level0_test' || levelId === 'level6_train') || levelId === 'level7_lab' || levelId === 'level8_test') {
+            ctx.translate(-(window.cameraX || 0), -(window.cameraY || 0));
+        // 打击感：震屏（juice.js 创伤值系统，2026-11-01）
+        try {
+            if (typeof window.__juiceGetShake === 'function') {
+                const sh = window.__juiceGetShake();
+                if (sh && isFinite(sh[0]) && isFinite(sh[1])) ctx.translate(sh[0], sh[1]);
+            }
+        } catch (e7) {}
+        } else {
+            const levelW = 1280, levelH = 720;
+            const viewScale = Math.min(width / levelW, height / levelH) || 1;
+            const offsetX = (width - levelW * viewScale) / 2;
+            const offsetY = (height - levelH * viewScale) / 2;
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(viewScale, viewScale);
+            // 打击感：震屏（2026-11-02 补上——之前只在 camera 分支调用，level1/2/3/5 从未生效）
+            // 注意：在 scale 之后调用，shake 位移会被 viewScale 缩放，手感与 camera 关卡一致
+            try {
+                if (typeof window.__juiceGetShake === 'function') {
+                    const sh = window.__juiceGetShake();
+                    if (sh && isFinite(sh[0]) && isFinite(sh[1])) ctx.translate(sh[0], sh[1]);
+                }
+            } catch (e8) {}
+        }
+
+        // Viewport bounds calculation in scaled map coordinates for full-bleed background rendering
+        const levelW = 1280, levelH = 720;
+        const currentScale = Math.min(width / levelW, height / levelH) || 1;
+        const currentOffsetX = (width - levelW * currentScale) / 2;
+        const currentOffsetY = (height - levelH * currentScale) / 2;
+        const minScreenX = -currentOffsetX / currentScale;
+        const maxScreenX = (width - currentOffsetX) / currentScale;
+        const minScreenY = -currentOffsetY / currentScale;
+        const maxScreenY = (height - currentOffsetY) / currentScale;
     
     if (levelId === 'level1_airport') {
-        // 1. 机场关卡：现代大理石感灰色瓷砖地板（底色显著加深为精致的高端深钢灰色，使角色和各种战术指示界线格外清晰凸显）
+        // 1. 机场关卡：现代大理石感灰色瓷砖地板 (全屏无黑边无缝平铺)
         ctx.fillStyle = '#4B5358'; 
-        ctx.fillRect(0, 0, width, height);
+        ctx.fillRect(minScreenX, minScreenY, maxScreenX - minScreenX, maxScreenY - minScreenY);
         
-        ctx.strokeStyle = 'rgba(15, 23, 42, 0.48)'; // 高对比度的深色瓷砖缝隙，使网格格外出众
+        ctx.strokeStyle = 'rgba(15, 23, 42, 0.48)'; 
         ctx.lineWidth = 1.3;
-        for(let x = 0; x < width; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
-        for(let y = 0; y < height; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+        const gridStartX = Math.floor(minScreenX / 50) * 50;
+        const gridEndX = Math.ceil(maxScreenX / 50) * 50;
+        const gridStartY = Math.floor(minScreenY / 50) * 50;
+        const gridEndY = Math.ceil(maxScreenY / 50) * 50;
+        for(let x = gridStartX; x <= gridEndX; x += 50) { ctx.beginPath(); ctx.moveTo(x, minScreenY); ctx.lineTo(x, maxScreenY); ctx.stroke(); }
+        for(let y = gridStartY; y <= gridEndY; y += 50) { ctx.beginPath(); ctx.moveTo(minScreenX, y); ctx.lineTo(maxScreenX, y); ctx.stroke(); }
     } else if (levelId === 'level0_test') {
         // 0. 测试关卡：地狱深渊深邃黑红底色（无网格、无外框，仅保留实际地形与环境元素）
         const mapW = window.level0MapWidth || 3200;
@@ -19964,48 +20969,75 @@ function draw() {
         const mapW = window.level6MapWidth || 7200;
         const mapH = window.level6MapHeight || 240;
         const viewH = height || 720;
-        const camY = window.cameraY || (viewH - mapH) / 2;
+        const camX = window.cameraX || 0;
+        const camY = window.cameraY || -(viewH - mapH) / 2;
+        const viewW = width || 1200;
 
         // =========================================================================
         // 1. 远东极寒积雪雪原背景（Far East Snowy Tundra - 柔和冷调渐变与自然雪原）
         // =========================================================================
-        // 北侧远景雪原 (y < 0)
-        const northSnowGrad = ctx.createLinearGradient(0, -camY - 80, 0, 0);
-        northSnowGrad.addColorStop(0, '#7b93ab');     // 远景极寒灰蓝冻原
-        northSnowGrad.addColorStop(0.35, '#97acc2');  // 中景冷杉雪雾层
-        northSnowGrad.addColorStop(0.75, '#b9ccd9');  // 浅灰蓝积雪层
-        northSnowGrad.addColorStop(1, '#d5e2ec');     // 近轨积雪层
+        // 北侧远景雪原 (y < 0) 覆盖整个视口上方空域
+        // 2026-11-01：渐变加深，不再是纯白——远景更蓝，层次更分明
+        const northSkyTop = camY - 400;
+        const northSnowGrad = ctx.createLinearGradient(0, northSkyTop, 0, 0);
+        northSnowGrad.addColorStop(0, '#3d5a76');     // 远景深蓝冻原
+        northSnowGrad.addColorStop(0.35, '#6b8cae');  // 中景冷杉雪雾层
+        northSnowGrad.addColorStop(0.7, '#a8c0d8');   // 浅蓝积雪层
+        northSnowGrad.addColorStop(1, '#d0e0ee');     // 近轨积雪层
         ctx.fillStyle = northSnowGrad;
-        ctx.fillRect(-800, -camY - 120, mapW + 1600, camY + 120);
+        ctx.fillRect(camX - 600, northSkyTop, viewW + 1200, -northSkyTop + 10);
 
-        // 南侧近景雪原 (y > mapH)
-        const southSnowGrad = ctx.createLinearGradient(0, mapH, 0, mapH + camY + 120);
-        southSnowGrad.addColorStop(0, '#d5e2ec');     // 近轨积雪层
-        southSnowGrad.addColorStop(0.3, '#b9ccd9');   // 浅灰蓝积雪层
-        southSnowGrad.addColorStop(0.7, '#97acc2');   // 冻原雪地
-        southSnowGrad.addColorStop(1, '#7b93ab');     // 远景极寒灰蓝
+        // 南侧近景雪原 (y > mapH) 覆盖整个视口下方空域
+        const southSkyBottom = camY + viewH + 400;
+        const southSnowGrad = ctx.createLinearGradient(0, mapH, 0, southSkyBottom);
+        southSnowGrad.addColorStop(0, '#d0e0ee');     // 近轨积雪层
+        southSnowGrad.addColorStop(0.3, '#a8c0d8');   // 浅蓝积雪层
+        southSnowGrad.addColorStop(0.65, '#6b8cae');  // 冻原雪地
+        southSnowGrad.addColorStop(1, '#3d5a76');     // 远景深蓝
         ctx.fillStyle = southSnowGrad;
-        ctx.fillRect(-800, mapH, mapW + 1600, camY + 120);
+        ctx.fillRect(camX - 600, mapH - 10, viewW + 1200, southSkyBottom - mapH + 20);
 
         // 远东雪原细节装饰：远景针叶林剪影、风吹雪纹理、冻原积雪起伏 (仅外部雪地背景流动)
         const trainSpeed = 520; // 模拟列车巡航时速 (px/s)
         const now = performance.now() / 1000;
-        const camX = window.cameraX || 0;
-        const viewW = width || 1200;
 
         ctx.save();
         // (A) 远景针叶冷杉林剪影 (北侧远景雪原 - 0.22倍远景视差缓慢后退)
+        // 2026-11-01：错落分布 + 树整体在车体上方 (y<-12)，不被遮挡
         ctx.fillStyle = 'rgba(70, 95, 120, 0.42)';
         const treeStep = 42;
         const treeOffset = (now * (trainSpeed * 0.22)) % treeStep;
         for (let treeX = camX - 120 - treeOffset; treeX < camX + viewW + 120; treeX += treeStep) {
             const worldIdx = Math.round((treeX + now * (trainSpeed * 0.22)) / treeStep);
-            const treeH = 34 + Math.abs((worldIdx * 17) % 28);
-            const treeY = -camY + 16 + Math.abs((worldIdx * 7) % 24);
+            const treeH = 30 + Math.abs((worldIdx * 17) % 26);
+            // 哈希式错落：避免斜线规律
+            const hashN = Math.abs(Math.sin(worldIdx * 12.9898) * 43758.5453) % 1;
+            const treeY = camY + 24 + hashN * Math.max(30, Math.abs(camY) - 110);
+            // 钳制：树底不超过 y=-12
+            const clampedY = Math.min(treeY, -12 - treeH);
             ctx.beginPath();
-            ctx.moveTo(treeX, treeY);
-            ctx.lineTo(treeX - 10, treeY + treeH);
-            ctx.lineTo(treeX + 10, treeY + treeH);
+            ctx.moveTo(treeX, clampedY);
+            ctx.lineTo(treeX - 10, clampedY + treeH);
+            ctx.lineTo(treeX + 10, clampedY + treeH);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        // (A2) 远景针叶冷杉林剪影 (南侧远景雪原 - 与北侧对称，0.22倍视差)
+        // 2026-11-01：与北侧用完全相同的分布逻辑（用户确认北侧错落好看），仅垂直镜像；
+        // 树整体在车体下方 (y>252)，不被遮挡
+        ctx.fillStyle = 'rgba(70, 95, 120, 0.42)';
+        for (let treeX = camX - 120 - treeOffset; treeX < camX + viewW + 120; treeX += treeStep) {
+            const worldIdx = Math.round((treeX + now * (trainSpeed * 0.22)) / treeStep);
+            const treeH = 34 + Math.abs((worldIdx * 17) % 28);
+            // 与北侧同式：基座在 280~500 之间错落
+            const treeBaseY = 280 + Math.abs((worldIdx * 7) % 220);
+            // 钳制：树尖不低于 y=252（不戳进车体）
+            const clampedBase = Math.max(treeBaseY, 252 + treeH);
+            ctx.beginPath();
+            ctx.moveTo(treeX, clampedBase - treeH);
+            ctx.lineTo(treeX - 10, clampedBase);
+            ctx.lineTo(treeX + 10, clampedBase);
             ctx.closePath();
             ctx.fill();
         }
@@ -20014,7 +21046,7 @@ function draw() {
         ctx.strokeStyle = 'rgba(240, 246, 252, 0.45)';
         ctx.lineWidth = 1.8;
         const waveOffset = now * (trainSpeed * 0.40);
-        for (let dy = -camY + 55; dy < -30; dy += 32) {
+        for (let dy = camY + 30; dy < -28; dy += 32) {
             ctx.beginPath();
             for (let dx = camX - 150; dx < camX + viewW + 150; dx += 80) {
                 const waveY = dy + Math.sin((dx + dy + waveOffset) * 0.012) * 7;
@@ -20023,7 +21055,7 @@ function draw() {
             }
             ctx.stroke();
         }
-        for (let dy = mapH + 34; dy < mapH + camY + 60; dy += 32) {
+        for (let dy = mapH + 34; dy < camY + viewH - 30; dy += 32) {
             ctx.beginPath();
             for (let dx = camX - 150; dx < camX + viewW + 150; dx += 80) {
                 const waveY = dy + Math.sin((dx - dy + waveOffset) * 0.012) * 7;
@@ -20047,38 +21079,54 @@ function draw() {
             ctx.fillRect(spx + 12, pySouth, 18 + (spIdx % 8), 3);
         }
 
-        // (D) 极速飞驰暴风雪流与飞雪粒子 (纯在外部雪地空域中飞舞，绝不触碰列车外壳与装甲)
-        const numFlakes = 100;
-        const spanW = viewW + 400;
-        for (let i = 0; i < numFlakes; i++) {
-            const seed = (i + 1) * 73.19;
-            const flakeSpeed = trainSpeed * (0.85 + (i % 7) * 0.08);
-            const rawX = ((now * flakeSpeed + seed * 89) % spanW);
-            const flakeX = camX + viewW + 200 - rawX;
+        // (D) 极速飞驰暴风雪流与飞雪粒子
+        // 2026-11-01：雪花加密 160→300
+        if (!window.level0SnowParticles) {
+            window.level0SnowParticles = [];
+            for (let i = 0; i < 300; i++) {
+                window.level0SnowParticles.push({
+                    relX: Math.random() * (width + 300) - 100,
+                    y: camY - 100 + Math.random() * (height + 200),
+                    speedX: 5.5 + Math.random() * 8.5,
+                    speedY: 1.2 + Math.random() * 3.2,
+                    size: 1.0 + Math.random() * 2.2,
+                    alpha: 0.28 + Math.random() * 0.52,
+                    trail: 6 + Math.random() * 12
+                });
+            }
+        }
 
-            const isNorth = (i % 2 === 0);
-            let flakeY;
-            if (isNorth) {
-                flakeY = -camY - 80 + ((seed * 19 + now * 32) % Math.max(20, camY + 80 - 28));
-                if (flakeY > -28) flakeY = -28 - (Math.abs(seed) % 30);
-            } else {
-                flakeY = mapH + 30 + ((seed * 29 + now * 32) % Math.max(20, camY + 60));
+        ctx.lineCap = 'round';
+        const snowPool = window.level0SnowParticles;
+        const totalW = viewW + 300;
+        const minY = camY - 120;
+        const maxY = camY + viewH + 120;
+
+        for (let i = 0; i < snowPool.length; i++) {
+            const p = snowPool[i];
+            p.relX -= p.speedX;
+            p.y += p.speedY;
+
+            if (p.relX < -150) {
+                p.relX = viewW + Math.random() * 150;
+                p.y = minY + Math.random() * Math.max(50, maxY - minY);
+            }
+            if (p.y > maxY || p.y < minY) {
+                p.y = minY + Math.random() * Math.max(50, maxY - minY);
+                p.relX = Math.random() * totalW - 100;
             }
 
-            // 高速风雪拉丝流线
-            const streakLen = 14 + (i % 5) * 6;
-            const alpha = 0.35 + (i % 4) * 0.18;
+            const worldX = camX + p.relX;
+            const worldY = p.y;
 
-            ctx.strokeStyle = `rgba(235, 245, 255, ${alpha})`;
-            ctx.lineWidth = (i % 4 === 0) ? 1.6 : 0.9;
-            ctx.beginPath();
-            ctx.moveTo(flakeX, flakeY);
-            ctx.lineTo(flakeX - streakLen, flakeY + 1.2);
-            ctx.stroke();
-
-            // 雪晶高光微粒
-            ctx.fillStyle = `rgba(255, 255, 255, ${alpha + 0.2})`;
-            ctx.fillRect(flakeX - 1.5, flakeY - 0.5, 2, 2);
+            if (worldY < 12 || worldY > mapH - 12 || worldX > mapW) {
+                ctx.strokeStyle = `rgba(240, 248, 255, ${p.alpha})`;
+                ctx.lineWidth = p.size;
+                ctx.beginPath();
+                ctx.moveTo(worldX, worldY);
+                ctx.lineTo(worldX + p.trail, worldY - p.trail * 0.35);
+                ctx.stroke();
+            }
         }
         ctx.restore();
 
@@ -20133,19 +21181,10 @@ function draw() {
         // =========================================================================
         // 3. 装甲列车车身甲板与 6 大专属车厢地面 (Armored Train 6 Carriage Distinct Floors)
         // =========================================================================
-        // 6大车厢区域依次为：
-        // 1. 客舱 (Coach Class, 0~1200): 深灰蓝工装橡胶防滑地板 + 银灰细格 + 中央走道吸音毯
-        // 2. 餐车 (Dining & Bistro, 1200~2400): 复古暖核桃木拼花木地板 + 墨绿卡座绒毯 + 红木吧台地台
-        // 3. VIP舱室 (VIP Luxury Suites, 2400~3600): 奢华深绛红羊毛地毯 + 哑光烫金几何滚边
-        // 4. 控制室 (Control Room, 3600~4800): 科技深碳黑防静电地坪 + 荧光青蓝与琥珀橙数据光路
-        // 5. 引擎室 (Engine/Reactor, 4800~6000): 重型镂空格栅铁板 + 熔火橙红涡轮热流 + 工业警示条纹
-        // 6. 货仓 (Cargo/Freight, 6000~7200): 耐磨冷灰水泥仓储地面 + 黄色叉车导轨与货物停放区
-
         // --- CAR 1: 客舱 (0 ~ 1200) ---
         if (camX < 1250) {
             ctx.fillStyle = '#1e293b'; // 深灰蓝工装防滑橡胶
             ctx.fillRect(0, 0, 1200, mapH);
-            // 工装细格纹
             ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
             ctx.lineWidth = 1.0;
             for (let x = 0; x < 1200; x += 40) {
@@ -20154,7 +21193,6 @@ function draw() {
             for (let y = 0; y < mapH; y += 40) {
                 ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(1200, y); ctx.stroke();
             }
-            // 中央走道吸音蓝灰毯
             ctx.fillStyle = '#0f172a';
             ctx.fillRect(0, mapH / 2 - 32, 1200, 64);
             ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
@@ -20166,7 +21204,6 @@ function draw() {
         if (camX + viewW > 1150 && camX < 2450) {
             ctx.fillStyle = '#2b1810'; // 优雅复古核桃木
             ctx.fillRect(1200, 0, 1200, mapH);
-            // 纵向木板拼花接缝
             ctx.strokeStyle = '#3d2217';
             ctx.lineWidth = 1.2;
             for (let ty = 12; ty < mapH - 10; ty += 18) {
@@ -20176,14 +21213,11 @@ function draw() {
 
         // --- CAR 3: VIP 豪华套房 (2400 ~ 3600) ---
         if (camX + viewW > 2350 && camX < 3650) {
-            // 纯净高档深绛红羊毛绒毯 (全无杂乱网格线与虚线)
             ctx.fillStyle = '#2b0b14'; // 奢华深红丝绒底色
             ctx.fillRect(2400, 0, 1200, mapH);
-
-            // 中央走廊优雅贵宾红毯 (Solid plush runner)
             ctx.fillStyle = '#450d1d';
             ctx.fillRect(2400, mapH / 2 - 28, 1200, 56);
-            ctx.strokeStyle = 'rgba(245, 158, 11, 0.35)'; // 走廊两侧细致烫金金边
+            ctx.strokeStyle = 'rgba(245, 158, 11, 0.35)';
             ctx.lineWidth = 1.0;
             ctx.beginPath();
             ctx.moveTo(2400, mapH / 2 - 28); ctx.lineTo(3600, mapH / 2 - 28);
@@ -20195,7 +21229,6 @@ function draw() {
         if (camX + viewW > 3550 && camX < 4850) {
             ctx.fillStyle = '#0a101d'; // 科技深碳黑防静电
             ctx.fillRect(3600, 0, 1200, mapH);
-            // 荧光青蓝发光数据管线
             ctx.strokeStyle = 'rgba(6, 182, 212, 0.28)';
             ctx.lineWidth = 1.4;
             for (let cx = 3600; cx < 4800; cx += 80) {
@@ -20210,7 +21243,6 @@ function draw() {
         if (camX + viewW > 4750 && camX < 6050) {
             ctx.fillStyle = '#121214'; // 重型深黑工业钢板
             ctx.fillRect(4800, 0, 1200, mapH);
-            // 镂空格栅透出的熔火橙红涡轮热流微光
             const heatGrad = ctx.createLinearGradient(4800, 0, 6000, 0);
             heatGrad.addColorStop(0, 'rgba(249, 115, 22, 0.08)');
             heatGrad.addColorStop(0.3, 'rgba(239, 68, 68, 0.18)');
@@ -20219,7 +21251,6 @@ function draw() {
             ctx.fillStyle = heatGrad;
             ctx.fillRect(4800, 10, 1200, mapH - 20);
 
-            // 重型工业蜂窝镂空格栅
             ctx.strokeStyle = 'rgba(249, 115, 22, 0.25)';
             ctx.lineWidth = 1.0;
             for (let gx = 4800; gx < 6000; gx += 30) {
@@ -20232,21 +21263,16 @@ function draw() {
 
         // --- CAR 6: 货仓与步战车运输车厢 (6000 ~ 7200) ---
         if (camX + viewW > 5950) {
-            ctx.fillStyle = '#17202a'; // 重型军运列车防滑强化钢板底盘
+            ctx.fillStyle = '#17202a';
             ctx.fillRect(6000, 0, 1200, mapH);
-
-            // 步战车中央重型停泊区与履带防滑导轨槽 (Flatbed Heavy Vehicle Track Guides - 精确对齐 290 宽履带)
             ctx.fillStyle = '#0f172a';
-            // 北侧履带定位槽
             ctx.fillRect(6325, 58, 350, 26);
-            // 南侧履带定位槽
             ctx.fillRect(6325, mapH - 84, 350, 26);
             ctx.strokeStyle = 'rgba(71, 85, 105, 0.6)';
             ctx.lineWidth = 1.2;
             ctx.strokeRect(6325, 58, 350, 26);
             ctx.strokeRect(6325, mapH - 84, 350, 26);
 
-            // 车厢货物固定槽钢纵梁 (Tie-down channels running through the deck)
             ctx.strokeStyle = 'rgba(100, 116, 139, 0.25)';
             ctx.lineWidth = 1.0;
             ctx.beginPath();
@@ -20254,23 +21280,16 @@ function draw() {
             ctx.moveTo(6000, mapH - 36); ctx.lineTo(7180, mapH - 36);
             ctx.stroke();
 
-            // 货运各区域黄色定位虚线框 (Yellow Tactical Bay Outlines - 重新均匀分配整车空间并加宽各区空隙)
             ctx.strokeStyle = 'rgba(234, 179, 8, 0.45)';
             ctx.lineWidth = 1.6;
             ctx.setLineDash([8, 6]);
-            // BAY 01: 战备物资箱区 (6045 ~ 6285)
             ctx.strokeRect(6045, 48, 240, mapH - 96);
-            // BAY 02: 步战车装载区 (6315 ~ 6685 - 等比例拓宽)
             ctx.strokeRect(6315, 48, 370, mapH - 96);
-            // BAY 03: 战术物资补给区 (6710 ~ 6830)
             ctx.strokeRect(6710, 48, 120, mapH - 96);
-            // BAY 04: 铁轨与轨枕备用区 (6860 ~ 6980)
             ctx.strokeRect(6860, 48, 120, mapH - 96);
-            // BAY 05: 重型工程与机修工具区 (7010 ~ 7140)
             ctx.strokeRect(7010, 48, 130, mapH - 96);
             ctx.setLineDash([]);
 
-            // 地面战术文字标识 (Stenciled Floor Bay Names)
             ctx.font = 'bold 8px monospace';
             ctx.fillStyle = 'rgba(234, 179, 8, 0.45)';
             ctx.textAlign = 'center';
@@ -20281,7 +21300,6 @@ function draw() {
             ctx.fillText('BAY 05: TOOLS', 7075, mapH / 2 - 4);
             ctx.textAlign = 'left';
 
-            // 车尾封闭加固防滑钢板与重型角钢纵梁 (Reinforced Cargo Deck Bulkhead Base)
             ctx.strokeStyle = 'rgba(71, 85, 105, 0.4)';
             ctx.lineWidth = 1.6;
             ctx.strokeRect(7150, 48, 30, mapH - 96);
@@ -20293,11 +21311,9 @@ function draw() {
         const carJunctions = [1200, 2400, 3600, 4800, 6000];
         carJunctions.forEach(jx => {
             if (jx < camX - 60 || jx > camX + viewW + 60) return;
-            // 风挡重型密封橡胶框
             ctx.fillStyle = '#0b1329';
             ctx.fillRect(jx - 18, 0, 36, mapH);
             
-            // 黄黑警戒斜纹 (Hazard Stripes)
             ctx.save();
             ctx.beginPath();
             ctx.rect(jx - 12, 10, 24, mapH - 20);
@@ -20316,7 +21332,6 @@ function draw() {
             }
             ctx.restore();
 
-            // 风挡两侧液压减震立柱与门框
             ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
             ctx.lineWidth = 2.0;
             ctx.strokeRect(jx - 16, 8, 32, mapH - 16);
@@ -20325,7 +21340,6 @@ function draw() {
         // =========================================================================
         // 5. 车头重型除雪排障装甲犁与强光探照灯 (Locomotive Cowcatcher & Headlights)
         // =========================================================================
-        // 车头 (x = mapW = 7200): V形重装除雪铲
         ctx.save();
         ctx.fillStyle = '#1e293b';
         ctx.strokeStyle = '#38bdf8';
@@ -20338,7 +21352,6 @@ function draw() {
         ctx.fill();
         ctx.stroke();
 
-        // 强光探照灯光锥 (Twin High-Intensity Beam)
         const lightGrad = ctx.createLinearGradient(mapW + 65, mapH / 2, mapW + 350, mapH / 2);
         lightGrad.addColorStop(0, 'rgba(254, 240, 138, 0.65)');
         lightGrad.addColorStop(0.3, 'rgba(250, 204, 21, 0.25)');
@@ -20353,109 +21366,58 @@ function draw() {
         ctx.fill();
         ctx.restore();
 
-        // =========================================================================
-        // 6. 暴风雪动态粒子系统 (Optimized Dynamic Blizzards Particle System)
-        // =========================================================================
-        // 初始化视口雪花粒子池（仅首次初始化 160 颗粒子，零 GC，极致性能）
-        if (!window.level0SnowParticles) {
-            window.level0SnowParticles = [];
-            for (let i = 0; i < 160; i++) {
-                window.level0SnowParticles.push({
-                    relX: Math.random() * (width + 300) - 100, // 视口相对 X
-                    y: -camY - 80 + Math.random() * (height + 160),
-                    speedX: 5.5 + Math.random() * 8.5,        // 向左高速疾驰速度
-                    speedY: 1.2 + Math.random() * 3.2,        // 向下飘落速度
-                    size: 1.0 + Math.random() * 2.2,          // 雪花尺寸
-                    alpha: 0.28 + Math.random() * 0.52,       // 透明度
-                    trail: 6 + Math.random() * 12             // 运动模糊拖尾长度
-                });
-            }
-        }
-
-        // 仅在车身外部雪原（y < 12 或 y > mapH - 12 或 车头光锥前）绘制飘落雪花
-        ctx.save();
-        ctx.lineCap = 'round';
-        const snowPool = window.level0SnowParticles;
-        const currentCamX = window.cameraX || 0;
-        const totalW = width + 300;
-        const minY = -camY - 100;
-        const maxY = mapH + camY + 100;
-
-        for (let i = 0; i < snowPool.length; i++) {
-            const p = snowPool[i];
-            
-            // 更新雪花位置（列车向右高速行驶，雪花相对向左下极速飞掠）
-            p.relX -= p.speedX;
-            p.y += p.speedY;
-
-            // 循环回绕逻辑 (Wrap Around)
-            if (p.relX < -150) {
-                p.relX = width + Math.random() * 150;
-                p.y = minY + Math.random() * (maxY - minY);
-            }
-            if (p.y > maxY) {
-                p.y = minY;
-                p.relX = Math.random() * totalW - 100;
-            }
-
-            const worldX = currentCamX + p.relX;
-            const worldY = p.y;
-
-            // 物理遮蔽：只在列车外侧雪地（y < 12 或 y > mapH - 12）以及车头前方（worldX > mapW）渲染
-            if (worldY < 12 || worldY > mapH - 12 || worldX > mapW) {
-                ctx.strokeStyle = `rgba(240, 248, 255, ${p.alpha})`;
-                ctx.lineWidth = p.size;
-                ctx.beginPath();
-                ctx.moveTo(worldX, worldY);
-                // 迎风 55° 斜拉拖尾，强化列车破雪疾驰的速度感
-                ctx.lineTo(worldX + p.trail, worldY - p.trail * 0.35);
-                ctx.stroke();
-            }
-        }
-        ctx.restore();
     } else if (levelId === 'level5_hotel') {
-        // 5. 闪灵红 (The Shining) 酒店大堂经典红色配色与橙黄几何格纹
+        // 5. 闪灵红 (The Shining) 酒店大堂经典红色配色与橙黄几何格纹 (全屏无缝平铺)
         ctx.fillStyle = '#5C060B'; 
-        ctx.fillRect(0, 0, width, height);
+        ctx.fillRect(minScreenX, minScreenY, maxScreenX - minScreenX, maxScreenY - minScreenY);
         
         ctx.strokeStyle = 'rgba(234, 88, 12, 0.32)'; // 暖橙色格缝
         ctx.lineWidth = 1.4;
-        for(let x = 0; x < width; x += 60) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
-        for(let y = 0; y < height; y += 60) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+        const gridStartX = Math.floor(minScreenX / 60) * 60;
+        const gridEndX = Math.ceil(maxScreenX / 60) * 60;
+        const gridStartY = Math.floor(minScreenY / 60) * 60;
+        const gridEndY = Math.ceil(maxScreenY / 60) * 60;
+        for(let x = gridStartX; x <= gridEndX; x += 60) { ctx.beginPath(); ctx.moveTo(x, minScreenY); ctx.lineTo(x, maxScreenY); ctx.stroke(); }
+        for(let y = gridStartY; y <= gridEndY; y += 60) { ctx.beginPath(); ctx.moveTo(minScreenX, y); ctx.lineTo(maxScreenX, y); ctx.stroke(); }
         
-        // 对角线编织，重现《闪灵》地毯的几何图腾质感
+        // 对角线编织
         ctx.strokeStyle = 'rgba(234, 88, 12, 0.12)';
         ctx.lineWidth = 1.0;
-        for (let x = -height; x < width; x += 120) {
+        for (let x = minScreenX - (maxScreenY - minScreenY); x < maxScreenX; x += 120) {
             ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x + height, height);
+            ctx.moveTo(x, minScreenY);
+            ctx.lineTo(x + (maxScreenY - minScreenY), maxScreenY);
             ctx.stroke();
         }
     } else if (levelId === 'level3_bank') {
-        // 3. 银行与金库关卡：夜间行动模式，深海极夜蓝底色与暗蓝战术瓷砖格纹
+        // 3. 银行与金库关卡：夜间行动模式，深海极夜蓝底色与暗蓝战术瓷砖格纹 (全屏无缝平铺)
         ctx.fillStyle = '#0B132B'; 
-        ctx.fillRect(0, 0, width, height);
+        ctx.fillRect(minScreenX, minScreenY, maxScreenX - minScreenX, maxScreenY - minScreenY);
         
         ctx.strokeStyle = 'rgba(59, 130, 246, 0.12)'; // 柔和暗蓝网格缝
         ctx.lineWidth = 1.0;
-        for(let x = 0; x < width; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
-        for(let y = 0; y < height; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+        const gridStartX = Math.floor(minScreenX / 50) * 50;
+        const gridEndX = Math.ceil(maxScreenX / 50) * 50;
+        const gridStartY = Math.floor(minScreenY / 50) * 50;
+        const gridEndY = Math.ceil(maxScreenY / 50) * 50;
+        for(let x = gridStartX; x <= gridEndX; x += 50) { ctx.beginPath(); ctx.moveTo(x, minScreenY); ctx.lineTo(x, maxScreenY); ctx.stroke(); }
+        for(let y = gridStartY; y <= gridEndY; y += 50) { ctx.beginPath(); ctx.moveTo(minScreenX, y); ctx.lineTo(maxScreenX, y); ctx.stroke(); }
     } else if (levelId === 'level4_yacht') {
-        // 4. 豪华超级游艇：深海蔚蓝海水背景 + 船头船尾蓝绿色低灯渐变发光 + 尊贵金褐色柚木甲板 (Teak Deck)
+        // 4. 豪华超级游艇：深海蔚蓝海水背景 + 船头船尾蓝绿色低灯渐变发光 + 尊贵金褐色柚木甲板
         const mapWidth = window.level4MapWidth || 2400;
+        const camX = window.cameraX || 0;
+        const camY = window.cameraY || 0;
         
-        // Deep Sea ocean background (gorgeous deep night-sea blue)
         ctx.fillStyle = '#051429'; 
-        ctx.fillRect(0, 0, mapWidth, height);
+        ctx.fillRect(camX - 500, camY - 200, width + 1000, height + 400);
         
         // Draw subtle wave patterns in the ocean
         ctx.strokeStyle = 'rgba(6, 182, 212, 0.04)';
         ctx.lineWidth = 1.5;
-        for (let row = 20; row < height; row += 40) {
+        for (let row = camY - 100; row < camY + height + 100; row += 40) {
             ctx.beginPath();
-            for (let col = 0; col < mapWidth; col += 80) {
-                ctx.arc(col + (row % 80), row, 20, 0, Math.PI);
+            for (let col = camX - 100; col < camX + width + 100; col += 80) {
+                ctx.arc(col + (Math.abs(row) % 80), row, 20, 0, Math.PI);
             }
             ctx.stroke();
         }
@@ -20728,20 +21690,67 @@ function draw() {
         ctx.textBaseline = 'middle';
         ctx.fillText("H", 1950, 360);
         ctx.textBaseline = 'alphabetic'; // Reset
+    } else if (levelId === 'level2_subway') {
+        // 2. 地铁关卡：浅沙褐色车站防滑地板 (全屏无缝平铺)
+        ctx.fillStyle = '#A88E7D';
+        ctx.fillRect(minScreenX, minScreenY, maxScreenX - minScreenX, maxScreenY - minScreenY);
+        
+        ctx.strokeStyle = 'rgba(78, 59, 47, 0.28)';
+        ctx.lineWidth = 1.2;
+        const gridStartX = Math.floor(minScreenX / 50) * 50;
+        const gridEndX = Math.ceil(maxScreenX / 50) * 50;
+        const gridStartY = Math.floor(minScreenY / 50) * 50;
+        const gridEndY = Math.ceil(maxScreenY / 50) * 50;
+        for(let x = gridStartX; x <= gridEndX; x += 50) { ctx.beginPath(); ctx.moveTo(x, minScreenY); ctx.lineTo(x, maxScreenY); ctx.stroke(); }
+        for(let y = gridStartY; y <= gridEndY; y += 50) { ctx.beginPath(); ctx.moveTo(minScreenX, y); ctx.lineTo(maxScreenX, y); ctx.stroke(); }
     } else if (levelId === 'level7_lab') {
+        // 7. 顶石科研中心：深邃黑暗虚空背景，消除土黄色网格与外围黑边杂边
         const mapW = window.level7MapWidth || 3200;
         const mapH = window.level7MapHeight || 2400;
         ctx.fillStyle = '#020403';
         ctx.fillRect(-2000, -2000, mapW + 4000, mapH + 4000);
+    } else if (levelId === 'level8_test') {
+        // 8. 隔离测试关卡 · Level 7 中间房间重装甲墙与自动门 100% 复制测试场
+        const mapW = window.level8MapWidth || 3200;
+        const mapH = window.level8MapHeight || 2400;
+
+        // A. 视口背景 (深邃暗调测试场，消除土黄色底色)
+        ctx.fillStyle = '#020403';
+        ctx.fillRect(-2000, -2000, mapW + 4000, mapH + 4000);
+
+        // B. 内部控制室地面：100% 复制 Level 6 防静电科技地板 (x: 1048 ~ 2152, y: 470 ~ 1960)
+        ctx.fillStyle = '#0a101d';
+        ctx.beginPath();
+        ctx.moveTo(1055, 470);
+        ctx.lineTo(2145, 470);
+        ctx.lineTo(2097, 820);
+        ctx.lineTo(1908, 1960);
+        ctx.lineTo(1292, 1960);
+        ctx.lineTo(1103, 820);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.28)';
+        ctx.lineWidth = 1.4;
+        for (let cx = 1040; cx <= 2160; cx += 80) {
+            ctx.beginPath(); ctx.moveTo(cx, 470); ctx.lineTo(cx, 1960); ctx.stroke();
+        }
+        for (let cy = 480; cy <= 1960; cy += 60) {
+            ctx.beginPath(); ctx.moveTo(1040, cy); ctx.lineTo(2160, cy); ctx.stroke();
+        }
     } else {
-        // 2. 地铁关卡：浅沙褐色车站防滑地板（主色调调浅，保持极高透光度与高对比度）
-        ctx.fillStyle = '#A88E7D'; // 比原本的深棕褐色明显调浅的暖沙褐
-        ctx.fillRect(0, 0, width, height);
+        // 通用默认背景：浅沙褐色防滑地板 (全屏无缝平铺)
+        ctx.fillStyle = '#A88E7D';
+        ctx.fillRect(minScreenX, minScreenY, maxScreenX - minScreenX, maxScreenY - minScreenY);
         
-        ctx.strokeStyle = 'rgba(78, 59, 47, 0.28)'; // 褐咖啡色网格瓷砖缝
+        ctx.strokeStyle = 'rgba(78, 59, 47, 0.28)';
         ctx.lineWidth = 1.2;
-        for(let x = 0; x < width; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
-        for(let y = 0; y < height; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+        const gridStartX = Math.floor(minScreenX / 50) * 50;
+        const gridEndX = Math.ceil(maxScreenX / 50) * 50;
+        const gridStartY = Math.floor(minScreenY / 50) * 50;
+        const gridEndY = Math.ceil(maxScreenY / 50) * 50;
+        for(let x = gridStartX; x <= gridEndX; x += 50) { ctx.beginPath(); ctx.moveTo(x, minScreenY); ctx.lineTo(x, maxScreenY); ctx.stroke(); }
+        for(let y = gridStartY; y <= gridEndY; y += 50) { ctx.beginPath(); ctx.moveTo(minScreenX, y); ctx.lineTo(maxScreenX, y); ctx.stroke(); }
     }
     
     // 1. 先绘制游泳池/水体表面障碍物（作为底层水面）
@@ -20750,6 +21759,7 @@ function draw() {
     drawProps();
     drawTraps();
     drawBloodSacrificeSeals();
+    drawHellAltarSeals();
     // 3. 绘制普通墙体与遮挡建筑物
     obstacles.filter(o => o.type !== 'pool' && o.label !== 'SWIMMING POOL').forEach(drawObstacle);
     drawSecurityGates();
@@ -20757,14 +21767,8 @@ function draw() {
     drawZones();
     drawAllPropLabels();
 
-    if (levelId === 'level7_lab') {
-        if (typeof window.drawLevel7Overlay === 'function') {
-            window.drawLevel7Overlay(ctx, width, height);
-        }
-    }
-
     if (levelId === 'level3_bank') {
-        drawNightShadowMask();
+        drawNightShadowMask(minScreenX, minScreenY, maxScreenX, maxScreenY);
     }
 
     if (blindActive && blindZone) {
@@ -20772,8 +21776,8 @@ function draw() {
         if (level0InfiniteBlindTimer > 0) {
             // 在 Level 3 银行关卡遮罩未关闭 (!level3TargetSecured) 时，不叠加全图盲区的黑化填充，仅保留绿色战术外框
             const isLevel3MaskActive = (levelId === 'level3_bank' && !level3TargetSecured && player.hp > 0);
-            const mapW = (levelId === 'level7_lab') ? (window.level7MapWidth || 3200) : ((levelId === 'level4_yacht') ? (window.level4MapWidth || 2400) : ((levelId === 'level0_test') ? (window.level0MapWidth || 3200) : ((levelId === 'level6_train') ? (window.level6MapWidth || 7200) : width)));
-            const mapH = (levelId === 'level7_lab') ? (window.level7MapHeight || 720) : ((levelId === 'level4_yacht') ? 700 : ((levelId === 'level0_test') ? (window.level0MapHeight || 1000) : ((levelId === 'level6_train') ? (window.level6MapHeight || 240) : height)));
+            const mapW = (levelId === 'level4_yacht') ? (window.level4MapWidth || 2400) : ((levelId === 'level0_test') ? (window.level0MapWidth || 3200) : ((levelId === 'level6_train') ? (window.level6MapWidth || 7200) : width));
+            const mapH = (levelId === 'level4_yacht') ? 700 : ((levelId === 'level0_test') ? (window.level0MapHeight || 1000) : ((levelId === 'level6_train') ? (window.level6MapHeight || 240) : height));
             if (!isLevel3MaskActive) {
                 ctx.fillStyle = 'rgba(4, 14, 9, 0.88)';
                 ctx.fillRect(0, 0, mapW, mapH);
@@ -20791,7 +21795,9 @@ function draw() {
     }
 
     // 渲染暗幕者 (Jammer) 发动的局部暗影盲区 (固定在发动点，不随暗幕者移动)
-    enemies.forEach(e => {
+    const jammerEnemies = Array.isArray(enemies) ? enemies.slice() : [];
+    jammerEnemies.forEach(e => {
+        if (!e || typeof e !== 'object' || typeof e.hp !== 'number') return;
         if (e.hp > 0 && e.isJammer && e.jammerBlindActive) {
             const rad = e.jammerBlindRadius || 130;
             const zx = (typeof e.jammerZoneX === 'number') ? e.jammerZoneX : e.x;
@@ -20857,8 +21863,11 @@ function draw() {
         drawTacticalFOV(player.x, player.y, player.angle, effFov.fov, effFov.viewDistance, playerFovFill, playerFovStroke);
     }
 
-    enemies.forEach(e => {
-        if (e.hp <= 0 && e.deathAlpha <= 0) return;
+    const activeEnemies = Array.isArray(enemies) ? enemies.slice() : [];
+    activeEnemies.forEach(e => {
+        if (!e || typeof e !== 'object' || typeof e.hp !== 'number') return;
+        if (e.hp <= 0 && (typeof e.deathAlpha !== 'number' || e.deathAlpha <= 0)) return;
+        if (typeof e.x !== 'number' || typeof e.y !== 'number' || isNaN(e.x) || isNaN(e.y)) return;
 
         // 1. 玩家视角与射线遮挡计算 (基于当前有效视野范围)
         const effFov = getPlayerEffectiveFOV();
@@ -20895,6 +21904,10 @@ function draw() {
         } else {
             isVisibleToPlayer = inSight || isAttackingOrAlert || isInBlindTarget;
         }
+        // 2026-11-01：给光照 pass 用，玩家看不见敌人时不画敌人视锥辉光
+        e.__visibleToPlayer = isVisibleToPlayer;
+        // 2026-11-02：给光照 pass 用，盲区内敌人不画视锥辉光（视野大幅缩小，再画光影显得乱）
+        e.__inBlindZone = isInBlindTarget;
 
         if (isVisibleToPlayer) {
             if (e.hp > 0) {
@@ -20930,7 +21943,11 @@ function draw() {
                             ? (e.alert ? 'rgba(236, 72, 153, 0.85)' : 'rgba(168, 85, 247, 0.80)')
                             : (e.alert ? 'rgba(255, 51, 51, 0.8)' : (e.isObserver ? 'rgba(0, 204, 255, 0.75)' : 'rgba(255, 185, 0, 0.65)'))));
 
-                drawTacticalFOV(e.x, e.y, e.angle, fovAngle, fovRange, fovFill, fovStroke);
+                // 2026-11-02：普通敌人在盲区内视锥直接消失（不是缩小）；Observer/Jammer/恶魔/三头犬画缩小版
+                const isNormalInBlind = isInBlindTarget && !e.isObserver && !e.isJammer && !e.isDemon && !e.isCerberus;
+                if (!isNormalInBlind) {
+                    drawTacticalFOV(e.x, e.y, e.angle, fovAngle, fovRange, fovFill, fovStroke);
+                }
             }
             if (e.isCerberus) {
                 drawCerberus(e);
@@ -20940,7 +21957,9 @@ function draw() {
         }
     });
 
-    cameras.forEach(cam => {
+    const activeCameras = Array.isArray(cameras) ? cameras.slice() : [];
+    activeCameras.forEach(cam => {
+        if (!cam || typeof cam !== 'object') return;
         if (levelId === 'level3_bank') {
             if (typeof isObjectRevealed === 'function' && !isObjectRevealed(cam.x, cam.y, 1, 1)) {
                 return;
@@ -20956,8 +21975,9 @@ function draw() {
     // UAV 敌人战术锁定框 (仅当非暂停、且手持 UAV 且剩余弹药 > 0 时生效，标注敌人类型如 OBSERVER / DEMON)
     if (!isPaused && isKillstreakSupportedLevel(levelId) && currentWeapon && currentWeapon.id === WEAPONS.UAV.id && level0UavAmmo > 0) {
         let tgtIdx = 1;
-        enemies.forEach(e => {
-            if (e.hp <= 0) return;
+        const uavEnemies = Array.isArray(enemies) ? enemies.slice() : [];
+        uavEnemies.forEach(e => {
+            if (!e || typeof e !== 'object' || typeof e.hp !== 'number' || e.hp <= 0) return;
             const enemyInJammer = (typeof inJammerBlindZone === 'function') ? inJammerBlindZone(e.x, e.y).inZone : false;
             const playerInJammer = (typeof inJammerBlindZone === 'function') ? inJammerBlindZone(player.x, player.y).inZone : false;
             if (enemyInJammer && !playerInJammer) return;
@@ -21003,6 +22023,10 @@ function draw() {
 
         if (!isPaused && isKillstreakSupportedLevel(levelId) && currentWeapon && currentWeapon.id === WEAPONS.UAV.id) {
             // Level 0 UAV 专用战术卫星瞄准准星
+            // 2026-11-02 修复：translate 必须用 save/restore 包裹，否则会污染后续
+            // drawAgent(player.x, player.y) 的坐标，导致 UAV 选中时玩家精灵被画到
+            // (player.x+mouse.x, player.y+mouse.y) —— 用户看到的"玩家消失"和"光影错位"
+            ctx.save();
             ctx.translate(worldMouse.x, worldMouse.y);
             const now = Date.now() * 0.003;
             ctx.strokeStyle = '#00FF66';
@@ -21031,6 +22055,7 @@ function draw() {
             ctx.fillText(`[UAV STRIKE LOCK]`, 0, -42);
             ctx.fillStyle = '#00E5FF';
             ctx.fillText(`STRIKES: ${level0UavAmmo}`, 0, 48);
+            ctx.restore(); // 2026-11-02：恢复 translate，隔离准星坐标系
         } else {
             const laserLineColor = (levelId === 'level0_test') ? 'rgba(255, 51, 68, 0.25)' : 'rgba(0, 255, 102, 0.25)';
             const reticleColor = (levelId === 'level0_test') ? '#FF3344' : '#00FF66';
@@ -21044,16 +22069,17 @@ function draw() {
             ctx.save();
             ctx.translate(player.x, player.y);
             const pulse = 1 + Math.sin(Date.now() * 0.015) * 0.15;
-            // Serpentine toxic thorny ring
-            ctx.strokeStyle = '#10b981';
-            ctx.lineWidth = 2.5;
-            ctx.shadowColor = '#10b981';
-            ctx.shadowBlur = 12;
+            // Infernal fiery thorny ring matching black-red lava palette
+            ctx.strokeStyle = '#dc2626';
+            ctx.lineWidth = 2.6;
+            ctx.shadowColor = '#991b1b';
+            ctx.shadowBlur = 14;
             ctx.beginPath();
             ctx.arc(0, 0, 24 * pulse, 0, Math.PI * 2);
             ctx.stroke();
 
-            ctx.strokeStyle = '#9333ea';
+            // Molten magma spikes & charred chains
+            ctx.strokeStyle = '#ea580c';
             ctx.lineWidth = 1.8;
             ctx.beginPath();
             for (let i = 0; i < 6; i++) {
@@ -21064,13 +22090,23 @@ function draw() {
             }
             ctx.stroke();
 
+            // Glowing volcanic sparks at chain junctions
+            ctx.fillStyle = '#f97316';
+            for (let i = 0; i < 6; i++) {
+                const ang = (i * Math.PI / 3) + (Date.now() * 0.003);
+                const r2 = 26 * pulse;
+                ctx.beginPath();
+                ctx.arc(Math.cos(ang) * r2, Math.sin(ang) * r2, 1.8, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
             // Overhead Warning Label
             ctx.font = 'bold 11px sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillStyle = '#ef4444';
+            ctx.fillStyle = '#f87171';
             ctx.shadowColor = '#000000';
             ctx.shadowBlur = 6;
-            ctx.fillText('⚠️ 定身束缚 (ROOTED)', 0, -32);
+            ctx.fillText('⚠️ 熔火锁链束缚 (ROOTED)', 0, -32);
             ctx.restore();
         }
     }
@@ -21096,11 +22132,11 @@ function draw() {
             ctx.closePath();
             ctx.stroke();
             ctx.restore();
-        } else if (p.isSoulStreamer) {
+        } else if (p.isSoulStreamer || p.isHellRiteParticle) {
             ctx.save();
             ctx.fillStyle = p.color;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.arc(p.x, p.y, p.size || 3, 0, Math.PI * 2);
             ctx.fill();
             ctx.restore();
         } else {
@@ -21119,16 +22155,35 @@ function draw() {
 
     drawLevel0MagicWeapons();
 
-    // Batched Player Bullets
+    // Batched Standard Player Bullets
     ctx.fillStyle = '#FF9900';
     ctx.beginPath();
     playerBullets.forEach(b => { 
-        if (!b.isSoulSiphon) {
+        if (!b.isSoulSiphon && !b.isShotgunSlug) {
             ctx.moveTo(b.x + (b.radius || 3.5), b.y);
             ctx.arc(b.x, b.y, b.radius || 3.5, 0, Math.PI * 2); 
         }
     });
     ctx.fill();
+
+    // Render Large-Caliber Shotgun Slugs (Heavy Parallel Slugs)
+    playerBullets.forEach(b => {
+        if (b.isShotgunSlug) {
+            ctx.save();
+            ctx.fillStyle = '#ea580c';
+            ctx.shadowColor = '#f97316';
+            ctx.shadowBlur = 8;
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, b.radius || 5.6, 0, Math.PI * 2);
+            ctx.fill();
+            // Hot Incandescent Core
+            ctx.fillStyle = '#ffedd5';
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, (b.radius || 5.6) * 0.45, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    });
 
     // Render Soul Siphon Bullets separately with rich demonic effects
     playerBullets.forEach(b => {
@@ -21206,9 +22261,29 @@ function draw() {
         }
     });
 
-    ctx.restore(); // 恢复相机平移状态，准备在屏幕固定空间绘制 HUD
+    // 光照增强 pass（lighting.js，加法叠加，不改变原版绘制）
+    // 2026-11-02：盲区内无光影——给玩家和摄像头也打上 __inBlindZone 标记
+    try {
+        if (typeof player !== 'undefined' && player && typeof inBlindZone === 'function') {
+            player.__inBlindZone = inBlindZone(player.x, player.y);
+        }
+        if (typeof cameras !== 'undefined' && Array.isArray(cameras) && typeof inBlindZone === 'function') {
+            for (const cam of cameras) { if (cam) cam.__inBlindZone = inBlindZone(cam.x, cam.y); }
+        }
+    } catch (e3) {}
+    if (window.__drawLightingPass) { try { window.__drawLightingPass(ctx, { obstacles: obstacles, cameras: cameras, props: props, player: (typeof player !== 'undefined' ? player : (typeof window !== 'undefined' ? window.player : null)), enemies: (typeof enemies !== 'undefined' ? enemies : []), width: width, height: height, cameraX: window.cameraX || 0, cameraY: window.cameraY || 0, levelId: (typeof getCurrentLevelId === 'function' ? getCurrentLevelId() : '') }); } catch (e2) { console.error("lighting pass:", e2); } }
+    } catch (e) {
+        console.error("Error during draw world:", e);
+    } finally {
+        ctx.restore(); // 恢复相机平移状态，准备在屏幕固定空间绘制 HUD
+    }
 
-    drawWeaponIcons();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    try {
+        drawWeaponIcons();
+    } catch (e) {
+        console.error("Error in drawWeaponIcons:", e);
+    }
 }
 
 window.__gameLoopId = (window.__gameLoopId || 0) + 1;
@@ -21222,10 +22297,17 @@ function gameLoop() {
     }
     requestAnimationFrame(gameLoop);
 
+    if (window.__isResettingGame) {
+        return; // Skip this tick during level reset / reinitialization
+    }
+
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
     let dt = (now - lastLoopTimestamp) / 1000;
     lastLoopTimestamp = now;
     if (dt > 0.05) dt = 0.05; // Cap delta time at 50ms to prevent math jumps after tab idle/switching
+    if (dt < 0.001) dt = 0.001;
+    const frameFactor = Math.min(1.8, Math.max(0.4, dt / (1 / 60)));
+    window.__frameFactor = frameFactor;
 
     if (typeof soundManager !== 'undefined') {
         soundManager.updateGameState(typeof isGameOver !== 'undefined' ? isGameOver : false, typeof isPaused !== 'undefined' ? isPaused : true);
@@ -21236,7 +22318,10 @@ function gameLoop() {
             const isPlaying = (window.__viewState === 'playing') && !isPaused;
             if (isPlaying) {
                 currentFrameCount++;
-                update(dt);
+                // 打击感：创伤衰减 + 击杀顿帧（2026-11-01）
+                if (typeof window.__juiceTick === 'function') window.__juiceTick(dt);
+                const skipUpd = (typeof window.__juiceShouldSkipUpdate === 'function') && window.__juiceShouldSkipUpdate();
+                if (!skipUpd) update(dt);
                 draw();
             } else if (window.__viewState === 'playing' && isPaused) {
                 // When in-game but paused, draw once so pause overlay is visible, skip update tick
@@ -21244,11 +22329,15 @@ function gameLoop() {
             } else {
                 // When on main menu or prologue/lore overlay, clear canvas and skip heavy world rendering
                 if (ctx && canvas) {
+                    ctx.setTransform(1, 0, 0, 1, 0, 0);
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                 }
             }
         } catch (e) {
             console.error("Engine loop error caught:", e);
+            if (ctx) {
+                try { ctx.setTransform(1, 0, 0, 1, 0, 0); } catch (_) {}
+            }
         }
     }
 }
@@ -21347,11 +22436,26 @@ function updateLevel0MagicWeapons() {
         lc.timer++;
         if (lc.timer >= lc.delay) {
             lc.tickTimer = (lc.tickTimer || 0) + 1;
+            // 2026-11-01 地狱改造：激活瞬间（第一帧）结算一次全额伤害 + 定身
+            if (lc.timer === lc.delay) {
+                enemies.forEach(e => {
+                    if (e.hp <= 0) return;
+                    if (Math.hypot(e.x - lc.x, e.y - lc.y) <= lc.radius) {
+                        applyDamageToEnemy(e, lc.damage);
+                        e.hitTimer = 6;
+                        e.alert = true;
+                        e.burnTimer = 90;
+                        e.rootTimer = 60; // 定身约1秒
+                        createExplosion(e.x, e.y, 20, '#f97316');
+                        createExplosion(e.x, e.y, 12, '#fef08a');
+                    }
+                });
+            }
             if (lc.tickTimer % 8 === 0) {
                 enemies.forEach(e => {
                     if (e.hp <= 0) return;
                     if (Math.hypot(e.x - lc.x, e.y - lc.y) <= lc.radius) {
-                        applyDamageToEnemy(e, Math.round(lc.damage * 0.22));
+                        applyDamageToEnemy(e, Math.round(lc.damage * 0.10));
                         e.hitTimer = 6;
                         e.alert = true;
                         e.burnTimer = 60;
@@ -21396,6 +22500,23 @@ function updateLevel0MagicWeapons() {
     for (let i = bloodSacrificeSeals.length - 1; i >= 0; i--) {
         let seal = bloodSacrificeSeals[i];
         seal.timer++;
+
+        // 2026-11-01 地狱改造：方阵持续期间逐帧补血/甲（敌人越强补得越多）
+        if (seal.healHp > 0 && seal.healedHp < seal.healHp) {
+            const perFrame = seal.healHp / seal.duration;
+            const add = Math.min(perFrame, seal.healHp - seal.healedHp);
+            const before = player.hp;
+            player.hp = Math.min(player.maxHp, player.hp + add);
+            seal.healedHp += (player.hp - before);
+        }
+        if (seal.healShield > 0 && seal.healedShield < seal.healShield) {
+            const perFrame = seal.healShield / seal.duration;
+            const add = Math.min(perFrame, seal.healShield - seal.healedShield);
+            const before = player.shield;
+            player.shield = Math.min(player.maxShield, player.shield + add);
+            seal.healedShield += (player.shield - before);
+        }
+
         if (seal.radius < seal.maxRadius) {
             seal.radius += (seal.maxRadius - seal.radius) * 0.18;
         }
@@ -21420,6 +22541,9 @@ function updateLevel0MagicWeapons() {
             bloodSacrificeSeals.splice(i, 1);
         }
     }
+
+    // 2026-11-02: 地狱血祭完成法阵
+    updateHellAltarSeals();
 }
 
 function drawBloodSacrificeSeals() {
@@ -21490,13 +22614,24 @@ function drawBloodSacrificeSeals() {
         ctx.save();
         ctx.rotate(seal.rotation);
 
-        // Inverted Pentagram
+        // Hexagram (2026-11-02: pentagram → hexagram, matches hexagon)
         ctx.strokeStyle = '#e11d48';
         ctx.lineWidth = 2.2;
-        ctx.beginPath();
         const starR = r * 0.82;
-        for (let k = 0; k < 5; k++) {
-            const a1 = (k * Math.PI * 2 * 2) / 5 + Math.PI / 2;
+        // 上三角
+        ctx.beginPath();
+        for (let k = 0; k < 3; k++) {
+            const a1 = (k * Math.PI * 2) / 3 - Math.PI / 2;
+            const px = Math.cos(a1) * starR;
+            const py = Math.sin(a1) * starR;
+            if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        // 下三角
+        ctx.beginPath();
+        for (let k = 0; k < 3; k++) {
+            const a1 = (k * Math.PI * 2) / 3 + Math.PI / 2;
             const px = Math.cos(a1) * starR;
             const py = Math.sin(a1) * starR;
             if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
@@ -21534,6 +22669,197 @@ function drawBloodSacrificeSeals() {
         ctx.arc(0, 0, r * 0.09, 0, Math.PI * 2);
         ctx.fill();
 
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    });
+}
+
+
+// 2026-11-02：地狱血祭完成祭坛法阵 更新+绘制（复用血祭印风格，法阵+粒子红→青渐变）
+// 红 → 青 smoothstep 插值
+function lerpHellRiteRGB(t, c1, c2) {
+    t = Math.max(0, Math.min(1, t));
+    const s = t * t * (3 - 2 * t);
+    return [
+        Math.round(c1[0] + (c2[0] - c1[0]) * s),
+        Math.round(c1[1] + (c2[1] - c1[1]) * s),
+        Math.round(c1[2] + (c2[2] - c1[2]) * s)
+    ];
+}
+function hellRiteColor(t, c1, c2) {
+    const [r, g, b] = lerpHellRiteRGB(t, c1, c2);
+    return `rgb(${r},${g},${b})`;
+}
+function hellRiteColorA(t, c1, c2, a) {
+    const [r, g, b] = lerpHellRiteRGB(t, c1, c2);
+    return `rgba(${r},${g},${b},${a})`;
+}
+// 法阵主色：红 #f43f5e(244,63,94) → 青 #22d3ee(34,211,238)
+// 法阵辅色：粉 #fca5a5(252,165,165) → 浅青 #a5f3fc(165,243,252)
+// 法阵深色：暗红 #dc2626(220,38,38) → 深青 #0e7490(14,116,144)
+const HELL_RITE_MAIN = [[244,63,94],[34,211,238]];
+const HELL_RITE_SUB = [[252,165,165],[165,243,252]];
+const HELL_RITE_DARK = [[220,38,38],[14,116,144]];
+function updateHellAltarSeals() {
+    for (let i = hellAltarSeals.length - 1; i >= 0; i--) {
+        let seal = hellAltarSeals[i];
+        seal.timer++;
+
+        if (seal.radius < seal.maxRadius) {
+            seal.radius += (seal.maxRadius - seal.radius) * 0.12;
+        }
+        seal.rotation += 0.015;
+
+        // 持续喷发升天粒子（红色出生，随高度渐变为青色）
+        if (seal.timer % 2 === 0 && seal.timer < seal.duration - 30) {
+            const ang = Math.random() * Math.PI * 2;
+            const r = Math.random() * (seal.radius * 0.7);
+            const sx = seal.x + Math.cos(ang) * r;
+            const sy = seal.y + Math.sin(ang) * r * 0.5;
+            particles.push({
+                x: sx, y: sy,
+                vx: (Math.random() - 0.5) * 1.2,
+                vy: -2.5 - Math.random() * 3.5,
+                life: 80 + Math.floor(Math.random() * 40),
+                maxLife: 120,
+                color: '#f43f5e',
+                size: 2.5 + Math.random() * 3.5,
+                isHellRiteParticle: true,
+                spawnY: sy
+            });
+        }
+
+        if (seal.timer >= seal.duration) {
+            hellAltarSeals.splice(i, 1);
+        }
+    }
+}
+
+function drawHellAltarSeals() {
+    hellAltarSeals.forEach(seal => {
+        ctx.save();
+        ctx.translate(seal.x, seal.y);
+
+        let alpha = 1.0;
+        if (seal.timer < 15) alpha = seal.timer / 15;
+        if (seal.timer > seal.duration - 40) alpha = (seal.duration - seal.timer) / 40;
+        ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+
+        const r = seal.radius;
+        // 法阵整体随时间红→青渐变
+        const ct = seal.timer / seal.duration;
+        const mainC = hellRiteColor(ct, HELL_RITE_MAIN[0], HELL_RITE_MAIN[1]);
+        const subC = hellRiteColor(ct, HELL_RITE_SUB[0], HELL_RITE_SUB[1]);
+        const darkC = hellRiteColor(ct, HELL_RITE_DARK[0], HELL_RITE_DARK[1]);
+
+        // 1. 脉动地光（红→青）
+        const pulseR = r + Math.sin(seal.timer * 0.12) * 6;
+        const bgGrad = ctx.createRadialGradient(0, 0, r * 0.1, 0, 0, pulseR);
+        bgGrad.addColorStop(0, hellRiteColorA(ct, HELL_RITE_MAIN[0], HELL_RITE_MAIN[1], 0.6));
+        bgGrad.addColorStop(0.4, hellRiteColorA(ct, HELL_RITE_DARK[0], HELL_RITE_DARK[1], 0.4));
+        bgGrad.addColorStop(0.75, hellRiteColorA(ct, [153,27,27], [8,80,100], 0.2));
+        bgGrad.addColorStop(1, hellRiteColorA(ct, [127,29,29], [6,60,80], 0));
+        ctx.fillStyle = bgGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, pulseR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 2. 双同心符文边
+        ctx.strokeStyle = mainC;
+        ctx.lineWidth = 3;
+        ctx.shadowColor = mainC;
+        ctx.shadowBlur = 14;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = subC;
+        ctx.lineWidth = 1.5;
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // 3. 12 圆周符文节点
+        for (let k = 0; k < 12; k++) {
+            const a = (k * Math.PI * 2) / 12 + seal.rotation * 0.5;
+            const px1 = Math.cos(a) * (r * 0.82);
+            const py1 = Math.sin(a) * (r * 0.82);
+            const px2 = Math.cos(a) * r;
+            const py2 = Math.sin(a) * r;
+            ctx.strokeStyle = mainC;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(px1, py1);
+            ctx.lineTo(px2, py2);
+            ctx.stroke();
+            if (k % 2 === 0) {
+                ctx.fillStyle = subC;
+                ctx.beginPath();
+                ctx.arc(px2, py2, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // 4. 旋转六芒星 + 内六边形
+        ctx.save();
+        ctx.rotate(seal.rotation);
+        ctx.strokeStyle = darkC;
+        ctx.lineWidth = 2.5;
+        ctx.shadowColor = darkC;
+        ctx.shadowBlur = 10;
+        const starR = r * 0.82;
+        // 上三角
+        ctx.beginPath();
+        for (let k = 0; k < 3; k++) {
+            const a1 = (k * Math.PI * 2) / 3 - Math.PI / 2;
+            const px = Math.cos(a1) * starR;
+            const py = Math.sin(a1) * starR;
+            if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        // 下三角
+        ctx.beginPath();
+        for (let k = 0; k < 3; k++) {
+            const a1 = (k * Math.PI * 2) / 3 + Math.PI / 2;
+            const px = Math.cos(a1) * starR;
+            const py = Math.sin(a1) * starR;
+            if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = subC;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        const innerR = r * 0.48;
+        for (let k = 0; k < 6; k++) {
+            const a2 = (k * Math.PI * 2) / 6;
+            const px = Math.cos(a2) * innerR;
+            const py = Math.sin(a2) * innerR;
+            if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+
+        // 5. 中央祭眼
+        ctx.fillStyle = hellRiteColor(ct, [254,242,242], [236,254,255]);
+        ctx.shadowColor = hellRiteColor(ct, [254,242,242], [236,254,255]);
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = hellRiteColor(ct, [185,28,28], [14,116,144]);
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.09, 0, Math.PI * 2);
+        ctx.fill();
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
         ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
@@ -21814,6 +23140,8 @@ if (typeof document !== 'undefined') {
 
 // 挂载全局方法到 window
 window.resetGame = resetGame;
+// 2026-11-01 地狱隐藏关：暴露调试接口
+window.__hellDebug = { showHellChoicePopup, showHellCompletePopup, showHellDeathPopup, isInAltarArea, checkHellQuestComplete, returnFromHell, triggerHellAltarSeal };
 window.initMapLayout = initMapLayout;
 window.switchWeapon = switchWeapon;
 window.togglePause = togglePause;

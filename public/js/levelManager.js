@@ -16,7 +16,8 @@ class LevelManager {
                 (typeof LEVEL_YACHT !== 'undefined' ? LEVEL_YACHT : window.LEVEL_YACHT),
                 (typeof LEVEL_HOTEL !== 'undefined' ? LEVEL_HOTEL : window.LEVEL_HOTEL),
                 (typeof LEVEL_TRAIN !== 'undefined' ? LEVEL_TRAIN : window.LEVEL_TRAIN),
-                (typeof LEVEL_LAB !== 'undefined' ? LEVEL_LAB : window.LEVEL_LAB)
+                (typeof LEVEL_LAB !== 'undefined' ? LEVEL_LAB : window.LEVEL_LAB),
+                (typeof LEVEL_8_TEST !== 'undefined' ? LEVEL_8_TEST : window.LEVEL_8_TEST)
             ].filter(Boolean);
         }
         return this.levels;
