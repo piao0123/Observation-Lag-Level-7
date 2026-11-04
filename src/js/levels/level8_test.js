@@ -585,6 +585,778 @@ function getSectorWorkstation(cx, cy, angle = 0, scale = 1.0, label = "SECTOR WO
     };
 }
 
+// =========================================================================
+// 全新圆形全包围控制台绘制系统 (完全依据手绘草稿 IMG_7694 规范升级设计与渲染)
+// 包含 5 大核心改进与规范：
+// 1. 标准正圆外壳：采用标准原生圆弧几何绘制，彻底摒弃多边形棱角；纤薄外壳仅 5px，最大化保留舱内宽阔活动空间
+// 2. 座位前方三块连体弧面大屏：鲜明高亮，严密顺应圆形外壳曲率展开（正中全景雷达、左侧反应堆示波、右侧防御力场）
+// 3. 屏幕后方的机械键盘与操作员滑轮座椅：就坐于舱内中央，面向北方三连屏与机械键盘
+// 4. 座位左右两侧按钮完全顺应圆弧曲线排列：左侧三环同心圆弧按键、翘板开关与安全拨动开关；右侧三环同心圆弧推子、旋钮、微动矩阵与紧急制动按钮
+// 5. 座位后方蓝色玻璃质感平直隔板：【严格保持水平平直线段，非弧形】，升级为通透纯净的科技蓝玻璃质感（天蓝+宝蓝渐变、45度高光、发光蓝光导轨与立柱光环）
+// =========================================================================
+function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const time = Date.now() * 0.001;
+
+    // --- 几何常量 (标准正圆外壳与平直后隔板位置) ---
+    const R_out = 72; // 外壳正圆半径
+    const R_in = 67;  // 外壳内壁正圆半径 (外壳厚度仅 5px，释放充裕内部空间)
+    const y_part = 44; // 平直隔板位于水平 y = 44
+    // 在正圆 x^2 + y^2 = 72^2 上，y = 44 时：x = sqrt(72^2 - 44^2) = sqrt(5184 - 1936) = sqrt(3248) ≈ 56.99
+    const x_part = 57;
+    const door_hw = 19; // 中央进出门洞半宽 19px，净通道宽 38px
+    const theta_r = Math.atan2(y_part, x_part);  // ~0.657 rad (37.66°)
+    const theta_l = Math.atan2(y_part, -x_part); // ~2.484 rad (142.34°)
+
+    // --- 1. 标准圆形全包围舱内地坪与科技微导轨 (Standard Circular Cabin Floor) ---
+    ctx.save();
+    ctx.beginPath();
+    // 顺时针沿原生标准正圆弧自左后点绕过顶部圆弧至右后点
+    ctx.arc(0, 0, R_in, theta_l, Math.PI * 2 + theta_r, false);
+    ctx.lineTo(door_hw, y_part);
+    ctx.lineTo(-door_hw, y_part);
+    ctx.lineTo(-x_part, y_part);
+    ctx.closePath();
+    ctx.fillStyle = "#02120e";
+    ctx.fill();
+
+    // 舱内地坪同心放射科技导电纹理 (纯正圆同心圆弧)
+    ctx.strokeStyle = "rgba(16, 185, 129, 0.12)";
+    ctx.lineWidth = 1;
+    [18, 34, 50].forEach(gr => {
+        ctx.beginPath();
+        ctx.arc(0, 4, gr, 0, Math.PI * 2);
+        ctx.stroke();
+    });
+    ctx.restore();
+
+    // --- 2. 纤薄轻量化标准正圆重型装甲外壳 (Slim Standard Circular Outer Shell: 5px) ---
+    ctx.save();
+    // 2A. 纤薄外壳本体 (在 R_in 和 R_out 之间形成规整正圆环壁)
+    ctx.beginPath();
+    ctx.arc(0, 0, R_out, theta_l, Math.PI * 2 + theta_r, false);
+    ctx.lineTo(x_part, y_part);
+    ctx.arc(0, 0, R_in, Math.PI * 2 + theta_r, theta_l, true);
+    ctx.lineTo(-x_part, y_part);
+    ctx.closePath();
+    const gradShell = ctx.createRadialGradient(0, 0, R_in, 0, 0, R_out);
+    gradShell.addColorStop(0, "#031c15");
+    gradShell.addColorStop(0.5, "#063e30");
+    gradShell.addColorStop(1, "#02120e");
+    ctx.fillStyle = gradShell;
+    ctx.fill();
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // 2B. 外壳最外沿高亮翡翠科技饰圈 (Precision Outer Ring)
+    ctx.beginPath();
+    ctx.arc(0, 0, R_out + 0.6, theta_l - 0.01, Math.PI * 2 + theta_r + 0.01, false);
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // 2C. 外壳内沿金属导轨强化线
+    ctx.beginPath();
+    ctx.arc(0, 0, R_in, theta_l, Math.PI * 2 + theta_r, false);
+    ctx.strokeStyle = "#059669";
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+
+    // 2D. 纤薄外壳圆周微型钛合金紧固铆钉 (均匀分布于正圆弧上)
+    const totalBolts = 15;
+    for (let i = 0; i < totalBolts; i++) {
+        const bt = theta_l + (Math.PI * 2 + theta_r - theta_l) * (i / (totalBolts - 1));
+        const bx = Math.cos(bt) * (R_out - 2.5);
+        const by = Math.sin(bt) * (R_out - 2.5);
+        ctx.fillStyle = "#021a14";
+        ctx.beginPath(); ctx.arc(bx, by, 1.2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#34d399";
+        ctx.beginPath(); ctx.arc(bx, by, 0.6, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+
+    // --- 3. 左右两侧完全顺应外壳曲线排列的操作按钮控制台台面底衬 ---
+    // 左控制台弧形台板 (从 phi = -67° 至 -136°)
+    const leftDeskS = -Math.PI / 2 - 136 * Math.PI / 180;
+    const leftDeskE = -Math.PI / 2 - 67 * Math.PI / 180;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, 66.5, leftDeskS, leftDeskE, false);
+    ctx.arc(0, 0, 42, leftDeskE, leftDeskS, true);
+    ctx.closePath();
+    ctx.fillStyle = "#021712";
+    ctx.fill();
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+    // 左台面同心圆弧导轨线
+    [47, 55, 63].forEach(r => {
+        ctx.beginPath(); ctx.arc(0, 0, r, leftDeskS + 0.03, leftDeskE - 0.03, false);
+        ctx.strokeStyle = "rgba(52, 211, 153, 0.25)"; ctx.lineWidth = 0.6; ctx.stroke();
+    });
+
+    // 右控制台弧形台板 (从 phi = 67° 至 136°)
+    const rightDeskS = -Math.PI / 2 + 67 * Math.PI / 180;
+    const rightDeskE = -Math.PI / 2 + 136 * Math.PI / 180;
+    ctx.beginPath();
+    ctx.arc(0, 0, 66.5, rightDeskS, rightDeskE, false);
+    ctx.arc(0, 0, 42, rightDeskE, rightDeskS, true);
+    ctx.closePath();
+    ctx.fillStyle = "#021712";
+    ctx.fill();
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+    // 右台面同心圆弧导轨线
+    [47, 55, 63].forEach(r => {
+        ctx.beginPath(); ctx.arc(0, 0, r, rightDeskS + 0.03, rightDeskE - 0.03, false);
+        ctx.strokeStyle = "rgba(52, 211, 153, 0.25)"; ctx.lineWidth = 0.6; ctx.stroke();
+    });
+    ctx.restore();
+
+    // --- 4. 前部三块连在一起的弧面大屏 ("位于座位前方 排列完全顺着圆形外壳的曲线") ---
+    const R_scr_out = 66.0;
+    const R_scr_in = 53.0; // 13px 宽屏高度，气势磅礴
+
+    // 三块屏幕各自的弧度定义 (以北向 -PI/2 为中心对称，完全紧贴外壳曲线排列)
+    const screens = [
+        {
+            name: "LEFT_MONITOR",
+            startDeg: -65,
+            endDeg: -23,
+            midDeg: -44,
+            hudType: "reactor"
+        },
+        {
+            name: "CENTER_MONITOR",
+            startDeg: -20,
+            endDeg: 20,
+            midDeg: 0,
+            hudType: "radar"
+        },
+        {
+            name: "RIGHT_MONITOR",
+            startDeg: 23,
+            endDeg: 65,
+            midDeg: 44,
+            hudType: "defense"
+        }
+    ];
+
+    screens.forEach(scr => {
+        const sRad = -Math.PI / 2 + scr.startDeg * Math.PI / 180;
+        const eRad = -Math.PI / 2 + scr.endDeg * Math.PI / 180;
+        const midRad = scr.midDeg * Math.PI / 180;
+
+        ctx.save();
+        // 4A. 屏幕外壳加固边框 (Screen Heavy Bezel)
+        ctx.beginPath();
+        ctx.arc(0, 0, R_scr_out + 0.8, sRad - 0.015, eRad + 0.015, false);
+        ctx.arc(0, 0, R_scr_in - 0.8, eRad + 0.015, sRad - 0.015, true);
+        ctx.closePath();
+        ctx.fillStyle = "#011c15";
+        ctx.fill();
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // 4B. 屏幕活跃显示表面 (Active Phosphor Glass Surface)
+        ctx.beginPath();
+        ctx.arc(0, 0, R_scr_out, sRad, eRad, false);
+        ctx.arc(0, 0, R_scr_in, eRad, sRad, true);
+        ctx.closePath();
+        const gradScr = ctx.createRadialGradient(0, 0, R_scr_in, 0, 0, R_scr_out);
+        gradScr.addColorStop(0, "#011a14");
+        gradScr.addColorStop(0.65, "#022e23");
+        gradScr.addColorStop(1, "#033d2f");
+        ctx.fillStyle = gradScr;
+        ctx.fill();
+        ctx.strokeStyle = "#34d399";
+        ctx.lineWidth = 1.0;
+        ctx.stroke();
+
+        // 4C. 同心同弧度扫描线 (Concentric Scanlines strictly fitting curve)
+        ctx.strokeStyle = "rgba(52, 211, 153, 0.22)";
+        ctx.lineWidth = 0.7;
+        for (let r = R_scr_in + 2; r < R_scr_out - 1.0; r += 2.4) {
+            ctx.beginPath();
+            ctx.arc(0, 0, r, sRad + 0.02, eRad - 0.02, false);
+            ctx.stroke();
+        }
+
+        // 4D. 屏幕内部高精切向 HUD 渲染
+        const midR = (R_scr_out + R_scr_in) / 2;
+        const smx = Math.sin(midRad) * midR;
+        const smy = -Math.cos(midRad) * midR;
+
+        ctx.save();
+        ctx.translate(smx, smy);
+        ctx.rotate(midRad);
+
+        if (scr.hudType === "radar") {
+            // === 正中大屏: 战术全景扫描雷达 (Facing Seat Directly) ===
+            ctx.strokeStyle = "rgba(52, 211, 153, 0.5)";
+            ctx.lineWidth = 0.7;
+            ctx.beginPath(); ctx.arc(0, 0, 4.2, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(0, 0, 2.0, 0, Math.PI * 2); ctx.stroke();
+
+            // 雷达旋转扫描波束
+            const sweepA = (time * 2.5) % (Math.PI * 2);
+            ctx.strokeStyle = "#34d399";
+            ctx.lineWidth = 1.0;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(Math.cos(sweepA) * 4.6, Math.sin(sweepA) * 4.6);
+            ctx.stroke();
+
+            // 动态敌我识别目标光点
+            if (Math.sin(time * 3) > 0) {
+                ctx.fillStyle = "#ef4444";
+                ctx.fillRect(-2.8, -2.2, 1.2, 1.2);
+            }
+            ctx.fillStyle = "#10b981";
+            ctx.fillRect(2.4, 1.6, 1.0, 1.0);
+
+            // 屏幕顶部科技标示
+            ctx.font = "bold 3.2px monospace";
+            ctx.fillStyle = "#6ee7b7";
+            ctx.textAlign = "center";
+            ctx.fillText("TACTICAL RADAR", 0, -3.6);
+
+            // 屏幕底部状态与锁定标记
+            ctx.font = "bold 2.8px monospace";
+            ctx.fillStyle = "#38bdf8";
+            ctx.fillText("LOCK: ENGAGED", 0, 4.6);
+
+        } else if (scr.hudType === "reactor") {
+            // === 左侧大屏: 反应堆动力流与能量示波波形 ===
+            ctx.font = "bold 3.0px monospace";
+            ctx.fillStyle = "#34d399";
+            ctx.textAlign = "center";
+            ctx.fillText("REACTOR TELEM", 0, -3.6);
+
+            // 动态实时正弦能量波形
+            ctx.strokeStyle = "#10b981";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            for (let px = -12; px <= 12; px += 1.2) {
+                const py = Math.sin(time * 4.8 + px * 0.45) * 2.0;
+                if (px === -12) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // 4 阶梯动力输出指示条
+            const powerBars = [1, 1, 1, Math.sin(time * 2) > 0 ? 1 : 0];
+            const pColors = ["#10b981", "#34d399", "#38bdf8", "#f59e0b"];
+            for (let b = 0; b < 4; b++) {
+                ctx.fillStyle = powerBars[b] ? pColors[b] : "#022c22";
+                ctx.fillRect(-9 + b * 4.6, 3.4, 3.6, 1.4);
+            }
+
+        } else if (scr.hudType === "defense") {
+            // === 右侧大屏: 防护力场频谱与加密通信矩阵 ===
+            ctx.font = "bold 3.0px monospace";
+            ctx.fillStyle = "#38bdf8";
+            ctx.textAlign = "center";
+            ctx.fillText("SHIELD MATRIX", 0, -3.6);
+
+            // 6 段跳动脉冲均衡柱
+            const freqVals = [0.85, 0.45, 0.95, 0.65, 0.8, 0.55];
+            for (let f = 0; f < 6; f++) {
+                const fh = 1.4 + Math.abs(Math.sin(time * 3.8 + f * 1.2)) * 3.4 * freqVals[f];
+                ctx.fillStyle = "#06b6d4";
+                ctx.fillRect(-10 + f * 3.4, 2.8 - fh, 2.4, fh);
+            }
+
+            // 底部防御状态
+            ctx.font = "bold 2.8px monospace";
+            ctx.fillStyle = "#10b981";
+            ctx.fillText("SHIELD: 100%", 0, 4.6);
+        }
+
+        ctx.restore(); // end local screen content
+        ctx.restore(); // end screen clip/stroke
+    });
+
+    // 4E. 屏幕间一体化钛合金连接锁扣 ("三块连在一起的屏幕")
+    [-21.5 * Math.PI / 180, 21.5 * Math.PI / 180].forEach(jTheta => {
+        const jx = Math.sin(jTheta) * ((R_scr_out + R_scr_in) / 2);
+        const jy = -Math.cos(jTheta) * ((R_scr_out + R_scr_in) / 2);
+        ctx.save();
+        ctx.translate(jx, jy);
+        ctx.rotate(jTheta);
+        ctx.fillStyle = "#022c22";
+        ctx.fillRect(-2.0, -7, 4.0, 14);
+        ctx.strokeStyle = "#34d399";
+        ctx.lineWidth = 1.0;
+        ctx.strokeRect(-2.0, -7, 4.0, 14);
+        // 连接螺栓
+        ctx.fillStyle = "#10b981";
+        ctx.beginPath(); ctx.arc(0, -4, 0.9, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(0, 4, 0.9, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    // 4F. 屏幕表面晶体高光斜向弧反光 (Curved Screen Glare Sheen)
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, R_scr_out - 1, -Math.PI / 2 - 0.9, -Math.PI / 2 + 0.9, false);
+    ctx.arc(0, 0, R_scr_out - 4, -Math.PI / 2 + 0.9, -Math.PI / 2 - 0.9, true);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
+    ctx.fill();
+    ctx.restore();
+
+    // --- 5. 左右两侧完全顺应圆弧曲线排列的控制按钮 ("左右两侧的按钮也要顺着他的曲线排列") ---
+    // 5A. 左侧操作翼: 顺应圆形曲率的三排弧形按键组
+    // 外弧排 (Radius 62): 5 枚顺弧排列的带背光方形指令按键
+    const leftBtnsAngles = [-75, -89, -103, -117, -131];
+    const leftBtnColors = ["#10b981", "#06b6d4", "#f59e0b", "#ef4444", "#38bdf8"];
+    leftBtnsAngles.forEach((deg, idx) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -62); // 沿法线定位到半径 62
+        // 按键底座与键帽
+        ctx.fillStyle = "#021a14";
+        ctx.fillRect(-2.4, -2.4, 4.8, 4.8);
+        ctx.strokeStyle = "#047857";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(-2.4, -2.4, 4.8, 4.8);
+        ctx.fillStyle = leftBtnColors[idx];
+        ctx.fillRect(-1.7, -1.7, 3.4, 3.4);
+        ctx.restore();
+    });
+
+    // 中弧排 (Radius 54): 4 枚顺弧排列的翘板开关 (带脉冲指示灯)
+    const leftRockersAngles = [-81, -96, -111, -125];
+    leftRockersAngles.forEach((deg, idx) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -54);
+        ctx.fillStyle = "#03120e";
+        ctx.fillRect(-2.2, -2.8, 4.4, 5.6);
+        ctx.strokeStyle = "#064e3b";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(-2.2, -2.8, 4.4, 5.6);
+        ctx.fillStyle = (idx % 2 === 0) ? "#047857" : "#0f766e";
+        ctx.fillRect(-1.6, -2.2, 3.2, 4.4);
+        // 状态微灯
+        ctx.fillStyle = (Math.sin(time * 4 + idx) > 0) ? "#34d399" : "#022c22";
+        ctx.beginPath(); ctx.arc(0, -1.0, 0.6, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    // 内弧排 (Radius 46): 3 枚顺弧排列的带安全护盖重型拨动开关
+    const leftTogglesAngles = [-88, -104, -120];
+    leftTogglesAngles.forEach((deg) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -46);
+        ctx.fillStyle = "#064e3b";
+        ctx.fillRect(-1.6, -1.6, 3.2, 3.2);
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(-1.6, -1.6, 3.2, 3.2);
+        // 金属拨杆
+        ctx.strokeStyle = "#f3f4f6";
+        ctx.lineWidth = 1.0;
+        ctx.beginPath();
+        ctx.moveTo(0, 1.2); ctx.lineTo(0, -1.8);
+        ctx.stroke();
+        ctx.restore();
+    });
+
+    // 5B. 右侧操作翼: 顺应圆形曲率的三排弧形按键组
+    // 外弧排 (Radius 62): 顺弧双线性推子电位器与双旋转编码器旋钮
+    // 弧形推子滑轨 1 (deg 75 到 89)
+    ctx.save();
+    const fader1S = -Math.PI / 2 + 74 * Math.PI / 180;
+    const fader1E = -Math.PI / 2 + 88 * Math.PI / 180;
+    ctx.beginPath(); ctx.arc(0, 0, 62, fader1S, fader1E, false);
+    ctx.strokeStyle = "#020f0b"; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.strokeStyle = "#064e3b"; ctx.lineWidth = 0.6; ctx.stroke();
+    // 推子滑块 (deg 81)
+    ctx.rotate(81 * Math.PI / 180);
+    ctx.translate(0, -62);
+    ctx.fillStyle = "#10b981"; ctx.fillRect(-1.6, -2.4, 3.2, 4.8);
+    ctx.fillStyle = "#e0f2fe"; ctx.fillRect(-0.8, -1.4, 1.6, 2.8);
+    ctx.restore();
+
+    // 弧形推子滑轨 2 (deg 93 到 107)
+    ctx.save();
+    const fader2S = -Math.PI / 2 + 93 * Math.PI / 180;
+    const fader2E = -Math.PI / 2 + 107 * Math.PI / 180;
+    ctx.beginPath(); ctx.arc(0, 0, 62, fader2S, fader2E, false);
+    ctx.strokeStyle = "#020f0b"; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.strokeStyle = "#064e3b"; ctx.lineWidth = 0.6; ctx.stroke();
+    // 推子滑块 (deg 101)
+    ctx.rotate(101 * Math.PI / 180);
+    ctx.translate(0, -62);
+    ctx.fillStyle = "#10b981"; ctx.fillRect(-1.6, -2.4, 3.2, 4.8);
+    ctx.fillStyle = "#e0f2fe"; ctx.fillRect(-0.8, -1.4, 1.6, 2.8);
+    ctx.restore();
+
+    // 顺弧双高精旋钮 (deg 115 与 127)
+    [115, 127].forEach((deg, idx) => {
+        ctx.save();
+        ctx.rotate(deg * Math.PI / 180);
+        ctx.translate(0, -62);
+        ctx.fillStyle = "#03120e";
+        ctx.beginPath(); ctx.arc(0, 0, 2.8, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#10b981"; ctx.lineWidth = 0.7; ctx.stroke();
+        // 旋钮指针
+        const pRad = (time * 1.8 + idx * 2.2) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 0.9;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(pRad) * 2.4, Math.sin(pRad) * 2.4); ctx.stroke();
+        ctx.restore();
+    });
+
+    // 中弧排 (Radius 54): 4 枚顺弧排列的战术微动按键
+    const rightMicroAngles = [80, 94, 108, 122];
+    rightMicroAngles.forEach((deg, idx) => {
+        ctx.save();
+        ctx.rotate(deg * Math.PI / 180);
+        ctx.translate(0, -54);
+        ctx.fillStyle = (idx % 2 === 0 ? "#10b981" : "#f59e0b");
+        ctx.fillRect(-2.0, -1.8, 4.0, 3.6);
+        ctx.strokeStyle = "#022c22"; ctx.lineWidth = 0.5;
+        ctx.strokeRect(-2.0, -1.8, 4.0, 3.6);
+        ctx.restore();
+    });
+
+    // 内弧排 (Radius 46): 大型带黄黑警示圈的红色紧急制动主控按钮 (E-STOP)
+    ctx.save();
+    ctx.rotate(115 * Math.PI / 180);
+    ctx.translate(0, -46);
+    // 黄黑相间安全防护座圈
+    ctx.fillStyle = "#f59e0b";
+    ctx.beginPath(); ctx.arc(0, 0, 4.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#000000";
+    ctx.beginPath(); ctx.arc(0, 0, 4.4, 0, Math.PI * 0.5); ctx.lineTo(0, 0); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, 4.4, Math.PI, Math.PI * 1.5); ctx.lineTo(0, 0); ctx.fill();
+    // 红色蘑菇头紧急制动按钮
+    ctx.fillStyle = "#ef4444";
+    ctx.beginPath(); ctx.arc(0, 0, 3.0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#fee2e2"; ctx.lineWidth = 0.8; ctx.stroke();
+    ctx.restore();
+
+    // --- 6. 屏幕后方的机械键盘与操作员滑轮座椅 ("后方是键盘和座位", 靠近控制台，面向北方屏幕) ---
+    // 6A. 机械键盘模块
+    ctx.save();
+    const kbY = -22;
+    const kbW = 24;
+    const kbH = 11;
+    ctx.translate(0, kbY);
+
+    // 键盘底托
+    ctx.fillStyle = "#021a14";
+    ctx.fillRect(-kbW / 2 - 1.5, -kbH / 2 - 1.5, kbW + 3, kbH + 3);
+    ctx.strokeStyle = "#065f46";
+    ctx.lineWidth = 0.9;
+    ctx.strokeRect(-kbW / 2 - 1.5, -kbH / 2 - 1.5, kbW + 3, kbH + 3);
+
+    // 机械键盘背光基板
+    ctx.fillStyle = "rgba(16, 185, 129, 0.16)";
+    ctx.fillRect(-kbW / 2, -kbH / 2, kbW, kbH);
+
+    // 4 排机械键帽
+    const keyRows = 4;
+    const keyCols = 7;
+    const kw = 2.2;
+    const kh = 1.6;
+    const gapX = 0.8;
+    const gapY = 0.7;
+    const startKx = -kbW / 2 + 1.2;
+    const startKy = -kbH / 2 + 0.9;
+
+    for (let r = 0; r < keyRows; r++) {
+        for (let c = 0; c < keyCols; c++) {
+            if (r === 3 && (c >= 2 && c <= 4)) continue; // 空格留空
+            const kx = startKx + c * (kw + gapX);
+            const ky = startKy + r * (kh + gapY);
+            ctx.fillStyle = "#052e24";
+            ctx.fillRect(kx, ky, kw, kh);
+            ctx.fillStyle = (r === 0 && c === 0) ? "#ef4444" : "#34d399";
+            ctx.fillRect(kx + 0.4, ky + 0.3, kw - 0.8, kh - 0.6);
+        }
+    }
+    // 空格键
+    const spaceX = startKx + 2 * (kw + gapX);
+    const spaceY = startKy + 3 * (kh + gapY);
+    const spaceW = 3 * kw + 2 * gapX;
+    ctx.fillStyle = "#064e3b";
+    ctx.fillRect(spaceX, spaceY, spaceW, kh);
+    ctx.fillStyle = "#6ee7b7";
+    ctx.fillRect(spaceX + 0.8, spaceY + 0.3, spaceW - 1.6, kh - 0.6);
+
+    // 触控板
+    ctx.fillStyle = "#041d16";
+    ctx.fillRect(-4.5, kbH / 2 + 1.6, 9, 3.2);
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 0.6;
+    ctx.strokeRect(-4.5, kbH / 2 + 1.6, 9, 3.2);
+    ctx.fillStyle = "#38bdf8";
+    ctx.fillRect(-1.5, kbH / 2 + 2.8, 3, 0.8);
+    ctx.restore();
+
+    // 6B. 操作员滑轮座椅 (就坐于键盘后方中心，面朝前部屏幕)
+    ctx.save();
+    const seatY = 10;
+    ctx.translate(0, seatY);
+
+    // 五星万向轮金属底座
+    ctx.strokeStyle = "#042018";
+    ctx.lineWidth = 2.2;
+    for (let arm = 0; arm < 5; arm++) {
+        const starA = arm * (Math.PI * 2 / 5) - Math.PI / 2;
+        const wx = Math.cos(starA) * 12;
+        const wy = Math.sin(starA) * 10;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(wx, wy);
+        ctx.stroke();
+        ctx.fillStyle = "#064e3b";
+        ctx.beginPath(); ctx.arc(wx, wy, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+    // 气压升降液压中柱
+    ctx.fillStyle = "#10b981";
+    ctx.beginPath(); ctx.arc(0, 0, 2.6, 0, Math.PI * 2); ctx.fill();
+
+    // 坐垫本体
+    ctx.fillStyle = "#031712";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-10, -8, 20, 15, 4); else ctx.rect(-10, -8, 20, 15);
+    ctx.fill();
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // 坐垫加厚层与中央双缝线
+    ctx.fillStyle = "#064e3b";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-8, -6, 16, 11, 2.5); else ctx.rect(-8, -6, 16, 11);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.5)";
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(0, -5); ctx.lineTo(0, 4);
+    ctx.stroke();
+
+    // 左右两侧扶手
+    [-11, 9].forEach(ax => {
+        ctx.fillStyle = "#02120e";
+        ctx.fillRect(ax, -6, 2.4, 10);
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 0.7;
+        ctx.strokeRect(ax, -6, 2.4, 10);
+        ctx.fillStyle = "#065f46";
+        ctx.fillRect(ax + 0.3, -4.5, 1.8, 7);
+    });
+
+    // 人体工学高靠背与头枕
+    ctx.fillStyle = "#021a14";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-9, 4, 18, 9, 3.5); else ctx.rect(-9, 4, 18, 9);
+    ctx.fill();
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+
+    // 靠背腰托
+    ctx.fillStyle = "#044e3b";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-6, 6.5, 12, 4.5, 2); else ctx.rect(-6, 6.5, 12, 4.5);
+    ctx.fill();
+    ctx.strokeStyle = "#34d399";
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+
+    ctx.restore(); // end seat
+
+    // --- 7. 座位后方蓝色玻璃质感平直隔板 ("隔板做的基本没问题 但是要改成蓝色玻璃质感的") ---
+    // 【核心规范】: 隔板本身严格保持平直横线，绝非弧形！全面换装科技通透蓝玻璃质感
+    ctx.save();
+
+    // 7A. 中央门洞通道地坪导向耐磨板 (Blue Tech Walk-in Entrance Threshold)
+    ctx.fillStyle = "#031726";
+    ctx.fillRect(-door_hw, y_part - 2.5, door_hw * 2, 5.0);
+    ctx.strokeStyle = "#0284c7";
+    ctx.lineWidth = 1.0;
+    ctx.strokeRect(-door_hw, y_part - 2.5, door_hw * 2, 5.0);
+
+    // 门洞进入导向箭头 (Blue Entry Chevron Decals: ▲ ▲ ▲)
+    ctx.fillStyle = "#38bdf8";
+    [-8, 0, 8].forEach(arrX => {
+        ctx.beginPath();
+        ctx.moveTo(arrX, y_part - 1.4);
+        ctx.lineTo(arrX - 2.4, y_part + 1.4);
+        ctx.lineTo(arrX + 2.4, y_part + 1.4);
+        ctx.closePath();
+        ctx.fill();
+    });
+
+    // 7B. 左侧平直蓝色玻璃隔板面板 (Left Straight Blue Glass Panel: x from -x_part to -door_hw, y = y_part)
+    const glassThickness = 5.0;
+    const lGlassW = x_part - door_hw; // 57 - 19 = 38px
+
+    // 左侧通透纯正科技蓝玻璃本体渐变
+    const gradBlueL = ctx.createLinearGradient(-x_part, y_part - glassThickness / 2, -door_hw, y_part + glassThickness / 2);
+    gradBlueL.addColorStop(0, "rgba(56, 189, 248, 0.75)");  // 顶部天蓝高光边缘
+    gradBlueL.addColorStop(0.25, "rgba(14, 165, 233, 0.45)"); // 清透蔚蓝主体
+    gradBlueL.addColorStop(0.75, "rgba(30, 64, 175, 0.40)");  // 宝石深蓝核心
+    gradBlueL.addColorStop(1, "rgba(96, 165, 250, 0.70)");   // 底部电光蓝边
+    ctx.fillStyle = gradBlueL;
+    ctx.fillRect(-x_part, y_part - glassThickness / 2, lGlassW, glassThickness);
+
+    // 左隔板顶部平直蓝钛金属固定导轨 (Straight Top Blue Rail)
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-x_part, y_part - glassThickness / 2);
+    ctx.lineTo(-door_hw, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    // 左隔板底部平直钴蓝锁止底梁 (Straight Bottom Cobalt Rail)
+    ctx.strokeStyle = "#1d4ed8";
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    ctx.moveTo(-x_part, y_part + glassThickness / 2);
+    ctx.lineTo(-door_hw, y_part + glassThickness / 2);
+    ctx.stroke();
+
+    // 纯平直 45 度亮白水晶镜面反光斜线 (Crisp Specular Reflection Streaks)
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-48, y_part + glassThickness / 2);
+    ctx.lineTo(-42, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(186, 230, 253, 0.90)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(-33, y_part + glassThickness / 2);
+    ctx.lineTo(-27, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    // 内部平直蓝色激光防撞指示中线 (Internal Blue Refraction Line)
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.85)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-x_part, y_part);
+    ctx.lineTo(-door_hw, y_part);
+    ctx.stroke();
+
+    // 7C. 右侧平直蓝色玻璃隔板面板 (Right Straight Blue Glass Panel: x from door_hw to x_part, y = y_part)
+    const rGlassW = x_part - door_hw; // 38px
+
+    // 右侧通透纯正科技蓝玻璃本体渐变
+    const gradBlueR = ctx.createLinearGradient(door_hw, y_part - glassThickness / 2, x_part, y_part + glassThickness / 2);
+    gradBlueR.addColorStop(0, "rgba(56, 189, 248, 0.70)");
+    gradBlueR.addColorStop(0.25, "rgba(30, 64, 175, 0.40)");
+    gradBlueR.addColorStop(0.75, "rgba(14, 165, 233, 0.45)");
+    gradBlueR.addColorStop(1, "rgba(96, 165, 250, 0.75)");
+    ctx.fillStyle = gradBlueR;
+    ctx.fillRect(door_hw, y_part - glassThickness / 2, rGlassW, glassThickness);
+
+    // 右隔板顶部平直导轨
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(door_hw, y_part - glassThickness / 2);
+    ctx.lineTo(x_part, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    // 右隔板底部平直底梁
+    ctx.strokeStyle = "#1d4ed8";
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    ctx.moveTo(door_hw, y_part + glassThickness / 2);
+    ctx.lineTo(x_part, y_part + glassThickness / 2);
+    ctx.stroke();
+
+    // 右隔板表面平直 45 度反光斜线
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(27, y_part + glassThickness / 2);
+    ctx.lineTo(33, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(186, 230, 253, 0.90)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(42, y_part + glassThickness / 2);
+    ctx.lineTo(48, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    // 内部平直蓝色激光防撞指示中线
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.85)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(door_hw, y_part);
+    ctx.lineTo(x_part, y_part);
+    ctx.stroke();
+
+    // 7D. 四根重型金属圆柱立柱与蓝光安全感应器 (Four Stanchion Posts with Blue LED Rings)
+    // 坐标: 外左端 (-57, 44)、门洞左立柱 (-19, 44)、门洞右立柱 (19, 44)、外右端 (57, 44)
+    const stanchions = [-x_part, -door_hw, door_hw, x_part];
+    stanchions.forEach((sx, idx) => {
+        // 立柱金属基座
+        ctx.fillStyle = "#02120e";
+        ctx.beginPath(); ctx.arc(sx, y_part, 3.4, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#1e3a8a";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // 不锈钢镀铬圆芯
+        ctx.fillStyle = "#93c5fd";
+        ctx.beginPath(); ctx.arc(sx, y_part, 2.0, 0, Math.PI * 2); ctx.fill();
+
+        // 门洞两侧立柱蓝色安全红外感应光圈 (Blue Optical Trip-Beam Sensor)
+        if (idx === 1 || idx === 2) {
+            ctx.fillStyle = (Math.sin(time * 3.5) > 0) ? "#38bdf8" : "#0284c7";
+            ctx.beginPath(); ctx.arc(sx, y_part, 1.0, 0, Math.PI * 2); ctx.fill();
+        }
+    });
+
+    ctx.restore(); // end blue straight glass partition
+
+    ctx.restore(); // end drawCircularPodWorkstation
+}
+
+// 生成圆形全包围控制台道具对象 (独立于实体墙系统，杜绝障碍物引擎在道具表面覆盖多边形描边)
+function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = "CIRCULAR POD CONSOLE") {
+    const boundR = 80 * scale;
+    return {
+        type: "circular_pod_workstation",
+        cx: cx,
+        cy: cy,
+        angle: angle,
+        scale: scale,
+        x: cx - boundR,
+        y: cy - boundR,
+        w: boundR * 2,
+        h: boundR * 2,
+        label: label,
+        displayName: "CIRCULAR ENCLOSED COMMAND POD",
+        noCollision: true,
+        hideLabel: true,
+        draw: (ctx) => {
+            drawCircularPodWorkstation(ctx, cx, cy, angle, scale);
+        }
+    };
+}
+
 const LEVEL_8_TEST = {
     id: "level8_test",
     name: "第 8 关 · 隔离测试关卡",
@@ -1630,7 +2402,13 @@ const LEVEL_8_TEST = {
             // 西侧主控台 (位于原西侧圆柱 1350, 920 位置)
             getSectorWorkstation(1350, 920, 0, 1.0, 'WEST SECTOR COMMAND CONSOLE'),
             // 东侧主控台 (位于原东侧圆柱 1850, 920 位置)
-            getSectorWorkstation(1850, 920, 0, 1.0, 'EAST SECTOR COMMAND CONSOLE')
+            getSectorWorkstation(1850, 920, 0, 1.0, 'EAST SECTOR COMMAND CONSOLE'),
+
+            // =========================================================
+            // 4. 全新圆形全包围控制台 (完全依据手绘草稿 IMG_7694 规范制作：圆形全包围、贴合外壳前部3连屏、键盘与座椅、左右两侧多排按钮、后方平直玻璃隔板)
+            // 置于北侧中央空白广场 (1600, 915) 核心指挥席位，面向北方大屏，南方开辟平直玻璃门洞供进出
+            // =========================================================
+            getCircularPodWorkstation(1600, 915, 0, 1.0, 'CENTRAL ENCLOSED COMMAND POD')
         ];
 
         return {
