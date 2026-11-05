@@ -211,404 +211,7 @@ function getSectorWorkstation(cx, cy, angle = 0, scale = 1.0, label = "SECTOR WO
 // 服务器集群 (从 Level 8 移植，2026-11-05)
 // =========================================================
 // =========================================================================
-function drawServerCluster(ctx, cx, cy, angle = 0, scale = 1.0) {
-    ctx.save();
-    ctx.translate(cx, cy);
-    if (angle !== 0) ctx.rotate(angle);
-    if (scale !== 1.0) ctx.scale(scale, scale);
 
-    const time = Date.now() * 0.001;
-    const numCabinets = 5;
-    const cabW = 66; // 单机柜宽 66px (约为角色模型 26px 的 2.54 倍，显著宽厚)
-    const cabH = 96; // 单机柜深 96px
-    const totalW = numCabinets * cabW; // 330px 总宽 (放大 2.36 倍)
-    const halfW = totalW / 2;
-    const halfH = cabH / 2;
-
-    // --- 0. 地坪散热与重型机房减震基座 (Floor Heavy Vibration-Damping Base) ---
-    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
-    ctx.fillRect(-halfW - 4, -halfH + 4, totalW + 8, cabH + 4);
-
-    // 强化机房钢质底座槽钢 (Heavy Steel Base Frame)
-    ctx.fillStyle = "#010e0b";
-    ctx.fillRect(-halfW - 2, -halfH, totalW + 4, cabH);
-    ctx.strokeStyle = "#043327";
-    ctx.lineWidth = 1.8;
-    ctx.strokeRect(-halfW - 2, -halfH, totalW + 4, cabH);
-
-    // 底部机柜固定膨胀地脚螺栓
-    for (let c = 0; c < numCabinets; c++) {
-        const bx = -halfW + c * cabW;
-        ctx.fillStyle = "#021a14";
-        ctx.fillRect(bx + 4, halfH - 3, 6, 2.5);
-        ctx.fillRect(bx + cabW - 10, halfH - 3, 6, 2.5);
-        ctx.fillStyle = "#10b981";
-        ctx.beginPath(); ctx.arc(bx + 7, halfH - 1.8, 0.9, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(bx + cabW - 7, halfH - 1.8, 0.9, 0, Math.PI * 2); ctx.fill();
-    }
-
-    // 机柜专业职能分类定义与多彩主题配置
-    const cabinetConfigs = [
-        { id: "SRV-01", name: "CRYPTO", primaryColor: "#c084fc", accentColor: "#00E5FF", beacon: "#d946ef" },
-        { id: "SRV-02", name: "NEURAL", primaryColor: "#00FF66", accentColor: "#a3e635", beacon: "#10b981" },
-        { id: "SRV-03", name: "MAINFRAME", primaryColor: "#fbbf24", accentColor: "#ef4444", beacon: "#f59e0b" },
-        { id: "SRV-04", name: "RADAR-FX", primaryColor: "#00E5FF", accentColor: "#3b82f6", beacon: "#38bdf8" },
-        { id: "SRV-05", name: "SIM-CORE", primaryColor: "#f43f5e", accentColor: "#fb923c", beacon: "#ef4444" }
-    ];
-
-    // --- 1. 逐个绘制 5 个大型独立机柜 ---
-    for (let c = 0; c < numCabinets; c++) {
-        const cabX = -halfW + c * cabW;
-        const cfg = cabinetConfigs[c];
-
-        // 1A. 单机柜外壳装甲框 (Heavy Armored Exterior Frame with Chamfers)
-        const gradCasing = ctx.createLinearGradient(cabX, -halfH, cabX + cabW, -halfH + cabH);
-        gradCasing.addColorStop(0, "#06241d");
-        gradCasing.addColorStop(0.35, "#093328");
-        gradCasing.addColorStop(0.7, "#041b16");
-        gradCasing.addColorStop(1, "#02120e");
-        ctx.fillStyle = gradCasing;
-        ctx.fillRect(cabX, -halfH, cabW, cabH);
-
-        // 外框装甲精细倒角描边
-        ctx.strokeStyle = "#0d4a3c";
-        ctx.lineWidth = 1.4;
-        ctx.strokeRect(cabX + 0.7, -halfH + 0.7, cabW - 1.4, cabH - 1.4);
-
-        // 顶部门楣金属横梁与机柜专业铭牌 (Header Nameplate)
-        ctx.fillStyle = "#031712";
-        ctx.fillRect(cabX + 2, -halfH + 2, cabW - 4, 11);
-        ctx.strokeStyle = "#064e3b";
-        ctx.lineWidth = 0.8;
-        ctx.strokeRect(cabX + 2, -halfH + 2, cabW - 4, 11);
-
-        // 顶棚激光蚀刻机柜编号与职能
-        ctx.font = "bold 5.2px monospace";
-        ctx.fillStyle = cfg.primaryColor;
-        ctx.textAlign = "center";
-        ctx.fillText(cfg.id, cabX + cabW / 2 - 10, -halfH + 9.5);
-
-        ctx.font = "bold 4.4px monospace";
-        ctx.fillStyle = "#a7f3d0";
-        ctx.textAlign = "left";
-        ctx.fillText(cfg.name, cabX + cabW / 2 + 1, -halfH + 9.5);
-
-        // 机柜门楣顶部双色状态信标灯塔 (Dual Tower Beacon LEDs)
-        const bPulse = Math.sin(time * 3.5 + c * 1.6) > -0.1;
-        ctx.fillStyle = bPulse ? cfg.beacon : "#042018";
-        ctx.beginPath(); ctx.arc(cabX + 6.5, -halfH + 7.5, 1.4, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = (bPulse ? "#ffffff" : "#02120e");
-        ctx.beginPath(); ctx.arc(cabX + 6.5, -halfH + 7.5, 0.7, 0, Math.PI * 2); ctx.fill();
-
-        ctx.fillStyle = (Math.sin(time * 5.2 + c * 2.1) > 0.2) ? cfg.accentColor : "#052e24";
-        ctx.beginPath(); ctx.arc(cabX + cabW - 6.5, -halfH + 7.5, 1.4, 0, Math.PI * 2); ctx.fill();
-
-        // 1B. 内部深暗机架舱室 (Dark Recessed Equipment Bay)
-        const bayX = cabX + 5.0;
-        const bayY = -halfH + 15.0;
-        const bayW = cabW - 10.0; // 56px
-        const bayH = cabH - 22.0; // 74px
-
-        ctx.fillStyle = "#010a08";
-        ctx.fillRect(bayX, bayY, bayW, bayH);
-        ctx.strokeStyle = "#053d30";
-        ctx.lineWidth = 1.0;
-        ctx.strokeRect(bayX, bayY, bayW, bayH);
-
-        // 左右 19 英寸机架立柱与 EIA 方孔导轨 (Vertical EIA-310 Heavy Mounting Rails)
-        ctx.fillStyle = "#04241c";
-        ctx.fillRect(bayX, bayY, 3.2, bayH);
-        ctx.fillRect(bayX + bayW - 3.2, bayY, 3.2, bayH);
-
-        ctx.fillStyle = "#010806";
-        for (let ry = bayY + 2.5; ry < bayY + bayH - 2; ry += 3.8) {
-            ctx.fillRect(bayX + 0.8, ry, 1.6, 1.6);
-            ctx.fillRect(bayX + bayW - 2.4, ry, 1.6, 1.6);
-        }
-
-        // 1C. 纵向排列的多层服务器抽屉 (7 层 1U/2U 刀片服务器机箱)
-        const numServers = 7;
-        const srvH = 8.6;
-        const srvGap = 1.6;
-        const startSrvY = bayY + 1.6;
-
-        for (let s = 0; s < numServers; s++) {
-            const sy = startSrvY + s * (srvH + srvGap);
-            const sx = bayX + 3.8;
-            const sw = bayW - 7.6; // ~48.4px
-
-            // 服务器外壳金属底板渐变
-            const srvGrad = ctx.createLinearGradient(sx, sy, sx + sw, sy + srvH);
-            srvGrad.addColorStop(0, "#0a261f");
-            srvGrad.addColorStop(0.35, "#103a30");
-            srvGrad.addColorStop(0.7, "#0d2e26");
-            srvGrad.addColorStop(1, "#071c17");
-            ctx.fillStyle = srvGrad;
-            ctx.fillRect(sx, sy, sw, srvH);
-
-            // 服务器上下边缘微细装甲倒角线条
-            ctx.strokeStyle = "rgba(52, 211, 153, 0.4)";
-            ctx.lineWidth = 0.5;
-            ctx.strokeRect(sx, sy, sw, srvH);
-
-            // 左右双侧机架抽拉拉手 (Rack Handles)
-            ctx.fillStyle = "#031712";
-            ctx.fillRect(sx + 0.4, sy + 1.2, 1.4, srvH - 2.4);
-            ctx.fillRect(sx + sw - 1.8, sy + 1.2, 1.4, srvH - 2.4);
-            ctx.fillStyle = "#059669";
-            ctx.fillRect(sx + 0.6, sy + 2.0, 0.8, srvH - 4.0);
-            ctx.fillRect(sx + sw - 1.4, sy + 2.0, 0.8, srvH - 4.0);
-
-            // --- 左侧：热插拔 NVMe/SSD 硬盘仓 (Hot-Swap Drive Caddies with Status LEDs) ---
-            const driveW = 3.6;
-            const driveGap = 1.0;
-            const numDrives = 3;
-            const driveStartX = sx + 2.6;
-
-            for (let d = 0; d < numDrives; d++) {
-                const dx = driveStartX + d * (driveW + driveGap);
-                ctx.fillStyle = "#02120e";
-                ctx.fillRect(dx, sy + 1.2, driveW, srvH - 2.4);
-                ctx.strokeStyle = "#064e3b";
-                ctx.lineWidth = 0.4;
-                ctx.strokeRect(dx, sy + 1.2, driveW, srvH - 2.4);
-
-                // 硬盘插拔手柄扣
-                ctx.fillStyle = "#06382b";
-                ctx.fillRect(dx + 0.6, sy + srvH - 3.2, driveW - 1.2, 1.4);
-
-                // 硬盘读写指示灯 (多彩闪烁)
-                const dActive = (Math.sin(time * 23 + c * 13 + s * 7 + d * 5) + Math.cos(time * 41 + d * 11)) > 0.4;
-                let dColor = "#00FF66"; // 默认绿
-                if (c === 0) dColor = dActive ? "#00E5FF" : "#0284c7"; // 冰蓝
-                else if (c === 2) dColor = dActive ? "#fbbf24" : "#b45309"; // 琥珀
-                else if (c === 4) dColor = dActive ? "#f43f5e" : "#881337"; // 珊瑚红
-                else dColor = dActive ? "#10b981" : "#064e3b";
-
-                ctx.fillStyle = dColor;
-                ctx.fillRect(dx + 1.1, sy + 2.0, 1.4, 1.2);
-            }
-
-            // --- 中间：高精度六角形蜂窝状散热网格 (Honeycomb Cooling Mesh) ---
-            const meshX = driveStartX + numDrives * (driveW + driveGap) + 1.4;
-            const meshW = 16.5; // 16.5px 宽进风网格
-            const meshY = sy + 1.0;
-            const meshH = srvH - 2.0;
-
-            // 风道暗部与微弱科技气流内光
-            ctx.fillStyle = "rgba(4, 38, 29, 0.85)";
-            ctx.fillRect(meshX, meshY, meshW, meshH);
-
-            // 雕刻正六边形蜂窝微阵列 (True Hexagonal Lattice)
-            ctx.strokeStyle = "rgba(52, 211, 153, 0.65)";
-            ctx.lineWidth = 0.4;
-            for (let hx = meshX + 1.1; hx < meshX + meshW - 0.6; hx += 2.2) {
-                for (let hy = meshY + 1.0; hy < meshY + meshH - 0.4; hy += 1.8) {
-                    const stagger = (Math.round((hx - meshX) / 2.2) % 2 === 1) ? 0.9 : 0;
-                    const chy = hy + stagger;
-                    if (chy >= meshY + meshH - 0.3) continue;
-
-                    ctx.beginPath();
-                    for (let a = 0; a < 6; a++) {
-                        const ang = (Math.PI / 3) * a;
-                        const px = hx + 0.85 * Math.cos(ang);
-                        const py = chy + 0.85 * Math.sin(ang);
-                        if (a === 0) ctx.moveTo(px, py);
-                        else ctx.lineTo(px, py);
-                    }
-                    ctx.closePath();
-                    ctx.stroke();
-                }
-            }
-
-            // --- 右侧：多彩丰富绚丽的 LED 指示灯矩阵与微型 LCD 仪表窗 ---
-            const rightAreaX = meshX + meshW + 1.6;
-            const rightAreaW = (sx + sw - 2.4) - rightAreaX;
-
-            // 特殊 Master 节点绘制微型高科技 LCD 状态视窗 (Mini Telemetry LCD)
-            const hasLcd = (s === 1 && (c === 1 || c === 2 || c === 3));
-            if (hasLcd) {
-                ctx.fillStyle = "#02120e";
-                ctx.fillRect(rightAreaX, sy + 1.2, rightAreaW - 0.6, srvH - 2.4);
-                ctx.strokeStyle = cfg.primaryColor;
-                ctx.lineWidth = 0.5;
-                ctx.strokeRect(rightAreaX, sy + 1.2, rightAreaW - 0.6, srvH - 2.4);
-
-                // LCD 内部微型频谱波形
-                ctx.strokeStyle = cfg.accentColor;
-                ctx.lineWidth = 0.6;
-                ctx.beginPath();
-                for (let lx = 0; lx < rightAreaW - 2; lx += 1.5) {
-                    const ly = sy + srvH / 2 + Math.sin(time * 8 + lx * 0.8 + c) * 1.5;
-                    if (lx === 0) ctx.moveTo(rightAreaX + 1 + lx, ly);
-                    else ctx.lineTo(rightAreaX + 1 + lx, ly);
-                }
-                ctx.stroke();
-            } else {
-                // 标准服务器：绘制多行多列绚丽多色 LED 阵列与 VU 柱状灯
-                // 1) 3 阶垂直彩色状态阶梯柱 (Vertical VU Meter Bar)
-                const vuX = rightAreaX + 0.8;
-                const vuColors = ["#ef4444", "#fbbf24", "#00FF66"]; // 红黄绿三阶
-                for (let v = 0; v < 3; v++) {
-                    const vy = sy + 1.4 + v * 2.0;
-                    const vActive = Math.sin(time * 6 + c * 3 + s * 2 + (2 - v)) > -0.2;
-                    ctx.fillStyle = vActive ? vuColors[v] : "#041a13";
-                    ctx.fillRect(vuX, vy, 1.8, 1.4);
-                }
-
-                // 2) 绚丽多彩的 4 枚主控指示灯 (Multi-Colored Status LED Array)
-                const ledColorsPool = [
-                    // 根据机柜特色与服务器层级分配绚烂多彩的颜色组合
-                    [
-                        { on: "#c084fc", off: "#2e1065", glow: "rgba(192, 132, 252, 0.5)" }, // 紫色
-                        { on: "#00E5FF", off: "#083344", glow: "rgba(0, 229, 255, 0.5)" },   // 冰蓝
-                        { on: "#38bdf8", off: "#0c4a6e", glow: "rgba(56, 189, 248, 0.4)" },  // 天蓝
-                        { on: "#ffffff", off: "#1e293b", glow: "rgba(255, 255, 255, 0.5)" }   // 纯白
-                    ],
-                    [
-                        { on: "#00FF66", off: "#022c22", glow: "rgba(0, 255, 102, 0.5)" },   // 翡翠绿
-                        { on: "#a3e635", off: "#1a2e05", glow: "rgba(163, 230, 53, 0.5)" },   // 荧光黄绿
-                        { on: "#00E5FF", off: "#083344", glow: "rgba(0, 229, 255, 0.5)" },   // 冰蓝
-                        { on: "#fbbf24", off: "#451a03", glow: "rgba(251, 191, 36, 0.5)" }   // 琥珀金
-                    ],
-                    [
-                        { on: "#fbbf24", off: "#451a03", glow: "rgba(251, 191, 36, 0.5)" },   // 琥珀金
-                        { on: "#ef4444", off: "#450a0a", glow: "rgba(239, 68, 68, 0.5)" },   // 警戒红
-                        { on: "#00FF66", off: "#022c22", glow: "rgba(0, 255, 102, 0.5)" },   // 翡翠绿
-                        { on: "#3b82f6", off: "#172554", glow: "rgba(59, 130, 246, 0.5)" }   // 皇家蓝
-                    ],
-                    [
-                        { on: "#38bdf8", off: "#082f49", glow: "rgba(56, 189, 248, 0.5)" },  // 天蓝
-                        { on: "#3b82f6", off: "#172554", glow: "rgba(59, 130, 246, 0.5)" },  // 宝蓝
-                        { on: "#d946ef", off: "#4a044e", glow: "rgba(217, 70, 239, 0.5)" },  // 霓虹品红
-                        { on: "#00FF66", off: "#022c22", glow: "rgba(0, 255, 102, 0.5)" }   // 翡翠绿
-                    ],
-                    [
-                        { on: "#ef4444", off: "#450a0a", glow: "rgba(239, 68, 68, 0.5)" },   // 警戒红
-                        { on: "#f97316", off: "#431407", glow: "rgba(249, 115, 22, 0.5)" },  // 烈焰橙
-                        { on: "#fbbf24", off: "#451a03", glow: "rgba(251, 191, 36, 0.5)" },  // 琥珀金
-                        { on: "#ffffff", off: "#1e293b", glow: "rgba(255, 255, 255, 0.5)" }   // 闪光白
-                    ]
-                ][c];
-
-                const ledStartX = vuX + 3.4;
-                const ledSpacingX = 2.4;
-
-                for (let l = 0; l < 4; l++) {
-                    const lx = ledStartX + l * ledSpacingX;
-                    const ly = sy + srvH / 2;
-                    const lDef = ledColorsPool[l];
-
-                    // 真实硬件闪烁动态算法（包含高频读写爆闪、平稳呼吸与随机脉冲）
-                    let lit = false;
-                    if (l === 0) {
-                        // 电源健康：平稳微呼吸
-                        lit = (Math.sin(time * 3 + c + s) > -0.6);
-                    } else if (l === 1) {
-                        // 高速总线突发闪烁
-                        lit = (Math.sin(time * 19 + c * 11 + s * 17 + l * 7) + Math.cos(time * 37 + s * 23)) > 0.3;
-                    } else if (l === 2) {
-                        // 网络集群脉冲
-                        lit = (Math.sin(time * 9.5 + c * 5 + s * 13 + l * 3) > 0.0);
-                    } else {
-                        // 随机状态/异常跳动脉冲
-                        lit = (Math.sin(time * 14 + s * 19 + c * 7) > 0.4);
-                    }
-
-                    // 绘制发光光晕与明亮中心核
-                    if (lit) {
-                        ctx.fillStyle = lDef.glow;
-                        ctx.beginPath(); ctx.arc(lx, ly, 1.8, 0, Math.PI * 2); ctx.fill();
-                        ctx.fillStyle = lDef.on;
-                        ctx.beginPath(); ctx.arc(lx, ly, 0.9, 0, Math.PI * 2); ctx.fill();
-                        ctx.fillStyle = "#ffffff";
-                        ctx.beginPath(); ctx.arc(lx, ly, 0.4, 0, Math.PI * 2); ctx.fill();
-                    } else {
-                        ctx.fillStyle = lDef.off;
-                        ctx.beginPath(); ctx.arc(lx, ly, 0.7, 0, Math.PI * 2); ctx.fill();
-                    }
-                }
-            }
-        }
-
-        // 1D. 四角重型钛合金装甲加固角铁与六角沉头螺栓 (Heavy Corner Brackets & Hex Bolts)
-        const cornerSize = 4.2;
-        const cornerOffsets = [
-            [cabX + 2, -halfH + 2],
-            [cabX + cabW - 2 - cornerSize, -halfH + 2],
-            [cabX + 2, halfH - 2 - cornerSize],
-            [cabX + cabW - 2 - cornerSize, halfH - 2 - cornerSize]
-        ];
-        cornerOffsets.forEach(([bx, by]) => {
-            ctx.fillStyle = "#010e0b";
-            ctx.fillRect(bx, by, cornerSize, cornerSize);
-            ctx.strokeStyle = "#0d4a3c";
-            ctx.lineWidth = 0.6;
-            ctx.strokeRect(bx, by, cornerSize, cornerSize);
-
-            // 六角螺栓
-            ctx.fillStyle = "#10b981";
-            ctx.beginPath(); ctx.arc(bx + cornerSize / 2, by + cornerSize / 2, 0.9, 0, Math.PI * 2); ctx.fill();
-        });
-
-        // 机柜正面防静电钢化玻璃/金属孔网门边框锁扣与拉手 (Door Frame & Heavy Lock Handle)
-        ctx.fillStyle = "#04382c";
-        ctx.fillRect(cabX + cabW - 3.2, -halfH + 32, 2.0, 24);
-        ctx.fillStyle = "#a7f3d0";
-        ctx.fillRect(cabX + cabW - 2.6, -halfH + 38, 1.2, 10);
-
-        // 机柜之间模块化防爆重缝拼装线 (Inter-cabinet Heavy Seams)
-        if (c < numCabinets - 1) {
-            ctx.strokeStyle = "#010a08";
-            ctx.lineWidth = 2.0;
-            ctx.beginPath();
-            ctx.moveTo(cabX + cabW, -halfH);
-            ctx.lineTo(cabX + cabW, halfH);
-            ctx.stroke();
-
-            ctx.strokeStyle = "#064e3b";
-            ctx.lineWidth = 0.8;
-            ctx.beginPath();
-            ctx.moveTo(cabX + cabW, -halfH + 2);
-            ctx.lineTo(cabX + cabW, halfH - 2);
-            ctx.stroke();
-        }
-    }
-
-    // --- 2. 横贯 5 机柜后部的重型发光光纤主干桥架 (Top Multi-Color Optical Trunk Duct) ---
-    const racewayH = 5.0;
-    ctx.fillStyle = "#010b09";
-    ctx.fillRect(-halfW, -halfH - racewayH, totalW, racewayH);
-    ctx.strokeStyle = "#064e3b";
-    ctx.lineWidth = 1.0;
-    ctx.strokeRect(-halfW, -halfH - racewayH, totalW, racewayH);
-
-    // 内部四路多彩发光光纤光缆 (Emerald Green, Electric Cyan, Neon Purple, Safety Amber)
-    const fibers = [
-        { color: "#00FF66", yPct: 0.2 },
-        { color: "#00E5FF", yPct: 0.45 },
-        { color: "#c084fc", yPct: 0.7 },
-        { color: "#fbbf24", yPct: 0.9 }
-    ];
-    fibers.forEach(fib => {
-        ctx.strokeStyle = fib.color;
-        ctx.lineWidth = 0.8;
-        ctx.beginPath();
-        ctx.moveTo(-halfW + 4, -halfH - racewayH * fib.yPct);
-        ctx.lineTo(halfW - 4, -halfH - racewayH * fib.yPct);
-        ctx.stroke();
-    });
-
-    // 桥架外壳高光金属倒角反射线
-    ctx.strokeStyle = "rgba(52, 211, 153, 0.45)";
-    ctx.lineWidth = 1.0;
-    ctx.beginPath();
-    ctx.moveTo(-halfW, -halfH);
-    ctx.lineTo(halfW, -halfH);
-    ctx.stroke();
-
-    ctx.restore();
-}
 
 function getServerCluster(cx, cy, angle = 0, scale = 1.0, label = "TACTICAL 5-RACK SERVER CLUSTER") {
     // 整体尺寸放大 2.35 倍：宽 330px，高 96px (单柜宽 66px 远超角色宽度，气势磅礴)
@@ -645,7 +248,24 @@ function getServerCluster(cx, cy, angle = 0, scale = 1.0, label = "TACTICAL 5-RA
         displayName: "SERVER CLUSTER RACK ARRAY",
         hideLabel: true,
         draw: (ctx) => {
-            drawServerCluster(ctx, cx, cy, angle, scale);
+            // ===== 动静分离优化 (2026-11-05)：静态预渲染 + 动态叠加 =====
+            const cacheKey = '__serverCache_' + cx + '_' + cy + '_' + angle + '_' + scale;
+            if (!window[cacheKey]) {
+                const sz = Math.ceil(Math.hypot(boundW + 10, boundH + 14) + 20);
+                const off = document.createElement('canvas');
+                off.width = sz; off.height = sz;
+                const octx = off.getContext('2d');
+                octx.save();
+                octx.translate(sz / 2, sz / 2);
+                octx.translate(-cx, -cy);
+                drawServerCluster(octx, cx, cy, angle, scale, 1);
+                octx.restore();
+                window[cacheKey] = { canvas: off, size: sz };
+            }
+            const c = window[cacheKey];
+            ctx.drawImage(c.canvas, cx - c.size / 2, cy - c.size / 2);
+            // 动态元素每帧叠加
+            drawServerClusterDynamic(ctx, cx, cy, angle, scale);
         }
     };
 }
@@ -853,71 +473,38 @@ const LEVEL_LAB = {
                 hideLabel: true
             },
 
-            // F. 正中央圆台
+            // F. 正中央大圆会议桌系统 (移植自 Level 8，2026-11-05，替换原中央圆台)
             {
                 type: 'solid',
                 circle: { cx: cx, cy: cy, radius: 155 },
-                innerRing: { radius: 143, width: 8 },
-                label: 'CENTRAL ROUND TABLE',
-                hideLabel: true
+                label: 'CENTRAL CONFERENCE TABLE',
+                displayName: 'CONFERENCE TABLE',
+                hideLabel: true,
+                draw: (ctx) => {
+                    // ===== 动静分离优化 (2026-11-05)：静态预渲染 + 动态叠加 =====
+                    const cacheKey = '__confCache_' + cx + '_' + cy;
+                    if (!window[cacheKey]) {
+                        const sz = 500;
+                        const off = document.createElement('canvas');
+                        off.width = sz; off.height = sz;
+                        const octx = off.getContext('2d');
+                        octx.save();
+                        octx.translate(sz / 2, sz / 2);
+                        octx.translate(-cx, -cy);
+                        drawConferenceTableSystem(octx, cx, cy, 155, 1);
+                        octx.restore();
+                        window[cacheKey] = { canvas: off, size: sz };
+                    }
+                    const cc = window[cacheKey];
+                    ctx.drawImage(cc.canvas, cx - cc.size / 2, cy - cc.size / 2);
+                    // 动态元素每帧叠加
+                    drawConferenceTableSystemDynamic(ctx, cx, cy, 155);
+                }
             },
 
             // G. 中间房间左圆柱终端 (已替换为指挥讲台，2026-11-05)
             // (已删除 LEFT TERMINAL PILLAR，替换为讲台)
 
-            // H. 环绕在中央圆台四周的 4 个加长圆弧结构
-            {
-                type: 'solid',
-                arc: {
-                    cx: cx,
-                    cy: cy,
-                    radius: 180,
-                    startAngle: -1.487,
-                    endAngle: -0.084,
-                    thickness: 20
-                },
-                label: 'CURVED ARC NE',
-                hideLabel: true
-            },
-            {
-                type: 'solid',
-                arc: {
-                    cx: cx,
-                    cy: cy,
-                    radius: 180,
-                    startAngle: 0.084,
-                    endAngle: 1.487,
-                    thickness: 20
-                },
-                label: 'CURVED ARC SE',
-                hideLabel: true
-            },
-            {
-                type: 'solid',
-                arc: {
-                    cx: cx,
-                    cy: cy,
-                    radius: 180,
-                    startAngle: 1.655,
-                    endAngle: 3.058,
-                    thickness: 20
-                },
-                label: 'CURVED ARC SW',
-                hideLabel: true
-            },
-            {
-                type: 'solid',
-                arc: {
-                    cx: cx,
-                    cy: cy,
-                    radius: 180,
-                    startAngle: 3.226,
-                    endAngle: 4.628,
-                    thickness: 20
-                },
-                label: 'CURVED ARC NW',
-                hideLabel: true
-            },
 
             // I. 中间房间南侧长方形系统 (3 排 × 2 列 = 6 个长方形)
             // (圆形控制台已移至 props 数组)

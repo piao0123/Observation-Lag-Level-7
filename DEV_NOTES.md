@@ -407,3 +407,103 @@
 
 
 
+## 📌 记录 010：Level 7/8 新道具必须做动静分离（Static/Dynamic Split）
+
+### 1. 背景：为什么 L7/L8 和其他关卡不一样
+
+- **老关卡（L0–L6）**：道具是**纯数据**（x/y/w/h/label），绘制代码全在 `engine.js` 的 `drawProps()` 里（10,688 行巨型函数）。单个道具几乎零绘制成本。
+- **L7/L8 新道具**：每个控制台自带 **500–700 行自定义 `draw` 函数**（圆形舱 738 行、三联 620 行、扇形 517 行、讲台 405 行、服务器集群 399 行），每帧 60 次全部重画。
+- **后果**：L7 每帧 Canvas 调用从 ~3,800 暴涨到 ~16,500（3 个服务器集群加入后），MacBook Air（Intel HD 6000）帧率直接崩掉。
+
+### 2. 核心原则：新道具必须自带动静分离
+
+**任何带动画的新控制台/道具，创建时就必须拆成两个函数**，不要等到卡了再补：
+
+| 函数 | 职责 | 每帧调用 |
+|------|------|---------|
+| `drawXxxWorkstation(ctx, ...)` | 只画**静态**部分（外壳、屏幕边框、按钮、座椅、标签） | 首次 1 次，之后从缓存读 |
+| `drawXxxWorkstationDynamic(ctx, ...)` | 只画**动态**部分（雷达扫描、频谱柱、LED 闪烁、波形、指针） | 每帧 1 次 |
+
+### 3. 标准实现模板（照抄，改名字就行）
+
+```javascript
+// ============ 1. 静态函数：加 freezeTime 参数 + 缓存 ============
+function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0, label = '', freezeTime = null) {
+    // freezeTime !== null 时：用固定时间画静态帧（供缓存用），不依赖 Date.now()
+    const time = freezeTime !== null ? freezeTime : Date.now() * 0.001;
+    // ... 只画静态部分：外壳、屏幕、按钮、座椅 ...
+    // 动态元素（雷达/频谱/LED）一律不要画在这里，移到 Dynamic 函数
+}
+
+// ============ 2. 动态函数：只画会动的东西 ============
+function drawCircularPodWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0, label = '') {
+    const time = Date.now() * 0.001;
+    // 只画动态元素，例如：
+    // - 雷达扫描线：angle = (time * 2.5) % (Math.PI * 2)
+    // - LED 闪烁：alpha = 0.5 + 0.5 * Math.sin(time * 3)
+    // - 频谱柱：height = base + Math.sin(time * 3.2 + i) * amp
+    // - 波形：y = Math.sin(x * 0.1 + time * 2) * 5
+}
+
+// ============ 3. get 函数：建缓存 + 挂 draw ============
+function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = '') {
+    // ... 生成 points 碰撞多边形等 ...
+    const prop = {
+        type: 'circular_pod',
+        x: cx, y: cy, angle, scale,
+        // ... 其他字段 ...
+        draw: function(ctx) {
+            // 首次：用 freezeTime=0 画静态帧到离屏 canvas，存进缓存
+            if (!this.__podCache_) {
+                const c = document.createElement('canvas');
+                c.width = 200; c.height = 200; // 按道具尺寸定
+                const cctx = c.getContext('2d');
+                cctx.translate(100, 100); // 移到中心
+                drawCircularPodWorkstation(cctx, 0, 0, 0, 1.0, '', 0);
+                this.__podCache_ = c;
+            }
+            // 每帧：贴缓存图 + 只画动态层
+            ctx.save();
+            ctx.translate(cx, cy);
+            if (angle) ctx.rotate(angle);
+            if (scale !== 1.0) ctx.scale(scale, scale);
+            ctx.drawImage(this.__podCache_, -100, -100);
+            drawCircularPodWorkstationDynamic(ctx, 0, 0, 0, 1.0, '');
+            ctx.restore();
+        }
+    };
+    return prop;
+}
+```
+
+### 4. 判断什么是动态、什么是静态
+
+| 动态（进 Dynamic 函数） | 静态（进主函数 + 缓存） |
+|---|---|
+| 用 `Date.now()` / `time` 驱动的任何东西 | 外壳、边框、底座 |
+| 雷达扫描线、旋转指针 | 屏幕边框、屏幕底色 |
+| LED 闪烁、呼吸灯 | 按钮、键盘、座椅 |
+| 频谱柱、波形图、示波器 | 标签文字、刻度、装饰线 |
+| 任何 `Math.sin(time * ...)` / `Math.cos(time * ...)` | 任何不随时间变化的图形 |
+
+**一句话检验**：把 `time` 固定成 0，画面还变不变？变就是动态，不变就是静态。
+
+### 5. 已完成的动静分离（参考实现）
+
+| 道具 | 静态函数 | 动态函数 | 缓存字段 | 效果 |
+|------|---------|---------|---------|------|
+| 扇形控制台 | drawSectorWorkstation | drawSectorWorkstationDynamic | `__wsCache_` | -85% |
+| 圆形舱 | drawCircularPodWorkstation | drawCircularPodWorkstationDynamic | `__podCache_` | -85% |
+| 三联控制台 | drawTripleCubicleWorkstation | drawTripleCubicleWorkstationDynamic | `__tripleCache_` | -90% |
+| 讲台 | drawPodium | （无动态元素，不需要） | — | — |
+
+### 6. 待做（不要忘）
+
+- **服务器集群** `drawServerCluster`（399 行）：LED 闪烁、光纤脉冲、示波器是动态的，蜂窝散热、机柜外壳、标签是静态的。**必须补动静分离**，否则 L7 每帧多 ~10,000 次调用。
+- **蓝图**（746 行匿名 draw）：324 条扫描线 + 3 个径向渐变每帧新建，**必须预渲染**成离屏 canvas。
+
+### 7. 违反后果
+
+- 不做动静分离的新道具，每放一个，L7 每帧增加 **2,000–5,000 次** Canvas 调用。
+- 3 个服务器集群 = +12,000 次/帧，MacBook Air 从 30fps 跌到 10fps 以下。
+- **创建新道具时就必须同时写好 Dynamic 函数和缓存逻辑，不要事后补。**
