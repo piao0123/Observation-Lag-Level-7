@@ -613,13 +613,13 @@ function drawSectorWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
 // =====================================================================
 // 圆形全包围控制台 (从 Level 8 移植，2026-11-04)
 // =====================================================================
-function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
+function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0, freezeTime = 0) {
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(angle);
     if (scale !== 1.0) ctx.scale(scale, scale);
 
-    const time = Date.now() * 0.001;
+    const time = freezeTime ? 0 : Date.now() * 0.001;
 
     // --- 几何常量 (标准正圆外壳与平直后隔板位置) ---
     const R_out = 62; // 外壳正圆半径
@@ -1346,6 +1346,123 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.restore(); // end drawCircularPodWorkstation
 }
 
+// ===== 动静分离优化 (2026-11-05)：圆形舱动态元素每帧重画 =====
+function drawCircularPodWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
+    const time = Date.now() * 0.001;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    // 屏幕定义（与主函数一致，用于定位动态元素）
+    const screens = [
+        { name: "LEFT_MONITOR", startDeg: -65, endDeg: -23, midDeg: -44, hudType: "reactor" },
+        { name: "CENTER_MONITOR", startDeg: -20, endDeg: 20, midDeg: 0, hudType: "radar" },
+        { name: "RIGHT_MONITOR", startDeg: 23, endDeg: 65, midDeg: 44, hudType: "defense" }
+    ];
+
+    // --- 动态 1-5：三块屏幕的 HUD 动画 ---
+    screens.forEach(scr => {
+        const midRad = scr.midDeg * Math.PI / 180;
+        const R_scr_out = 57, R_scr_in = 42;
+        const midR = (R_scr_out + R_scr_in) / 2;
+        const smx = Math.sin(midRad) * midR;
+        const smy = -Math.cos(midRad) * midR;
+
+        ctx.save();
+        ctx.translate(smx, smy);
+        ctx.rotate(midRad);
+
+        if (scr.hudType === "radar") {
+            // 动态1：雷达旋转扫描波束
+            const sweepA = (time * 2.5) % (Math.PI * 2);
+            ctx.strokeStyle = "#00CCFF";
+            ctx.lineWidth = 1.0;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(Math.cos(sweepA) * 4.6, Math.sin(sweepA) * 4.6);
+            ctx.stroke();
+
+            // 动态2：敌我识别目标光点闪烁
+            if (Math.sin(time * 3) > 0) {
+                ctx.fillStyle = "#ef4444";
+                ctx.fillRect(-2.8, -2.2, 1.2, 1.2);
+            }
+        } else if (scr.hudType === "reactor") {
+            // 动态3：实时正弦能量波形
+            ctx.strokeStyle = "#00E5FF";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            for (let px = -12; px <= 12; px += 1.2) {
+                const py = Math.sin(time * 4.8 + px * 0.45) * 2.0;
+                if (px === -12) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // 动态4：4阶梯动力输出指示条
+            const powerBars = [1, 1, 1, Math.sin(time * 2) > 0 ? 1 : 0];
+            const pColors = ["#00E5FF", "#00CCFF", "#38bdf8", "#f59e0b"];
+            for (let b = 0; b < 4; b++) {
+                ctx.fillStyle = powerBars[b] ? pColors[b] : "#0b355c";
+                ctx.fillRect(-9 + b * 4.6, 3.4, 3.6, 1.4);
+            }
+        } else if (scr.hudType === "defense") {
+            // 动态5：6段跳动脉冲均衡柱
+            const freqVals = [0.85, 0.45, 0.95, 0.65, 0.8, 0.55];
+            for (let f = 0; f < 6; f++) {
+                const fh = 1.4 + Math.abs(Math.sin(time * 3.8 + f * 1.2)) * 3.4 * freqVals[f];
+                ctx.fillStyle = "#0284c7";
+                ctx.fillRect(-10 + f * 3.4, 2.8 - fh, 2.4, fh);
+            }
+        }
+
+        ctx.restore();
+    });
+
+    // --- 动态6：翘板开关状态微灯 ---
+    const leftRockersAngles = [-81, -96, -111, -125];
+    leftRockersAngles.forEach((deg, idx) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -47);
+        ctx.scale(1.2, 1.2);
+        // 状态微灯（只画动态部分，静态底座在缓存里）
+        ctx.fillStyle = (Math.sin(time * 4 + idx) > 0) ? "#00CCFF" : "#0b355c";
+        ctx.beginPath(); ctx.arc(0, -1.0, 0.6, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    // --- 动态7：旋钮指针 ---
+    [115, 127].forEach((deg, idx) => {
+        ctx.save();
+        ctx.rotate(deg * Math.PI / 180);
+        ctx.translate(0, -52);
+        ctx.scale(1.2, 1.2);
+        // 旋钮指针（只画动态部分）
+        const pRad = (time * 1.8 + idx * 2.2) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 0.9;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(pRad) * 2.4, Math.sin(pRad) * 2.4); ctx.stroke();
+        ctx.restore();
+    });
+
+    // --- 动态8：隔断立柱红外感应光圈 ---
+    const y_part = 38;
+    const door_hw = 16;
+    const x_part = 49;
+    const stanchions = [-x_part, -door_hw, door_hw, x_part];
+    stanchions.forEach((sx, idx) => {
+        if (idx === 1 || idx === 2) {
+            ctx.fillStyle = (Math.sin(time * 3.5) > 0) ? "#38bdf8" : "#0284c7";
+            ctx.beginPath(); ctx.arc(sx, y_part, 1.0, 0, Math.PI * 2); ctx.fill();
+        }
+    });
+
+    ctx.restore();
+}
+
 function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = "CIRCULAR POD CONSOLE") {
     const boundR = 65 * scale; // 剔除框半径（比视觉略大，用于视锥剔除）
     const collR = 62 * scale; // 碰撞半径 = 视觉外壳 R_out，16边形逼近
@@ -1371,7 +1488,25 @@ function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = "CIRC
         noCollision: false,
         hideLabel: true,
         draw: (ctx) => {
-            drawCircularPodWorkstation(ctx, cx, cy, angle, scale);
+            // ===== 动静分离优化 (2026-11-05)：静态预渲染 + 动态叠加 =====
+            const cacheKey = '__podCache_' + cx + '_' + cy + '_' + angle + '_' + scale;
+            if (!window[cacheKey]) {
+                const sz = Math.ceil(boundR * 2 + 20);
+                const off = document.createElement('canvas');
+                off.width = sz; off.height = sz;
+                const octx = off.getContext('2d');
+                octx.save();
+                octx.translate(sz / 2, sz / 2);
+                // 静态绘制（时间冻结在0），反向补偿让 (cx,cy) 落在 offscreen 中心
+                octx.translate(-cx, -cy);
+                drawCircularPodWorkstation(octx, cx, cy, angle, scale, 1);
+                octx.restore();
+                window[cacheKey] = { canvas: off, size: sz };
+            }
+            const c = window[cacheKey];
+            ctx.drawImage(c.canvas, cx - c.size / 2, cy - c.size / 2);
+            // 动态元素每帧叠加
+            drawCircularPodWorkstationDynamic(ctx, cx, cy, angle, scale);
         }
     };
 }
@@ -1382,13 +1517,13 @@ function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = "CIRC
 // =========================================================
 // 三联方形隔间战术控制台 (从 Level 8 移植，2026-11-05)
 // =========================================================
-function drawTripleCubicleWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
+function drawTripleCubicleWorkstation(ctx, cx, cy, angle = 0, scale = 1.0, freezeTime = 0) {
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(angle);
     if (scale !== 1.0) ctx.scale(scale, scale);
 
-    const time = Date.now() * 0.001;
+    const time = freezeTime ? 0 : Date.now() * 0.001;
 
     // --- 几何与尺寸常量 (精确 2.2016 倍原正圆控制台，严格控制在 2.2 倍左右) ---
     // 原正圆外壳直径 124px，2.2016 倍 = 273px (轴间距 91px)
@@ -2002,7 +2137,150 @@ function drawTripleCubicleWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.restore(); // end drawTripleCubicleWorkstation
 }
 
-// 生成三联方形隔间战术控制台道具对象 (完全依据手绘草稿 IMG_7697 规范制作)
+// ===== 动静分离优化 (2026-11-05)：三联控制台动态元素每帧重画 =====
+function drawTripleCubicleWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
+    const time = Date.now() * 0.001;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const bayPitch = 91;
+    const bayOffsets = [-bayPitch, 0, bayPitch];
+    const scrW = 27.5, scrH = 16.5, scrY = -44.0;
+    const scrConfigs = [{ id: "L", sx: -28.0 }, { id: "C", sx: 0 }, { id: "R", sx: 28.0 }];
+
+    // --- 屏幕 HUD 动态 (3隔间 x 3屏) ---
+    bayOffsets.forEach((bx, bIdx) => {
+        ctx.save();
+        ctx.translate(bx, 0);
+
+        scrConfigs.forEach((scr, sIdx) => {
+            const scx = scr.sx;
+
+            // 战术 HUD
+            if (bIdx === 0) {
+                // 左隔间
+                if (sIdx === 0) {
+                    // 动态1：频谱条
+                    for (let b = 0; b < 6; b++) {
+                        const bxBar = scx - 10 + b * 3.4;
+                        const hVal = 2.0 + Math.abs(Math.sin(time * 3.2 + b * 1.1)) * 7.5;
+                        ctx.fillStyle = (b === 4) ? "#f59e0b" : "#10b981";
+                        ctx.fillRect(bxBar, scrY + scrH - 2 - hVal, 2.2, hVal);
+                    }
+                } else if (sIdx === 1) {
+                    // 动态2：雷达扫描
+                    const sw = (time * 2.8) % (Math.PI * 2);
+                    ctx.strokeStyle = "#34d399";
+                    ctx.lineWidth = 1.0;
+                    ctx.beginPath();
+                    ctx.moveTo(scx, scrY + scrH / 2);
+                    ctx.lineTo(scx + Math.cos(sw) * 4.8, scrY + scrH / 2 + Math.sin(sw) * 4.8);
+                    ctx.stroke();
+                } else if (sIdx === 2) {
+                    // 动态3a：上行波形
+                    ctx.strokeStyle = "#10b981";
+                    ctx.lineWidth = 0.8;
+                    ctx.beginPath();
+                    for (let wx = -10; wx <= 10; wx += 1.5) {
+                        const wy = Math.sin(time * 4.0 + wx * 0.4) * 2.2;
+                        if (wx === -10) ctx.moveTo(scx + wx, scrY + scrH / 2 + 1 + wy);
+                        else ctx.lineTo(scx + wx, scrY + scrH / 2 + 1 + wy);
+                    }
+                    ctx.stroke();
+                }
+            } else if (bIdx === 1) {
+                // 中隔间
+                if (sIdx === 0) {
+                    // 动态3b：反应堆波形
+                    ctx.strokeStyle = "#38bdf8";
+                    ctx.lineWidth = 0.9;
+                    ctx.beginPath();
+                    for (let rx = -10; rx <= 10; rx += 1.5) {
+                        const ry = Math.cos(time * 5.0 + rx * 0.5) * 2.5;
+                        if (rx === -10) ctx.moveTo(scx + rx, scrY + scrH / 2 + 1 + ry);
+                        else ctx.lineTo(scx + rx, scrY + scrH / 2 + 1 + ry);
+                    }
+                    ctx.stroke();
+                } else if (sIdx === 1) {
+                    // 动态4：目标锁定闪烁
+                    if (Math.sin(time * 4) > 0) {
+                        ctx.fillStyle = "#ef4444";
+                        ctx.fillRect(scx - 1.2, scrY + scrH / 2 - 1.2, 2.4, 2.4);
+                    }
+                } else if (sIdx === 2) {
+                    // 动态5：护盾指示条
+                    const sBars = [1, 1, 1, 1, Math.sin(time * 2.5) > 0 ? 1 : 0];
+                    for (let sb = 0; sb < 5; sb++) {
+                        ctx.fillStyle = sBars[sb] ? "#00E5FF" : "#0c4a6e";
+                        ctx.fillRect(scx - 9 + sb * 3.8, scrY + scrH / 2, 3.0, 3.5);
+                    }
+                }
+            } else if (bIdx === 2) {
+                // 右隔间
+                if (sIdx === 0) {
+                    // 动态6：防火墙矩阵闪烁
+                    for (let cxp = -8; cxp <= 8; cxp += 4) {
+                        for (let cyp = scrY + 5; cyp <= scrY + scrH - 3; cyp += 2.5) {
+                            ctx.fillStyle = (Math.sin(time * 4 + cxp + cyp) > 0) ? "#34d399" : "#064e3b";
+                            ctx.fillRect(scx + cxp, cyp, 1.8, 1.2);
+                        }
+                    }
+                } else if (sIdx === 1) {
+                    // 动态7：电网仪表指针
+                    const pA = Math.PI * 0.8 + Math.abs(Math.sin(time * 2.2)) * Math.PI * 1.4;
+                    ctx.strokeStyle = "#f59e0b";
+                    ctx.lineWidth = 1.0;
+                    ctx.beginPath();
+                    ctx.moveTo(scx, scrY + scrH / 2 + 1.5);
+                    ctx.lineTo(scx + Math.cos(pA) * 3.2, scrY + scrH / 2 + 1.5 + Math.sin(pA) * 3.2);
+                    ctx.stroke();
+                }
+                // sIdx===2 右隔间右屏：静态，无动态
+            }
+        });
+
+        // --- 按钮指示灯 (动态8) ---
+        const lpX = -27.0, lpY = -13.0;
+        for (let i = 0; i < 3; i++) {
+            const rxBtn = lpX - 6.5 + i * 5.0;
+            const ryBtn = lpY - 1.0;
+            ctx.fillStyle = (Math.sin(time * 4.0 + i + bIdx) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath(); ctx.arc(rxBtn + 1.8, ryBtn + 1.2, 0.6, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // --- 仪表指针 (动态9) ---
+        const rpX = 27.0, rpY = -13.0;
+        const dialX = rpX + 5.0, dialY = rpY - 3.0;
+        const dialA = (time * 1.5 + bIdx) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(dialX, dialY);
+        ctx.lineTo(dialX + Math.cos(dialA) * 2.4, dialY + Math.sin(dialA) * 2.4);
+        ctx.stroke();
+
+        ctx.restore();
+    });
+
+    // --- 隔断立柱传感器 (动态10) ---
+    const partitionX = [-136.5, -45.5, 45.5, 136.5];
+    const partYTop = -49, partYBottom = 48;
+    partitionX.forEach((px, idx) => {
+        const isOuter = (idx === 0 || idx === 3);
+        [partYTop, partYBottom].forEach(py => {
+            ctx.fillStyle = (Math.sin(time * 3.0 + idx) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath();
+            ctx.arc(px, py, isOuter ? 1.5 : 1.1, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    });
+
+    ctx.restore();
+}
+
 function getTripleCubicleWorkstation(cx, cy, angle = 0, scale = 1.0, label = "TRIPLE CUBICLE WORKSTATION") {
     const boundW = 280 * scale;
     const boundH = 106 * scale;
@@ -2021,11 +2299,462 @@ function getTripleCubicleWorkstation(cx, cy, angle = 0, scale = 1.0, label = "TR
         noCollision: false,
         hideLabel: true,
         draw: (ctx) => {
-            drawTripleCubicleWorkstation(ctx, cx, cy, angle, scale);
+            // ===== 动静分离优化 (2026-11-05)：静态预渲染 + 动态叠加 =====
+            const cacheKey = '__tripleCache_' + cx + '_' + cy + '_' + angle + '_' + scale;
+            if (!window[cacheKey]) {
+                const cw = Math.ceil(boundW + 20), ch = Math.ceil(boundH + 20);
+                const off = document.createElement('canvas');
+                off.width = cw; off.height = ch;
+                const octx = off.getContext('2d');
+                octx.save();
+                octx.translate(cw / 2, ch / 2);
+                octx.translate(-cx, -cy);
+                drawTripleCubicleWorkstation(octx, cx, cy, angle, scale, 1);
+                octx.restore();
+                window[cacheKey] = { canvas: off, w: cw, h: ch };
+            }
+            const c = window[cacheKey];
+            ctx.drawImage(c.canvas, cx - c.w / 2, cy - c.h / 2);
+            drawTripleCubicleWorkstationDynamic(ctx, cx, cy, angle, scale);
         }
     };
 }
 
+
+
+
+// =========================================================
+// 指挥讲台 (从 Level 8 移植，2026-11-05)
+// =========================================================
+// =========================================================================
+function drawPodium(ctx, cx, cy, angle = 0, scale = 1.0) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const time = Date.now() * 0.001;
+
+    // --- 几何与尺寸常量 ---
+    // 角色碰撞半径为 18 (直径 36px)
+    // 讲台内侧净宽设定为 40px (x: -20 到 +20)，左右留有 2px 舒适裕量，比角色略大刚好能站上去
+    const deskHalfW = 28;     // 桌面总半宽 28px (总宽 56px)
+    const wingThick = 8;      // 两侧护翼厚度 8px (inner x: -20 与 20)
+    const deskYTop = -24;     // 主体长方形桌面顶端 (北沿)
+    const deskYBot = -6;      // 主体长方形桌面底端 (深度 18px)
+    const wingYBot = 18;      // 两侧护翼底端 (从桌面延伸至南侧 y=18，总长 42px)
+    const baseRadius = 20;    // 黑色半圆形底座半径 20px (刚好铺满两侧护翼内侧间距 40px)
+    const baseYCenter = 2;    // 半圆形底座圆心 y 坐标 (底部外弧延伸至 2 + 20 = 22px)
+
+    // --- 1. 底层环境遮蔽微阴影 (Soft Ambient Occlusion Drop Shadow) ---
+    ctx.save();
+    ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+    ctx.beginPath();
+    ctx.moveTo(-deskHalfW + 2, deskYTop + 3);
+    ctx.lineTo(deskHalfW + 2, deskYTop + 3);
+    ctx.lineTo(deskHalfW + 2, wingYBot + 3);
+    ctx.lineTo(deskHalfW - wingThick + 2, wingYBot + 3);
+    ctx.arc(2, baseYCenter + 3, baseRadius, 0, Math.PI, false);
+    ctx.lineTo(-deskHalfW + 2, wingYBot + 3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // --- 2. 黑色半圆形底座支撑 ("下有黑色半圆形底座支撑") ---
+    // 承托内侧站立平台，与主体及护翼下方自然咬合
+    ctx.save();
+    ctx.beginPath();
+    // 矩形连接部 (深入桌底与护翼底面)
+    ctx.moveTo(-baseRadius, deskYBot - 4);
+    ctx.lineTo(baseRadius, deskYBot - 4);
+    ctx.lineTo(baseRadius, baseYCenter);
+    // 南向突出的标准半圆弧 (从 0 到 Math.PI，弧线向下鼓出)
+    ctx.arc(0, baseYCenter, baseRadius, 0, Math.PI, false);
+    ctx.lineTo(-baseRadius, deskYBot - 4);
+    ctx.closePath();
+
+    // 2A. 底座黑色主质感填充 (深邃沉稳哑光黑)
+    const gradBase = ctx.createRadialGradient(0, baseYCenter, 3, 0, baseYCenter, baseRadius);
+    gradBase.addColorStop(0, "#161c1a");
+    gradBase.addColorStop(0.65, "#0a0f0d");
+    gradBase.addColorStop(1, "#030605");
+    ctx.fillStyle = gradBase;
+    ctx.fill();
+
+    // 2B. 底座防滑橡胶纹理与同心踏板导轨
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.16)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius - 4, 0, Math.PI, false);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius - 9, 0, Math.PI, false);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius - 14, 0, Math.PI, false);
+    ctx.stroke();
+
+    // 防滑径向放射微嵌槽
+    for (let deg = 20; deg <= 160; deg += 20) {
+        const rad = deg * Math.PI / 180;
+        const x1 = Math.cos(rad) * (baseRadius - 15);
+        const y1 = baseYCenter + Math.sin(rad) * (baseRadius - 15);
+        const x2 = Math.cos(rad) * (baseRadius - 3);
+        const y2 = baseYCenter + Math.sin(rad) * (baseRadius - 3);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = "rgba(52, 211, 153, 0.12)";
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+    }
+
+    // 2C. 底座边缘重型合金包边与紧固铆钉
+    ctx.strokeStyle = "#042018";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius, 0, Math.PI, false);
+    ctx.stroke();
+
+    // 紧固铆钉 (均匀分布在半圆弧外沿)
+    [25, 55, 90, 125, 155].forEach(deg => {
+        const rad = deg * Math.PI / 180;
+        const rx = Math.cos(rad) * (baseRadius - 2.2);
+        const ry = baseYCenter + Math.sin(rad) * (baseRadius - 2.2);
+        ctx.fillStyle = "#02120e";
+        ctx.beginPath(); ctx.arc(rx, ry, 1.2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#10b981";
+        ctx.beginPath(); ctx.arc(rx, ry, 0.6, 0, Math.PI * 2); ctx.fill();
+    });
+
+    // 2D. 底座半圆外轮廓与 Level 8 外墙相同的蓝绿色线勾勒
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius, 0, Math.PI, false);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // --- 3. 讲台主体长方形与后方两侧护翼 ("主体和护翼部分为深色木质质感") ---
+    // 构造一体化封闭 U 型木质台体路径：
+    // 北侧：长方形主体桌面顶沿 (-deskHalfW, deskYTop) -> (deskHalfW, deskYTop)
+    // 东侧：右护翼外沿 (deskHalfW, deskYTop) -> (deskHalfW, wingYBot)
+    // 南侧：右护翼底沿 (deskHalfW, wingYBot) -> (deskHalfW - wingThick, wingYBot)
+    // 内侧：右护翼内沿 (deskHalfW - wingThick, wingYBot) -> (deskHalfW - wingThick, deskYBot)
+    // 内北：桌面后沿 (deskHalfW - wingThick, deskYBot) -> (-deskHalfW + wingThick, deskYBot)
+    // 内侧：左护翼内沿 (-deskHalfW + wingThick, deskYBot) -> (-deskHalfW + wingThick, wingYBot)
+    // 南侧：左护翼底沿 (-deskHalfW + wingThick, wingYBot) -> (-deskHalfW, wingYBot)
+    // 西侧：左护翼外沿 (-deskHalfW, wingYBot) -> (-deskHalfW, deskYTop)
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(-deskHalfW, deskYTop);
+    ctx.lineTo(deskHalfW, deskYTop);
+    ctx.lineTo(deskHalfW, wingYBot);
+    ctx.lineTo(deskHalfW - wingThick, wingYBot);
+    ctx.lineTo(deskHalfW - wingThick, deskYBot);
+    ctx.lineTo(-deskHalfW + wingThick, deskYBot);
+    ctx.lineTo(-deskHalfW + wingThick, wingYBot);
+    ctx.lineTo(-deskHalfW, wingYBot);
+    ctx.closePath();
+
+    // 3A. 深色红木/黑胡桃木底色线性渐变 (Dark Mahogany/Walnut Wood Base Gradient)
+    const woodGrad = ctx.createLinearGradient(0, deskYTop, 0, wingYBot);
+    woodGrad.addColorStop(0, "#481b11");   // 顶面光线受光部（深红胡桃木）
+    woodGrad.addColorStop(0.35, "#32120a"); // 核心木质色
+    woodGrad.addColorStop(0.75, "#200a05"); // 背光暗调
+    woodGrad.addColorStop(1, "#110402");   // 深色阴影收边
+    ctx.fillStyle = woodGrad;
+    ctx.fill();
+
+    // 3B. 限制在木质区域内精细绘制真实木纹 (Procedural Wood Grain Texture)
+    ctx.save();
+    ctx.clip();
+
+    // 1) 桌面横向自然木纹 (Longitudinal Wavy Wood Grain Across Desk)
+    const woodGrainsY = [-21, -17, -13, -9];
+    woodGrainsY.forEach((wy, idx) => {
+        ctx.beginPath();
+        ctx.moveTo(-deskHalfW, wy + (idx % 2 === 0 ? 0.8 : -0.6));
+        ctx.bezierCurveTo(
+            -10, wy + (idx % 2 === 0 ? -1.2 : 1.4),
+            8, wy + (idx % 2 === 0 ? 1.5 : -1.0),
+            deskHalfW, wy + (idx % 2 === 0 ? -0.5 : 0.8)
+        );
+        ctx.strokeStyle = idx % 2 === 0 ? "rgba(92, 34, 18, 0.45)" : "rgba(18, 5, 2, 0.55)";
+        ctx.lineWidth = 1.0;
+        ctx.stroke();
+
+        // 次级细密微纤维木纹
+        ctx.beginPath();
+        ctx.moveTo(-deskHalfW, wy + 1.6);
+        ctx.bezierCurveTo(
+            -8, wy + 0.8,
+            12, wy + 2.2,
+            deskHalfW, wy + 1.2
+        );
+        ctx.strokeStyle = "rgba(124, 45, 22, 0.25)";
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+    });
+
+    // 2) 两侧护翼竖向纵向延伸木纹 (Vertical Wood Grains Along Left and Right Wings)
+    [-25, -23, -21].forEach(wx => {
+        ctx.beginPath();
+        ctx.moveTo(wx, deskYTop);
+        ctx.bezierCurveTo(wx + 0.6, 0, wx - 0.4, 8, wx, wingYBot);
+        ctx.strokeStyle = "rgba(92, 34, 18, 0.4)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+    });
+    [21, 23, 25].forEach(wx => {
+        ctx.beginPath();
+        ctx.moveTo(wx, deskYTop);
+        ctx.bezierCurveTo(wx - 0.6, 0, wx + 0.5, 8, wx, wingYBot);
+        ctx.strokeStyle = "rgba(92, 34, 18, 0.4)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+    });
+
+    // 3) 木质漆面高光斜向反光 (Polished Lacquer Satin Sheen)
+    ctx.fillStyle = "rgba(255, 255, 255, 0.07)";
+    ctx.beginPath();
+    ctx.moveTo(-deskHalfW, deskYTop);
+    ctx.lineTo(-deskHalfW + 24, deskYTop);
+    ctx.lineTo(-deskHalfW + 10, deskYBot);
+    ctx.lineTo(-deskHalfW, deskYBot);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore(); // end clip for wood grain
+
+    // 3C. 桌面内凹式防滑置物沉槽 (Recessed Inner Desktop Slant Trim)
+    ctx.fillStyle = "#1b0804";
+    ctx.fillRect(-deskHalfW + wingThick + 2, deskYTop + 2.5, (deskHalfW - wingThick) * 2 - 4, deskYBot - deskYTop - 5);
+    ctx.strokeStyle = "#38150c";
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(-deskHalfW + wingThick + 2, deskYTop + 2.5, (deskHalfW - wingThick) * 2 - 4, deskYBot - deskYTop - 5);
+
+    // 3D. 护翼内侧包边金属卡件与加固嵌角
+    [[-deskHalfW + wingThick, wingYBot], [deskHalfW - wingThick, wingYBot]].forEach(([cxPos, cyPos], idx) => {
+        ctx.fillStyle = "#064e3b";
+        ctx.fillRect(idx === 0 ? cxPos - 6 : cxPos, cyPos - 4, 6, 4);
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(idx === 0 ? cxPos - 6 : cxPos, cyPos - 4, 6, 4);
+    });
+
+    // --- 4. 讲台整体轮廓与 Level 8 外墙相同的蓝绿色线勾勒 ("有和level 8外墙相同的蓝绿色线勾勒") ---
+    // 外轮廓主线 (与 Level 8 外墙 #10b981 完全相同，线条宽度 1.8)
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    // 内沿翡翠科技发光副线 (与 Level 8 外墙 rgba(52, 211, 153, 0.35) 完美契合)
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.4)";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    ctx.restore();
+
+    // --- 5. 朝后的麦克风 ("摆放有朝后的麦克风") ---
+    // 位于长方形桌面左侧，固定底座紧贴桌面，悬臂弯曲伸向后方站立者
+    ctx.save();
+    const micBaseX = -13;
+    const micBaseY = -16;
+    const micTipX = -9;
+    const micTipY = -4; // 向后（南向）伸向讲台站位中心
+
+    // 5A. 麦克风重型金属减震底座 (Circular Shockmount Flange)
+    ctx.fillStyle = "#0c151e";
+    ctx.beginPath();
+    ctx.arc(micBaseX, micBaseY, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#64748b";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+    // 钛合金紧固螺丝
+    ctx.fillStyle = "#cbd5e1";
+    ctx.beginPath(); ctx.arc(micBaseX, micBaseY, 0.8, 0, Math.PI * 2); ctx.fill();
+    // 麦克风底座绿色通电指示微灯
+    ctx.fillStyle = "#10b981";
+    ctx.beginPath(); ctx.arc(micBaseX + 1.8, micBaseY - 1.2, 0.6, 0, Math.PI * 2); ctx.fill();
+
+    // 5B. 朝后的金属鹅颈弯管 (Corrugated Flexible Gooseneck Stalk bending backward)
+    ctx.strokeStyle = "#334155";
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.moveTo(micBaseX, micBaseY);
+    ctx.bezierCurveTo(micBaseX + 0.5, micBaseY + 6, micTipX - 1.5, micTipY - 5, micTipX, micTipY);
+    ctx.stroke();
+
+    // 弯管金属高光与分段螺纹
+    ctx.strokeStyle = "#94a3b8";
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(micBaseX, micBaseY);
+    ctx.bezierCurveTo(micBaseX + 0.5, micBaseY + 6, micTipX - 1.5, micTipY - 5, micTipX, micTipY);
+    ctx.stroke();
+
+    // 5C. 麦克风拾音咪头与防风防喷罩 (Microphone Capsule & Cardioid Windscreen)
+    // 咪头本体 (黑色防喷海绵罩，朝后正对发言者)
+    ctx.fillStyle = "#0f172a";
+    ctx.beginPath();
+    ctx.arc(micTipX, micTipY, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#475569";
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+
+    // 金属防风滤网中环
+    ctx.strokeStyle = "#cbd5e1";
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.arc(micTipX, micTipY, 1.8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 拾音就绪状态光环 (Pulsing Emerald Green/Cyan Glow)
+    const micGlowA = 0.6 + Math.sin(time * 4) * 0.35;
+    ctx.strokeStyle = `rgba(52, 211, 153, ${micGlowA})`;
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.arc(micTipX, micTipY, 2.8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // --- 6. 平板电脑 / 终端 ("一平板电脑（终端）... 电脑屏幕则为蓝色（参考level7其他蓝色屏幕的颜色）") ---
+    // 位于长方形桌面右侧，屏幕面向后方站立者，采用 Level 7 战术蓝色屏幕调色板
+    ctx.save();
+    const tabW = 16;
+    const tabH = 12;
+    const tabX = 3;
+    const tabY = -21;
+
+    // 6A. 平板电脑人体工学倾角金属支架 (Ergonomic Stand Bracket)
+    ctx.fillStyle = "#061019";
+    ctx.fillRect(tabX - 1, tabY - 1, tabW + 2, tabH + 2);
+    ctx.strokeStyle = "#0c4a6e";
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(tabX - 1, tabY - 1, tabW + 2, tabH + 2);
+
+    // 6B. 平板电脑屏幕本体 (Active Phosphor Blue Glass Display)
+    // 参考 Level 7 战术屏幕蓝颜色配置：#061c3a -> #0b355c，外框 #00CCFF / #00E5FF
+    const gradTabScr = ctx.createLinearGradient(tabX, tabY, tabX + tabW, tabY + tabH);
+    gradTabScr.addColorStop(0, "#061c3a");
+    gradTabScr.addColorStop(0.65, "#0b355c");
+    gradTabScr.addColorStop(1, "#032845");
+    ctx.fillStyle = gradTabScr;
+    ctx.fillRect(tabX, tabY, tabW, tabH);
+
+    // 蓝光边框外发光
+    ctx.strokeStyle = "#00CCFF";
+    ctx.lineWidth = 1.0;
+    ctx.strokeRect(tabX, tabY, tabW, tabH);
+
+    // 6C. 平板屏幕内部高精 UI (Level 7 战术演讲终端)
+    ctx.save();
+    ctx.beginPath();
+    if (ctx.rect) ctx.rect(tabX, tabY, tabW, tabH);
+    else {
+        ctx.moveTo(tabX, tabY);
+        ctx.lineTo(tabX + tabW, tabY);
+        ctx.lineTo(tabX + tabW, tabY + tabH);
+        ctx.lineTo(tabX, tabY + tabH);
+        ctx.closePath();
+    }
+    ctx.clip();
+
+    // 水平微细扫描线
+    ctx.strokeStyle = "rgba(0, 229, 255, 0.18)";
+    ctx.lineWidth = 0.5;
+    for (let sy = tabY + 1.8; sy < tabY + tabH; sy += 1.8) {
+        ctx.beginPath();
+        ctx.moveTo(tabX, sy);
+        ctx.lineTo(tabX + tabW, sy);
+        ctx.stroke();
+    }
+
+    // 顶端微型标题与状态灯
+    ctx.fillStyle = "#00E5FF";
+    ctx.font = "bold 2.4px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("CMD HUD", tabX + 1.2, tabY + 3.0);
+
+    // 绿/蓝电池与信号状态微点
+    ctx.fillStyle = "#00FF66";
+    ctx.beginPath(); ctx.arc(tabX + tabW - 2.0, tabY + 2.2, 0.6, 0, Math.PI * 2); ctx.fill();
+
+    // 中央实时语音示波波形 (Audio Voice Telemetry Waveform)
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    for (let wx = 0; wx <= tabW - 2.5; wx += 1.0) {
+        const wy = tabY + 6.2 + Math.sin(time * 5.5 + wx * 0.8) * 1.5;
+        if (wx === 0) ctx.moveTo(tabX + 1.2 + wx, wy);
+        else ctx.lineTo(tabX + 1.2 + wx, wy);
+    }
+    ctx.stroke();
+
+    // 底部 4 阶梯声级/力场指示条 (Level 7 屏幕样式)
+    const voiceBars = [1, 1, Math.sin(time * 3) > 0 ? 1 : 0, Math.sin(time * 4.5) > 0 ? 1 : 0];
+    const barColors = ["#00E5FF", "#00CCFF", "#38bdf8", "#34d399"];
+    for (let b = 0; b < 4; b++) {
+        ctx.fillStyle = voiceBars[b] ? barColors[b] : "#08243d";
+        ctx.fillRect(tabX + 1.5 + b * 3.2, tabY + tabH - 2.6, 2.4, 1.3);
+    }
+
+    // 屏幕玻璃表面 45° 晶体反光高光 (Curved Glare Sheen)
+    ctx.fillStyle = "rgba(255, 255, 255, 0.20)";
+    ctx.beginPath();
+    ctx.moveTo(tabX + 2, tabY);
+    ctx.lineTo(tabX + 6, tabY);
+    ctx.lineTo(tabX, tabY + 6);
+    ctx.lineTo(tabX, tabY + 2);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore(); // end tablet clip
+    ctx.restore(); // end tablet
+
+    // --- 7. 站立提示地坪光效 (Stand-On Detection Ambient Effect) ---
+    // 讲台内侧净空 (x: -20~20, y: -6~18) 完美容纳角色，站上时呈现战术通联微光
+    ctx.save();
+    ctx.strokeStyle = "rgba(16, 185, 129, 0.35)";
+    ctx.setLineDash([2, 3]);
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.arc(0, 7, 18, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    ctx.restore(); // end drawPodium
+}
+
+// 生成讲台道具对象 (比角色略大，刚好能站上去，严格遵循关卡隔离)
+function getPodium(cx, cy, angle = 0, scale = 1.0, label = "COMMAND PODIUM") {
+    const boundW = 60 * scale;
+    const boundH = 50 * scale;
+    return {
+        type: "command_podium",
+        cx: cx,
+        cy: cy,
+        angle: angle,
+        scale: scale,
+        x: cx - boundW / 2,
+        y: cy - boundH / 2,
+        w: boundW,
+        h: boundH,
+        label: label,
+        displayName: "COMMAND PODIUM",
+        noCollision: true, // 确保角色能自然走入护翼并站上底座
+        hideLabel: true,
+        draw: (ctx) => {
+            drawPodium(ctx, cx, cy, angle, scale);
+        }
+    };
+}
 
 // 生成扇形控制台的高精度物理碰撞多边形顶点及道具对象
 function getSectorWorkstation(cx, cy, angle = 0, scale = 1.0, label = "SECTOR WORKSTATION") {
@@ -2308,13 +3037,8 @@ const LEVEL_LAB = {
                 hideLabel: true
             },
 
-            // G. 中间房间左圆柱终端 (右侧终端柱已替换为全新斜向扇形主控台)
-            {
-                type: 'solid',
-                circle: { cx: 1350, cy: 920, radius: 35 },
-                label: 'LEFT TERMINAL PILLAR',
-                hideLabel: true
-            },
+            // G. 中间房间左圆柱终端 (已替换为指挥讲台，2026-11-05)
+            // (已删除 LEFT TERMINAL PILLAR，替换为讲台)
 
             // H. 环绕在中央圆台四周的 4 个加长圆弧结构
             {
@@ -3082,8 +3806,10 @@ const LEVEL_LAB = {
 
             // =========================================================
             // 3. 移植自 Level 8 的全新扇形战术主控台 (置于原右圆柱 1850, 920 位置，斜 45 度朝向下方大圆台)
+            //    指挥讲台 (置于原左圆柱 1350, 920 位置，镜像 45 度朝向下方大圆台，2026-11-05)
             // =========================================================
             getSectorWorkstation(1850, 920, -Math.PI * 0.75, 1.0, 'EAST SECTOR COMMAND CONSOLE'),
+            getPodium(1350, 920, Math.PI * 0.75, 1.0, 'WEST COMMAND PODIUM'),
             // =========================================================
             // 4. 圆形全包围控制台 ×4 (替代 R1/R2 长方形，2026-11-04)
             // 左侧2个横排，右侧2个横排，中间过道 50px（2026-11-05 收窄，碰撞半径65）

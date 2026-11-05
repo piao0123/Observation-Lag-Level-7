@@ -594,13 +594,13 @@ function getSectorWorkstation(cx, cy, angle = 0, scale = 1.0, label = "SECTOR WO
 // 4. 座位左右两侧按钮完全顺应圆弧曲线排列：左侧三环同心圆弧按键、翘板开关与安全拨动开关；右侧三环同心圆弧推子、旋钮、微动矩阵与紧急制动按钮
 // 5. 座位后方蓝色玻璃质感平直隔板：【严格保持水平平直线段，非弧形】，升级为通透纯净的科技蓝玻璃质感（天蓝+宝蓝渐变、45度高光、发光蓝光导轨与立柱光环）
 // =========================================================================
-function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
+function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0, freezeTime = 0) {
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(angle);
     if (scale !== 1.0) ctx.scale(scale, scale);
 
-    const time = Date.now() * 0.001;
+    const time = freezeTime ? 0 : Date.now() * 0.001;
 
     // --- 几何常量 (标准正圆外壳与平直后隔板位置) ---
     const R_out = 62; // 外壳正圆半径
@@ -1327,7 +1327,123 @@ function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.restore(); // end drawCircularPodWorkstation
 }
 
-// 生成圆形全包围控制台道具对象 (独立于实体墙系统，杜绝障碍物引擎在道具表面覆盖多边形描边)
+// ===== 动静分离优化 (2026-11-05)：圆形舱动态元素每帧重画 =====
+function drawCircularPodWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
+    const time = Date.now() * 0.001;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    // 屏幕定义（与主函数一致，用于定位动态元素）
+    const screens = [
+        { name: "LEFT_MONITOR", startDeg: -65, endDeg: -23, midDeg: -44, hudType: "reactor" },
+        { name: "CENTER_MONITOR", startDeg: -20, endDeg: 20, midDeg: 0, hudType: "radar" },
+        { name: "RIGHT_MONITOR", startDeg: 23, endDeg: 65, midDeg: 44, hudType: "defense" }
+    ];
+
+    // --- 动态 1-5：三块屏幕的 HUD 动画 ---
+    screens.forEach(scr => {
+        const midRad = scr.midDeg * Math.PI / 180;
+        const R_scr_out = 57, R_scr_in = 42;
+        const midR = (R_scr_out + R_scr_in) / 2;
+        const smx = Math.sin(midRad) * midR;
+        const smy = -Math.cos(midRad) * midR;
+
+        ctx.save();
+        ctx.translate(smx, smy);
+        ctx.rotate(midRad);
+
+        if (scr.hudType === "radar") {
+            // 动态1：雷达旋转扫描波束
+            const sweepA = (time * 2.5) % (Math.PI * 2);
+            ctx.strokeStyle = "#00CCFF";
+            ctx.lineWidth = 1.0;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(Math.cos(sweepA) * 4.6, Math.sin(sweepA) * 4.6);
+            ctx.stroke();
+
+            // 动态2：敌我识别目标光点闪烁
+            if (Math.sin(time * 3) > 0) {
+                ctx.fillStyle = "#ef4444";
+                ctx.fillRect(-2.8, -2.2, 1.2, 1.2);
+            }
+        } else if (scr.hudType === "reactor") {
+            // 动态3：实时正弦能量波形
+            ctx.strokeStyle = "#00E5FF";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            for (let px = -12; px <= 12; px += 1.2) {
+                const py = Math.sin(time * 4.8 + px * 0.45) * 2.0;
+                if (px === -12) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // 动态4：4阶梯动力输出指示条
+            const powerBars = [1, 1, 1, Math.sin(time * 2) > 0 ? 1 : 0];
+            const pColors = ["#00E5FF", "#00CCFF", "#38bdf8", "#f59e0b"];
+            for (let b = 0; b < 4; b++) {
+                ctx.fillStyle = powerBars[b] ? pColors[b] : "#0b355c";
+                ctx.fillRect(-9 + b * 4.6, 3.4, 3.6, 1.4);
+            }
+        } else if (scr.hudType === "defense") {
+            // 动态5：6段跳动脉冲均衡柱
+            const freqVals = [0.85, 0.45, 0.95, 0.65, 0.8, 0.55];
+            for (let f = 0; f < 6; f++) {
+                const fh = 1.4 + Math.abs(Math.sin(time * 3.8 + f * 1.2)) * 3.4 * freqVals[f];
+                ctx.fillStyle = "#0284c7";
+                ctx.fillRect(-10 + f * 3.4, 2.8 - fh, 2.4, fh);
+            }
+        }
+
+        ctx.restore();
+    });
+
+    // --- 动态6：翘板开关状态微灯 ---
+    const leftRockersAngles = [-81, -96, -111, -125];
+    leftRockersAngles.forEach((deg, idx) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -47);
+        ctx.scale(1.2, 1.2);
+        // 状态微灯（只画动态部分，静态底座在缓存里）
+        ctx.fillStyle = (Math.sin(time * 4 + idx) > 0) ? "#00CCFF" : "#0b355c";
+        ctx.beginPath(); ctx.arc(0, -1.0, 0.6, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    // --- 动态7：旋钮指针 ---
+    [115, 127].forEach((deg, idx) => {
+        ctx.save();
+        ctx.rotate(deg * Math.PI / 180);
+        ctx.translate(0, -52);
+        ctx.scale(1.2, 1.2);
+        // 旋钮指针（只画动态部分）
+        const pRad = (time * 1.8 + idx * 2.2) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 0.9;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(pRad) * 2.4, Math.sin(pRad) * 2.4); ctx.stroke();
+        ctx.restore();
+    });
+
+    // --- 动态8：隔断立柱红外感应光圈 ---
+    const y_part = 38;
+    const door_hw = 16;
+    const x_part = 49;
+    const stanchions = [-x_part, -door_hw, door_hw, x_part];
+    stanchions.forEach((sx, idx) => {
+        if (idx === 1 || idx === 2) {
+            ctx.fillStyle = (Math.sin(time * 3.5) > 0) ? "#38bdf8" : "#0284c7";
+            ctx.beginPath(); ctx.arc(sx, y_part, 1.0, 0, Math.PI * 2); ctx.fill();
+        }
+    });
+
+    ctx.restore();
+}
+
 function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = "CIRCULAR POD CONSOLE") {
     const boundR = 80 * scale;
     return {
@@ -1345,7 +1461,23 @@ function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = "CIRC
         noCollision: true,
         hideLabel: true,
         draw: (ctx) => {
-            drawCircularPodWorkstation(ctx, cx, cy, angle, scale);
+            // ===== 动静分离优化 (2026-11-05)：静态预渲染 + 动态叠加 =====
+            const cacheKey = '__podCache_' + cx + '_' + cy + '_' + angle + '_' + scale;
+            if (!window[cacheKey]) {
+                const sz = Math.ceil(boundR * 2 + 20);
+                const off = document.createElement('canvas');
+                off.width = sz; off.height = sz;
+                const octx = off.getContext('2d');
+                octx.save();
+                octx.translate(sz / 2, sz / 2);
+                octx.translate(-cx, -cy);
+                drawCircularPodWorkstation(octx, cx, cy, angle, scale, 1);
+                octx.restore();
+                window[cacheKey] = { canvas: off, size: sz };
+            }
+            const c = window[cacheKey];
+            ctx.drawImage(c.canvas, cx - c.size / 2, cy - c.size / 2);
+            drawCircularPodWorkstationDynamic(ctx, cx, cy, angle, scale);
         }
     };
 }
@@ -1359,13 +1491,13 @@ function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = "CIRC
 // 4. 键盘左右两侧的多排控制按钮：左侧方块按键、翘板开关与安全拨动开关；右侧线性推子、旋转刻度旋钮、微动矩阵与带警示圈紧急制动按钮
 // 5. 严格横向尺寸约束：总宽度 273px (精确为原正圆控制台 124px 直径的 2.2016 倍，严格控制在 2.2 倍左右)
 // =========================================================================
-function drawTripleCubicleWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
+function drawTripleCubicleWorkstation(ctx, cx, cy, angle = 0, scale = 1.0, freezeTime = 0) {
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(angle);
     if (scale !== 1.0) ctx.scale(scale, scale);
 
-    const time = Date.now() * 0.001;
+    const time = freezeTime ? 0 : Date.now() * 0.001;
 
     // --- 几何与尺寸常量 (精确 2.2016 倍原正圆控制台，严格控制在 2.2 倍左右) ---
     // 原正圆外壳直径 124px，2.2016 倍 = 273px (轴间距 91px)
@@ -1979,7 +2111,150 @@ function drawTripleCubicleWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
     ctx.restore(); // end drawTripleCubicleWorkstation
 }
 
-// 生成三联方形隔间战术控制台道具对象 (完全依据手绘草稿 IMG_7697 规范制作)
+// ===== 动静分离优化 (2026-11-05)：三联控制台动态元素每帧重画 =====
+function drawTripleCubicleWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
+    const time = Date.now() * 0.001;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const bayPitch = 91;
+    const bayOffsets = [-bayPitch, 0, bayPitch];
+    const scrW = 27.5, scrH = 16.5, scrY = -44.0;
+    const scrConfigs = [{ id: "L", sx: -28.0 }, { id: "C", sx: 0 }, { id: "R", sx: 28.0 }];
+
+    // --- 屏幕 HUD 动态 (3隔间 x 3屏) ---
+    bayOffsets.forEach((bx, bIdx) => {
+        ctx.save();
+        ctx.translate(bx, 0);
+
+        scrConfigs.forEach((scr, sIdx) => {
+            const scx = scr.sx;
+
+            // 战术 HUD
+            if (bIdx === 0) {
+                // 左隔间
+                if (sIdx === 0) {
+                    // 动态1：频谱条
+                    for (let b = 0; b < 6; b++) {
+                        const bxBar = scx - 10 + b * 3.4;
+                        const hVal = 2.0 + Math.abs(Math.sin(time * 3.2 + b * 1.1)) * 7.5;
+                        ctx.fillStyle = (b === 4) ? "#f59e0b" : "#10b981";
+                        ctx.fillRect(bxBar, scrY + scrH - 2 - hVal, 2.2, hVal);
+                    }
+                } else if (sIdx === 1) {
+                    // 动态2：雷达扫描
+                    const sw = (time * 2.8) % (Math.PI * 2);
+                    ctx.strokeStyle = "#34d399";
+                    ctx.lineWidth = 1.0;
+                    ctx.beginPath();
+                    ctx.moveTo(scx, scrY + scrH / 2);
+                    ctx.lineTo(scx + Math.cos(sw) * 4.8, scrY + scrH / 2 + Math.sin(sw) * 4.8);
+                    ctx.stroke();
+                } else if (sIdx === 2) {
+                    // 动态3a：上行波形
+                    ctx.strokeStyle = "#10b981";
+                    ctx.lineWidth = 0.8;
+                    ctx.beginPath();
+                    for (let wx = -10; wx <= 10; wx += 1.5) {
+                        const wy = Math.sin(time * 4.0 + wx * 0.4) * 2.2;
+                        if (wx === -10) ctx.moveTo(scx + wx, scrY + scrH / 2 + 1 + wy);
+                        else ctx.lineTo(scx + wx, scrY + scrH / 2 + 1 + wy);
+                    }
+                    ctx.stroke();
+                }
+            } else if (bIdx === 1) {
+                // 中隔间
+                if (sIdx === 0) {
+                    // 动态3b：反应堆波形
+                    ctx.strokeStyle = "#38bdf8";
+                    ctx.lineWidth = 0.9;
+                    ctx.beginPath();
+                    for (let rx = -10; rx <= 10; rx += 1.5) {
+                        const ry = Math.cos(time * 5.0 + rx * 0.5) * 2.5;
+                        if (rx === -10) ctx.moveTo(scx + rx, scrY + scrH / 2 + 1 + ry);
+                        else ctx.lineTo(scx + rx, scrY + scrH / 2 + 1 + ry);
+                    }
+                    ctx.stroke();
+                } else if (sIdx === 1) {
+                    // 动态4：目标锁定闪烁
+                    if (Math.sin(time * 4) > 0) {
+                        ctx.fillStyle = "#ef4444";
+                        ctx.fillRect(scx - 1.2, scrY + scrH / 2 - 1.2, 2.4, 2.4);
+                    }
+                } else if (sIdx === 2) {
+                    // 动态5：护盾指示条
+                    const sBars = [1, 1, 1, 1, Math.sin(time * 2.5) > 0 ? 1 : 0];
+                    for (let sb = 0; sb < 5; sb++) {
+                        ctx.fillStyle = sBars[sb] ? "#00E5FF" : "#0c4a6e";
+                        ctx.fillRect(scx - 9 + sb * 3.8, scrY + scrH / 2, 3.0, 3.5);
+                    }
+                }
+            } else if (bIdx === 2) {
+                // 右隔间
+                if (sIdx === 0) {
+                    // 动态6：防火墙矩阵闪烁
+                    for (let cxp = -8; cxp <= 8; cxp += 4) {
+                        for (let cyp = scrY + 5; cyp <= scrY + scrH - 3; cyp += 2.5) {
+                            ctx.fillStyle = (Math.sin(time * 4 + cxp + cyp) > 0) ? "#34d399" : "#064e3b";
+                            ctx.fillRect(scx + cxp, cyp, 1.8, 1.2);
+                        }
+                    }
+                } else if (sIdx === 1) {
+                    // 动态7：电网仪表指针
+                    const pA = Math.PI * 0.8 + Math.abs(Math.sin(time * 2.2)) * Math.PI * 1.4;
+                    ctx.strokeStyle = "#f59e0b";
+                    ctx.lineWidth = 1.0;
+                    ctx.beginPath();
+                    ctx.moveTo(scx, scrY + scrH / 2 + 1.5);
+                    ctx.lineTo(scx + Math.cos(pA) * 3.2, scrY + scrH / 2 + 1.5 + Math.sin(pA) * 3.2);
+                    ctx.stroke();
+                }
+                // sIdx===2 右隔间右屏：静态，无动态
+            }
+        });
+
+        // --- 按钮指示灯 (动态8) ---
+        const lpX = -27.0, lpY = -13.0;
+        for (let i = 0; i < 3; i++) {
+            const rxBtn = lpX - 6.5 + i * 5.0;
+            const ryBtn = lpY - 1.0;
+            ctx.fillStyle = (Math.sin(time * 4.0 + i + bIdx) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath(); ctx.arc(rxBtn + 1.8, ryBtn + 1.2, 0.6, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // --- 仪表指针 (动态9) ---
+        const rpX = 27.0, rpY = -13.0;
+        const dialX = rpX + 5.0, dialY = rpY - 3.0;
+        const dialA = (time * 1.5 + bIdx) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(dialX, dialY);
+        ctx.lineTo(dialX + Math.cos(dialA) * 2.4, dialY + Math.sin(dialA) * 2.4);
+        ctx.stroke();
+
+        ctx.restore();
+    });
+
+    // --- 隔断立柱传感器 (动态10) ---
+    const partitionX = [-136.5, -45.5, 45.5, 136.5];
+    const partYTop = -49, partYBottom = 48;
+    partitionX.forEach((px, idx) => {
+        const isOuter = (idx === 0 || idx === 3);
+        [partYTop, partYBottom].forEach(py => {
+            ctx.fillStyle = (Math.sin(time * 3.0 + idx) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath();
+            ctx.arc(px, py, isOuter ? 1.5 : 1.1, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    });
+
+    ctx.restore();
+}
+
 function getTripleCubicleWorkstation(cx, cy, angle = 0, scale = 1.0, label = "TRIPLE CUBICLE WORKSTATION") {
     const boundW = 280 * scale;
     const boundH = 106 * scale;
@@ -1998,7 +2273,23 @@ function getTripleCubicleWorkstation(cx, cy, angle = 0, scale = 1.0, label = "TR
         noCollision: true,
         hideLabel: true,
         draw: (ctx) => {
-            drawTripleCubicleWorkstation(ctx, cx, cy, angle, scale);
+            // ===== 动静分离优化 (2026-11-05)：静态预渲染 + 动态叠加 =====
+            const cacheKey = '__tripleCache_' + cx + '_' + cy + '_' + angle + '_' + scale;
+            if (!window[cacheKey]) {
+                const cw = Math.ceil(boundW + 20), ch = Math.ceil(boundH + 20);
+                const off = document.createElement('canvas');
+                off.width = cw; off.height = ch;
+                const octx = off.getContext('2d');
+                octx.save();
+                octx.translate(cw / 2, ch / 2);
+                octx.translate(-cx, -cy);
+                drawTripleCubicleWorkstation(octx, cx, cy, angle, scale, 1);
+                octx.restore();
+                window[cacheKey] = { canvas: off, w: cw, h: ch };
+            }
+            const c = window[cacheKey];
+            ctx.drawImage(c.canvas, cx - c.w / 2, cy - c.h / 2);
+            drawTripleCubicleWorkstationDynamic(ctx, cx, cy, angle, scale);
         }
     };
 }
