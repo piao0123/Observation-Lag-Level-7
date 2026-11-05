@@ -507,3 +507,53 @@ function getCircularPodWorkstation(cx, cy, angle = 0, scale = 1.0, label = '') {
 - 不做动静分离的新道具，每放一个，L7 每帧增加 **2,000–5,000 次** Canvas 调用。
 - 3 个服务器集群 = +12,000 次/帧，MacBook Air 从 30fps 跌到 10fps 以下。
 - **创建新道具时就必须同时写好 Dynamic 函数和缓存逻辑，不要事后补。**
+
+---
+
+## 📌 记录 011：Level 7 独立武器系统（WEAPONS 单例隔离）
+
+### 1. 问题根源
+
+`engine.js` 的 `WEAPONS`（约 99 行）是**所有关卡共用的单一全局对象**。直接改它（比如改步枪伤害）会同时改掉 L1–L8 所有关卡的武器。2026-11-03 已发生多次：用户在 AI Studio 改 L7 武器，结果其他关卡的武器也被改了。
+
+### 2. 解决方案：覆盖表模式（不要改 WEAPONS 本身）
+
+```javascript
+// engine.js，WEAPONS 定义之后
+const LEVEL7_WEAPON_OVERRIDES = {
+    // 填武器 id → 要覆盖的属性，L7 里自动生效，其他关卡完全不受影响
+    // 示例：1: { damage: 35, cooldown: 8 }  // 只改 L7 的步枪伤害和射速
+};
+```
+
+`getEffectiveWeapon(wp)`（约 121 行）里已有 L7 分支：
+```javascript
+if (levelId === 'level7_lab') {
+    const override = LEVEL7_WEAPON_OVERRIDES[wp.id];
+    if (override) return { ...wp, ...override };
+    return wp;
+}
+```
+
+### 3. 武器 id 对照表
+
+| id | 武器 | 原版数值（damage/cooldown/range） |
+|----|------|----------------------------------|
+| 1 | 步枪 RIFLE | 28 / 9f / 650 |
+| 2 | 手枪 PISTOL | 34 / 11f / 450 |
+| 3 | 冲锋枪 SMG | 16 / 6f / 380 |
+| 4 | 狙击枪 SNIPER | 140 / 45f / 1100 |
+| 5 | 手榴弹 GRENADE | 130 / 65f / 400 |
+| 6 | 机枪 MACHINE_GUN | 42 / 7f / 800 |
+| 7 | UAV空袭 UAV | 99999 / 20f / 2000 |
+| 8 | 重型三管猎枪 | 32×12 / 35f / 380 |
+| 9 | 符文光镰 | 88 / 36f / 560 |
+| 10 | 地狱熔岩阵 | 170 / 65f / 680 |
+| 11 | 灵魂汲取 | 26 / 7f / 420 |
+
+### 4. 铁律
+
+- **绝不直接改 `WEAPONS` 对象**——改一个数，全关卡跟着变。
+- **L7 改武器只填 `LEVEL7_WEAPON_OVERRIDES`**——用 `{ ...wp, ...override }` 返回副本，原对象不动。
+- **L0 已有同样模式**（`getEffectiveWeapon` 里的 `level0_test` 分支），L7 照抄这个思路。
+- 以后如果 L8 也要独立武器，照样加 `LEVEL8_WEAPON_OVERRIDES` + 一个分支，不要动 WEAPONS。

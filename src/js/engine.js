@@ -110,10 +110,27 @@ const WEAPONS = {
     SOUL_SIPHON:    { id: 11, name: "灵魂汲取",   nameEn: "Soul Siphon", range: 420, cooldown: 7,  damage: 26, speed: 22, radius: 8, type: 'soul_siphon' }
 };
 
+// --- Level 7 专属武器覆盖表 (2026-11-05) ---
+// 用法：在这里填武器 id → 要覆盖的属性，L7 里自动生效，其他关卡完全不受影响。
+// 示例：RIFLE: { damage: 35, cooldown: 8 }  // 只改 L7 的步枪伤害和射速
+// 注意：绝不直接改上面的 WEAPONS 全局对象（会污染所有关卡）。
+const LEVEL7_WEAPON_OVERRIDES = {
+    // 现在是空的，L7 武器 = 原版数值。以后要改 L7 武器只填这里。
+};
+
 // 关卡专有武器动态属性适配器 (仅在 Level 0 大地图生效，绝不波及其他关卡)
 function getEffectiveWeapon(wp) {
     if (!wp) return wp;
-    const isLevel0 = (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test');
+    const levelId = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+
+    // Level 7：查专属覆盖表，有就返回修改后的副本，没有就返回原样
+    if (levelId === 'level7_lab') {
+        const override = LEVEL7_WEAPON_OVERRIDES[wp.id];
+        if (override) return { ...wp, ...override };
+        return wp;
+    }
+
+    const isLevel0 = (levelId === 'level0_test');
     if (!isLevel0) return wp;
 
     switch(wp.id) {
