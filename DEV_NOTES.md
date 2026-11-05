@@ -557,3 +557,61 @@ if (levelId === 'level7_lab') {
 - **L7 改武器只填 `LEVEL7_WEAPON_OVERRIDES`**——用 `{ ...wp, ...override }` 返回副本，原对象不动。
 - **L0 已有同样模式**（`getEffectiveWeapon` 里的 `level0_test` 分支），L7 照抄这个思路。
 - 以后如果 L8 也要独立武器，照样加 `LEVEL8_WEAPON_OVERRIDES` + 一个分支，不要动 WEAPONS。
+
+---
+
+## 📌 记录 012：Level 7 专属敌人系统（覆盖表模式）
+
+### 1. 问题根源
+
+敌人初始值在 `spawnWave()`（engine.js 约 1917 行）里写死，`hp: 100`、`patrolSpeed: 1.0 + Math.random() * 0.3` 这些数所有关卡共用。直接改会污染所有关卡（和 2026-11-03 的 WEAPONS 事故一样）。
+
+### 2. 解决方案：覆盖表 + 应用函数
+
+```javascript
+// engine.js，WEAPONS 覆盖表旁边
+const LEVEL7_ENEMY_OVERRIDES = {
+    // 按类型填：guard 普通守卫 / observer 观察者 / jammer 干扰者
+    // 示例：guard: { hp: 150, maxHp: 150, patrolSpeed: 1.5 }
+};
+```
+
+`spawnWave()` 里每个敌人创建后调一次（已接好）：
+```javascript
+applyLevel7EnemyOverrides(newEnemy); // 只在 level7_lab 生效，其他关卡原样通过
+```
+
+### 3. 铁律
+
+- **改 L7 敌人数值只填 `LEVEL7_ENEMY_OVERRIDES`**，绝不改 `spawnWave()` 里的初始值。
+- **全新敌人类型（新 AI 行为）**：不要往覆盖表里加，先在这里登记设计，再在 engine.js 里加独立的 `drawAgentL7` / 行为分支，不要动原有敌人逻辑和 `drawAgent` 原函数。
+- 以后 L8 要独立敌人，照样加 `LEVEL8_ENEMY_OVERRIDES` + 一个分支。
+
+---
+
+## 📌 记录 013：Level 7 专属角色模型切换（modelVariant）
+
+### 1. 机制（已铺好，2026-11-05）
+
+```javascript
+// player 对象里已加字段
+player.modelVariant = 'default'; // 'default' 默认模型 / 'special' 特殊模型
+
+// 切换函数（已挂 window）
+setPlayerModelVariant('special'); // 切特殊模型
+setPlayerModelVariant('default'); // 切回默认
+getPlayerModelVariant();          // 查当前模型
+```
+
+### 2. 渲染分支点
+
+`drawAgent()`（engine.js 约 24077 行）里已有分支点：
+```javascript
+const isL7SpecialModel = isPlayer && (getCurrentLevelId() === 'level7_lab') && player.modelVariant === 'special';
+```
+
+### 3. 铁律
+
+- **现在两个分支画一样的模型（占位）**，等特殊模型设计好后，只改 `isL7SpecialModel` 为真时那个分支里的颜色/形状。
+- **不要改 `isPlayer` 判断本身**，不要在其他地方加模型分支，所有模型切换走 `player.modelVariant` 这一个字段。
+- 切换触发条件（按键、拾取、剧情点）由关卡设计定，调 `setPlayerModelVariant()` 就行，不用改引擎。

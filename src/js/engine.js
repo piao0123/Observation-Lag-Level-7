@@ -110,6 +110,31 @@ const WEAPONS = {
     SOUL_SIPHON:    { id: 11, name: "灵魂汲取",   nameEn: "Soul Siphon", range: 420, cooldown: 7,  damage: 26, speed: 22, radius: 8, type: 'soul_siphon' }
 };
 
+// --- Level 7 专属敌人覆盖表 (2026-11-05) ---
+// 用法：按敌人类型填要覆盖的属性，L7 里自动生效，其他关卡完全不受影响。
+// 类型键：'guard' 普通守卫 / 'observer' 观察者 / 'jammer' 干扰者
+// 示例：guard: { hp: 150, maxHp: 150, patrolSpeed: 1.5 }  // 只改 L7 守卫的血量和速度
+// 注意：绝不直接改 spawnWave() 里的敌人初始值（会污染所有关卡）。
+// 全新敌人类型（新 AI 行为）：不要在这里加，先在 DEV_NOTES.md 记录 012 里登记设计，
+// 再在 engine.js 里加独立的 drawAgentL7 / 行为分支，不要动原有敌人逻辑。
+const LEVEL7_ENEMY_OVERRIDES = {
+    // 现在是空的，L7 敌人 = 原版数值。以后要改 L7 敌人只填这里。
+    // guard: {},
+    // observer: {},
+    // jammer: {},
+};
+
+// L7 敌人覆盖应用函数：在 spawnWave() 里每个敌人创建后调用
+function applyLevel7EnemyOverrides(enemy) {
+    if (!enemy) return enemy;
+    const levelId = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+    if (levelId !== 'level7_lab') return enemy;
+    const type = enemy.isJammer ? 'jammer' : (enemy.isObserver ? 'observer' : 'guard');
+    const override = LEVEL7_ENEMY_OVERRIDES[type];
+    if (override) Object.assign(enemy, override);
+    return enemy;
+}
+
 // --- Level 7 专属武器覆盖表 (2026-11-05) ---
 // 用法：在这里填武器 id → 要覆盖的属性，L7 里自动生效，其他关卡完全不受影响。
 // 示例：RIFLE: { damage: 35, cooldown: 8 }  // 只改 L7 的步枪伤害和射速
@@ -341,8 +366,23 @@ const player = {
     x: 100, y: 350, angle: 0, speed: 3.8, walkCycle: 0, 
     flashTimer: 0, hp: 100, maxHp: 100,
     shield: 100, maxShield: 100, shieldActive: true, lastHitTimer: 0,
-    fov: Math.PI / 2.2, viewDistance: 500
+    fov: Math.PI / 2.2, viewDistance: 500,
+    // L7 专属角色模型切换 (2026-11-05)：'default' 默认模型，'special' 特殊模型
+    // 切换函数 setPlayerModelVariant() 在下面定义，drawAgent 里按此字段分支渲染
+    modelVariant: 'default'
 };
+
+// --- L7 专属角色模型切换 ---
+// 用法：setPlayerModelVariant('special') 切特殊模型，setPlayerModelVariant('default') 切回默认
+// 渲染分支在 drawAgent() 里按 player.modelVariant 判断，现在两个分支画一样的模型（占位），
+// 等特殊模型设计好后只改 drawAgent 里的 'special' 分支，不动其他代码。
+function setPlayerModelVariant(variant) {
+    if (variant !== 'default' && variant !== 'special') return;
+    player.modelVariant = variant;
+}
+window.setPlayerModelVariant = setPlayerModelVariant;
+function getPlayerModelVariant() { return player.modelVariant; }
+window.getPlayerModelVariant = getPlayerModelVariant;
 
 let blindActive = false;
 let blindEnergy = 100;
@@ -2300,6 +2340,8 @@ function spawnWave() {
             patrolSpeed: 1.0 + Math.random() * 0.3, walkCycle: 0, hitTimer: 0, scanAngle: Math.random() * 6, shootCooldown: 0,
             deathAlpha: 1.0
         };
+        // L7 专属敌人覆盖（2026-11-05）：只在 L7 生效，其他关卡原样通过
+        applyLevel7EnemyOverrides(newEnemy);
         ensureEntityInBounds(newEnemy, 16);
         enemies.push(newEnemy);
     }
@@ -24312,9 +24354,13 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
     let gearColor2 = '#202326';         // 枪支机匣、枪托、战术靴底、墨镜镜框：哑光石墨灰 (Matte Graphite Gray)
     
     const isLvl0Player = isPlayer && (getCurrentLevelId() === 'level0_test');
+    // L7 专属角色模型分支点 (2026-11-05)：player.modelVariant === 'special' 时画特殊模型
+    // 现在两个分支画一样的模型（占位），等特殊模型设计好后只改 'special' 分支里的颜色/形状，
+    // 不要改 isPlayer 判断本身，也不要在其他地方加模型分支。
+    const isL7SpecialModel = isPlayer && (getCurrentLevelId() === 'level7_lab') && (typeof player !== 'undefined' && player.modelVariant === 'special');
 
     if (isPlayer) {
-        mainColor = isLvl0Player ? '#FF3344' : '#00FF66';
+        mainColor = isLvl0Player ? '#FF3344' : (isL7SpecialModel ? '#00FF66' : '#00FF66'); // special 模型颜色待定，现在与默认相同
     } else if (isInBlind) {
         mainColor = '#FFFF00';
     } else if (isJammer) {
