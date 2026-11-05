@@ -1857,6 +1857,7 @@ function drawTripleCubicleWorkstation(ctx, cx, cy, angle = 0, scale = 1.0) {
         const seatY = 24.0;
         ctx.save();
         ctx.translate(0, seatY);
+        ctx.scale(1.2, 1.2); // 放大20%，与圆形舱座椅一致
 
         // 五星万向轮金属底座 (5-Star Swivel Base, 尺寸与其他控制台座椅严格相同)
         ctx.strokeStyle = "#042018";
