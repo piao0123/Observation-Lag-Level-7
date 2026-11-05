@@ -19994,6 +19994,10 @@ function isWorldRectVisible(x, y, w, h, margin = 150) {
 
 function drawObstacle(obs) {
     if (!obs) return;
+    if (typeof obs.draw === 'function') {
+        obs.draw(ctx);
+        return;
+    }
     const levelId = (typeof levelManager !== 'undefined' && levelManager.getCurrentLevel) ? levelManager.getCurrentLevel().id : '';
     const camX = Math.max(0, window.cameraX || 0);
     const camY = Math.max(0, window.cameraY || 0);

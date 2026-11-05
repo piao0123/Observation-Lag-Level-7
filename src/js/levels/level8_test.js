@@ -637,6 +637,653 @@ function getServerCluster(cx, cy, angle = 0, scale = 1.0, label = "TACTICAL 5-RA
     };
 }
 
+// =========================================================================
+// 全新大圆会议桌系统 (依据用户指令规范设计与渲染)
+// 包含 4 大核心要素：
+// 1. 地图中间大圆形改成大圆会议桌 (深色木质质感，类似讲台道具的红木/胡桃木木纹与光泽，保留原正圆 155px 半径)
+// 2. 会议桌上排满一圈平板电脑、文件夹和笔 (共 16 席高精度战术终端、TOP SECRET 机密文件夹与金属签字笔)
+// 3. 圆环形灯环保持原本形状与颜色 (143px 半径，原版天空蓝/青蓝配色)，做出一颗一颗灯珠和点亮发光动态效果 (64 颗独立发光灯珠带光晕与光核)
+// 4. 四周原 4 个圆弧删除，替换为环绕会议桌的 16 个高管人体工学转椅 (位置与会议桌上的物品席位一一对应，面向会议桌)
+// =========================================================================
+function drawConferenceTableSystem(ctx, cx, cy, radius = 155) {
+    const time = Date.now() * 0.001;
+    const numSeats = 12;
+    const seatRadius = 202; // 座位中心距桌心距离
+    const itemRadius = 118; // 桌上物品摆放距桌心距离
+
+    // 辅助圆角矩形绘制函数
+    const drawRoundRect = (x, y, w, h, r) => {
+        if (typeof ctx.roundRect === 'function') {
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, r);
+        } else {
+            const rad = Math.min(Math.abs(w) / 2, Math.abs(h) / 2, r || 0);
+            ctx.beginPath();
+            ctx.moveTo(x + rad, y);
+            ctx.arcTo(x + w, y, x + w, y + h, rad);
+            ctx.arcTo(x + w, y + h, x, y + h, rad);
+            ctx.arcTo(x, y + h, x, y, rad);
+            ctx.arcTo(x, y, x + w, y, rad);
+            ctx.closePath();
+        }
+    };
+
+    // =========================================================================
+    // 1. 环绕大圆会议桌的 12 个高管战术人体工学转椅 (位置与桌上物品一一对应)
+    // 尺寸放大至与其他控制台椅子相当 (宽 24px 坐垫 + 28.8px 扶手间距)，面向会议桌中心
+    // 包含五星脚轮底座、深色皮革加厚软垫与双人体工学扶手靠背
+    // =========================================================================
+    for (let k = 0; k < numSeats; k++) {
+        // 角度偏移 15° (半个席位)，确保正北 (12点) 与正南 (6点) 留出宽达 105px 的主通行干道，角色自由行走畅通无阻
+        const theta = (k + 0.5) * (2 * Math.PI / numSeats) - Math.PI / 2;
+        const sx = cx + Math.cos(theta) * seatRadius;
+        const sy = cy + Math.sin(theta) * seatRadius;
+
+        ctx.save();
+        ctx.translate(sx, sy);
+        // 朝向桌心 (theta + Math.PI/2 使局部 +y 指向桌心，-y 朝向背部)
+        ctx.rotate(theta + Math.PI / 2);
+
+        // 1A. 座椅地坪柔和环境微阴影 (与放大后的座椅尺寸相匹配)
+        ctx.fillStyle = "rgba(0, 0, 0, 0.44)";
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 17, 15, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 1B. 重型五星滚轮合金底座 (Five-Star Heavy Swivel Base，与其它控制台座椅规格统一)
+        const hubY = -1;
+        ctx.fillStyle = "#0c1412";
+        ctx.beginPath();
+        ctx.arc(0, hubY, 3.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#475569";
+        ctx.lineWidth = 1.0;
+        ctx.stroke();
+
+        // 5 个星芒滚轮臂 (臂长 14.5px)
+        for (let a = 0; a < 5; a++) {
+            const spokeAng = a * (2 * Math.PI / 5) - Math.PI / 2;
+            const spkX = Math.cos(spokeAng) * 14.5;
+            const spkY = hubY + Math.sin(spokeAng) * 14.5;
+
+            ctx.strokeStyle = "#1e293b";
+            ctx.lineWidth = 2.6;
+            ctx.beginPath();
+            ctx.moveTo(0, hubY);
+            ctx.lineTo(spkX, spkY);
+            ctx.stroke();
+
+            ctx.strokeStyle = "#64748b";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(0, hubY);
+            ctx.lineTo(spkX, spkY);
+            ctx.stroke();
+
+            // 双轮静音尼龙脚轮
+            ctx.fillStyle = "#090d0c";
+            ctx.fillRect(spkX - 1.5, spkY - 1.5, 3.0, 3.0);
+        }
+
+        // 中心液压升降立柱镀铬顶盖
+        ctx.fillStyle = "#cbd5e1";
+        ctx.beginPath();
+        ctx.arc(0, hubY, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 1C. 高级炭黑真皮加厚座垫 (Executive Leather Seat Cushion)
+        // 尺寸放大到宽 24px, 深 17px (与其他工作台 24-26px 完全一致)
+        const seatGrad = ctx.createLinearGradient(-12, -7.5, 12, 9.5);
+        seatGrad.addColorStop(0, "#1c2421");
+        seatGrad.addColorStop(0.5, "#141b18");
+        seatGrad.addColorStop(1, "#0a0f0d");
+
+        drawRoundRect(-12, -7.5, 24, 17, 4.0);
+        ctx.fillStyle = seatGrad;
+        ctx.fill();
+
+        // 边缘战术翡翠缝线包边 (Piping Seam)
+        ctx.strokeStyle = "rgba(16, 185, 129, 0.45)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+
+        // 内部加厚坐垫与纵向微凹缝线
+        drawRoundRect(-9.5, -5.5, 19, 13, 3.0);
+        ctx.fillStyle = "#161e1b";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(5, 150, 105, 0.28)";
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.45)";
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(0, -5.5);
+        ctx.lineTo(0, 7.5);
+        ctx.stroke();
+
+        // 1D. 左右人体工学宽扶手 (Dual Ergonomic Armrests, 外跨度 28.8px)
+        // 左扶手
+        drawRoundRect(-14.4, -7.5, 2.8, 13, 1.4);
+        ctx.fillStyle = "#1e2926";
+        ctx.fill();
+        ctx.strokeStyle = "#334155";
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+
+        // 右扶手
+        drawRoundRect(11.6, -7.5, 2.8, 13, 1.4);
+        ctx.fillStyle = "#1e2926";
+        ctx.fill();
+        ctx.strokeStyle = "#334155";
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+
+        // 1E. 人体工学加宽靠背与腰托 (Sculpted High-Back Backrest，宽 22px，面向桌心)
+        drawRoundRect(-11, -14.5, 22, 7.0, 3.0);
+        ctx.fillStyle = "#151d1a";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(16, 185, 129, 0.5)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+
+        // 后方金属背部支撑龙骨
+        ctx.fillStyle = "#334155";
+        ctx.fillRect(-2.5, -15.5, 5.0, 3.5);
+
+        // 柔软腰靠枕
+        drawRoundRect(-8, -11.5, 16, 3.0, 1.4);
+        ctx.fillStyle = "#202d28";
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    // =========================================================================
+    // 2. 大圆会议桌本体 (深色木制质感，类似已做好的讲台道具的红木/黑胡桃木纹理)
+    // 保持原本正圆形状 (radius = 155px)
+    // =========================================================================
+    ctx.save();
+
+    // 2A. 会议桌底层大型环境遮蔽阴影
+    ctx.fillStyle = "rgba(0, 0, 0, 0.52)";
+    ctx.beginPath();
+    ctx.arc(cx + 4, cy + 6, radius + 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 2B. 会议桌深色实木外倒角防撞重包边 (Solid Wood Chamfer Rim)
+    ctx.fillStyle = "#120503";
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 外轮廓翡翠装甲装饰环 (与 Level 8 外墙及讲台轮廓 #10b981 统一风格)
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    // 倒角分界暗缝
+    ctx.strokeStyle = "#080201";
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius - 2.5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 2C. 会议桌面主体：奢华深色红木/黑胡桃木底色与天然木纹 (Dark Mahogany / Walnut Grain)
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius - 3.5, 0, Math.PI * 2);
+    ctx.clip(); // 限制木纹在实木桌面范围内
+
+    // 模拟从左上角 45° 投射的全局柔和环境光深邃木质渐变
+    const woodGrad = ctx.createRadialGradient(cx - 45, cy - 45, 15, cx, cy, radius);
+    woodGrad.addColorStop(0, "#4a1c12");   // 受光面：深红胡桃木
+    woodGrad.addColorStop(0.35, "#34130a"); // 核心质感色：奢华黑胡桃木
+    woodGrad.addColorStop(0.70, "#220b06"); // 暗调区：深邃红木暗影
+    woodGrad.addColorStop(1, "#110402");   // 边缘深邃沉稳黑檀收边
+    ctx.fillStyle = woodGrad;
+    ctx.fill();
+
+    // 1) 真实同心微波木材年轮 (Concentric Wavy Tree Rings)
+    const ringRadii = [48, 62, 76, 90, 104, 118, 132, 144];
+    ringRadii.forEach((r, idx) => {
+        ctx.beginPath();
+        for (let a = 0; a <= Math.PI * 2 + 0.1; a += 0.1) {
+            const waveR = r + Math.sin(a * 7) * 1.3 + Math.cos(a * 13) * 0.7;
+            const px = cx + Math.cos(a) * waveR;
+            const py = cy + Math.sin(a) * waveR;
+            if (a === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.strokeStyle = (idx % 2 === 0) ? "rgba(92, 34, 18, 0.42)" : "rgba(18, 5, 2, 0.52)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+    });
+
+    // 2) 放射状木质射线微纹 (Radial Medullary Rays)
+    for (let rDeg = 0; rDeg < 360; rDeg += 15) {
+        const rad = rDeg * Math.PI / 180;
+        const x1 = cx + Math.cos(rad) * 46;
+        const y1 = cy + Math.sin(rad) * 46;
+        const x2 = cx + Math.cos(rad) * (radius - 5);
+        const y2 = cy + Math.sin(rad) * (radius - 5);
+        ctx.strokeStyle = "rgba(92, 34, 18, 0.18)";
+        ctx.lineWidth = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+    }
+
+    // 3) 桌面高光漆面斜向漫反射 (Polished Lacquer Satin Sheen)
+    const sheenGrad = ctx.createLinearGradient(cx - 150, cy - 150, cx + 150, cy + 150);
+    sheenGrad.addColorStop(0, "rgba(255, 255, 255, 0.08)");
+    sheenGrad.addColorStop(0.35, "rgba(255, 255, 255, 0.03)");
+    sheenGrad.addColorStop(0.7, "transparent");
+    sheenGrad.addColorStop(1, "rgba(255, 255, 255, 0.02)");
+    ctx.fillStyle = sheenGrad;
+    ctx.fill();
+
+    // 4) 桌面席位分区同心黄铜/翡翠嵌条 (Inlaid Trim Rings)
+    ctx.strokeStyle = "rgba(16, 185, 129, 0.4)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 92, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(16, 185, 129, 0.3)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 148, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore(); // 结束木纹裁剪
+
+    // =========================================================================
+    // 3. 会议桌中央高科技全向音频与全息战术核心 (Boardroom Central Hub)
+    // =========================================================================
+    const hubGrad = ctx.createRadialGradient(cx, cy, 5, cx, cy, 44);
+    hubGrad.addColorStop(0, "#081410");
+    hubGrad.addColorStop(0.7, "#030a08");
+    hubGrad.addColorStop(1, "#010504");
+    ctx.fillStyle = hubGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 44, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#0d4a3c";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // 环形 360° 全向会议麦克风透声微网格 (Acoustic Mesh Grille)
+    ctx.fillStyle = "#020705";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 38, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.35)";
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 38, 0, Math.PI * 2);
+    ctx.stroke();
+
+    for (let mg = 0; mg < 24; mg++) {
+        const ma = mg * (Math.PI * 2 / 24);
+        const mx = cx + Math.cos(ma) * 33;
+        const my = cy + Math.sin(ma) * 33;
+        ctx.fillStyle = "rgba(16, 185, 129, 0.65)";
+        ctx.beginPath(); ctx.arc(mx, my, 0.7, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // 中央全息投影透镜与微型战术状态光环 (Central Holo Projector Lens)
+    const holoPulse = Math.sin(time * 3.0) * 0.2 + 0.8;
+    ctx.fillStyle = "#010806";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = `rgba(0, 229, 255, ${0.75 * holoPulse})`;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.fillStyle = `rgba(0, 229, 255, ${0.15 * holoPulse})`;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 全息十字微准星
+    ctx.strokeStyle = "rgba(0, 229, 255, 0.75)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy); ctx.lineTo(cx + 7, cy);
+    ctx.moveTo(cx, cy - 7); ctx.lineTo(cx, cy + 7);
+    ctx.stroke();
+
+    // 4 枚十字方位微型状态 LED
+    for (let cLed = 0; cLed < 4; cLed++) {
+        const ca = cLed * (Math.PI / 2);
+        const clx = cx + Math.cos(ca) * 23;
+        const cly = cy + Math.sin(ca) * 23;
+        ctx.fillStyle = "#00FF66";
+        ctx.beginPath(); ctx.arc(clx, cly, 0.8, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // =========================================================================
+    // 4. 会议桌上排满一圈的 12 席高精度战术终端、TOP SECRET 机密文件夹与金属签字笔
+    // 与四周 12 个座位一一对应，严密顺应圆桌曲率排列
+    // 关键朝向规范：
+    // - 局部坐标系中，+y 朝向会议桌中心，-y 朝向就坐席位
+    // - 笔：笔帽与笔尖朝向桌子中心 (+y)，笔尾朝向座位 (-y)
+    // - 文件夹：文件顶部/回形针/TOP SECRET 印章朝向桌子中心 (+y)，公文正文向下流向座位 (-y)
+    // - 平板：顶部边框/摄像头/状态栏朝向桌子中心 (+y)，底部触控条朝向座位 (-y)
+    // =========================================================================
+    for (let k = 0; k < numSeats; k++) {
+        const theta = (k + 0.5) * (2 * Math.PI / numSeats) - Math.PI / 2;
+        const wx = cx + Math.cos(theta) * itemRadius;
+        const wy = cy + Math.sin(theta) * itemRadius;
+
+        ctx.save();
+        ctx.translate(wx, wy);
+        // 朝向桌心 (+y 指向会议桌中心，-y 指向就座人员)
+        ctx.rotate(theta + Math.PI / 2);
+
+        // 4A. 绝密文件夹 / 战术简报公文 (位于座位左侧 x: -18.5 到 -4.5)
+        // 规范朝向：文件顶部（回形针、TOP SECRET 戳记）朝向桌心 (+y)，纸张底部朝向座位 (-y)
+        const docX = -18.5;
+        const docY = -7.5;
+        const docW = 14.0;
+        const docH = 15.5;
+
+        // 文件夹底层暗影
+        ctx.fillStyle = "rgba(0, 0, 0, 0.38)";
+        ctx.fillRect(docX + 0.8, docY + 0.8, docW, docH);
+
+        // 文件夹真皮封套 (深蓝黑 #0c131d 搭配金色护角)
+        ctx.fillStyle = "#0c131d";
+        ctx.fillRect(docX, docY, docW, docH);
+        ctx.strokeStyle = "#1e293b";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(docX, docY, docW, docH);
+
+        // 4 角黄铜/金属防磨包角
+        ctx.fillStyle = "#d97706";
+        ctx.fillRect(docX, docY, 1.4, 1.4);
+        ctx.fillRect(docX + docW - 1.4, docY, 1.4, 1.4);
+        ctx.fillRect(docX, docY + docH - 1.4, 1.4, 1.4);
+        ctx.fillRect(docX + docW - 1.4, docY + docH - 1.4, 1.4, 1.4);
+
+        // 左侧皮革书脊压痕线
+        ctx.strokeStyle = "#05090f";
+        ctx.lineWidth = 1.0;
+        ctx.beginPath();
+        ctx.moveTo(docX + 1.8, docY);
+        ctx.lineTo(docX + 1.8, docY + docH);
+        ctx.stroke();
+
+        // 内部雪白机密公文纸张 (内页摊开效果)
+        const pX = docX + 2.5;
+        const pY = docY + 1.2;
+        const pW = docW - 3.5;
+        const pH = docH - 2.4;
+        ctx.fillStyle = "#f1f5f9";
+        ctx.fillRect(pX, pY, pW, pH);
+
+        // 顶部金属票夹 / 镀金回形针 (朝向桌心 +y，即 pY + pH 顶部)
+        ctx.fillStyle = "#f59e0b";
+        ctx.fillRect(pX + 1.2, pY + pH - 1.6, 2.2, 1.8);
+        ctx.strokeStyle = "#b45309";
+        ctx.lineWidth = 0.4;
+        ctx.strokeRect(pX + 1.2, pY + pH - 1.6, 2.2, 1.8);
+
+        // 绝密公文右上角红色 TOP SECRET 戳记 (朝向桌心 +y，右上角)
+        ctx.fillStyle = "rgba(239, 68, 68, 0.25)";
+        ctx.fillRect(pX + pW - 4.4, pY + pH - 3.2, 3.6, 2.0);
+        ctx.strokeStyle = "#ef4444";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(pX + pW - 4.4, pY + pH - 3.2, 3.6, 2.0);
+
+        // 纸张上 4 排深灰微型横向打印正文线条 (从 +y 朝向 -y 排列)
+        ctx.strokeStyle = "#94a3b8";
+        ctx.lineWidth = 0.5;
+        for (let rw = 0; rw < 4; rw++) {
+            const ry = pY + pH - 4.8 - rw * 1.8;
+            ctx.beginPath();
+            ctx.moveTo(pX + 1.2, ry);
+            ctx.lineTo(pX + pW - 1.2, ry);
+            ctx.stroke();
+        }
+
+        // 4B. 金属行政签字笔 / 战术手写笔 (摆放在文件夹与平板电脑之间)
+        // 关键规范：笔帽与笔尖朝向桌子中心 (+y)，笔尾朝向座位 (-y)
+        const penX = -2.8;
+        const penW = 1.8;
+        const penTailY = -5.8;  // 笔尾朝向座位 (-y)
+        const penNibY = 6.2;    // 笔尖朝向桌心 (+y)
+        const penBodyH = 12.0;
+
+        // 笔下细微投影
+        ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+        ctx.fillRect(penX + 0.6, penTailY + 0.6, penW, penBodyH);
+
+        // 1) 笔尾 (Pen End Cap / Tail，朝向座位 -y)
+        ctx.fillStyle = "#475569";
+        drawRoundRect(penX - 0.1, penTailY, penW + 0.2, 1.6, 0.7);
+        ctx.fill();
+
+        // 2) 钛黑金属笔杆主体 (Pen Barrel)
+        const penGrad = ctx.createLinearGradient(penX, 0, penX + penW, 0);
+        penGrad.addColorStop(0, "#0f172a");
+        penGrad.addColorStop(0.5, "#334155");
+        penGrad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = penGrad;
+        ctx.fillRect(penX, penTailY + 1.6, penW, 6.5);
+
+        // 3) 中段高亮镀铬饰环 (Chrome Accent Ring)
+        ctx.fillStyle = "#cbd5e1";
+        ctx.fillRect(penX - 0.15, penTailY + 8.1, penW + 0.3, 0.9);
+
+        // 4) 笔帽 (Pen Cap，朝向桌心 +y)
+        ctx.fillStyle = "#090d16";
+        ctx.fillRect(penX - 0.1, penTailY + 9.0, penW + 0.2, 2.5);
+
+        // 笔夹 (Pocket Clip，附着在笔帽上，朝向右侧)
+        ctx.strokeStyle = "#cbd5e1";
+        ctx.lineWidth = 0.55;
+        ctx.beginPath();
+        ctx.moveTo(penX + penW + 0.2, penTailY + 8.5);
+        ctx.lineTo(penX + penW + 0.2, penTailY + 11.2);
+        ctx.stroke();
+
+        // 5) 黄金色锥形笔尖 (Golden Nib，精准朝向桌心 +y 尖锐聚拢)
+        ctx.fillStyle = "#fbbf24";
+        ctx.beginPath();
+        ctx.moveTo(penX, penTailY + 11.5);
+        ctx.lineTo(penX + penW, penTailY + 11.5);
+        ctx.lineTo(penX + penW / 2, penNibY);
+        ctx.closePath();
+        ctx.fill();
+
+        // 铱金笔尖微亮点
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(penX + penW / 2, penNibY - 0.2, 0.3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 4C. 平板电脑 / 战术终端 (位于座位右侧 x: 1.5 到 18.0)
+        // 规范朝向：顶部边框与状态栏朝向桌心 (+y)，底部触控条朝向座位 (-y)
+        const tabX = 1.5;
+        const tabY = -6.0;
+        const tabW = 16.5;
+        const tabH = 12.5;
+
+        // 终端微阴影
+        ctx.fillStyle = "rgba(0, 0, 0, 0.38)";
+        ctx.fillRect(tabX + 0.8, tabY + 0.8, tabW, tabH);
+
+        // 钛灰哑光外壳
+        drawRoundRect(tabX, tabY, tabW, tabH, 1.6);
+        ctx.fillStyle = "#0b131c";
+        ctx.fill();
+        ctx.strokeStyle = "#1e293b";
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+
+        // 顶部边框微型前置摄像头与光线传感器 (朝向桌心 +y 边缘)
+        ctx.fillStyle = "#04080c";
+        ctx.beginPath();
+        ctx.arc(tabX + tabW / 2, tabY + tabH - 0.7, 0.55, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 战术蓝光液晶显示屏
+        const scrX = tabX + 1.2;
+        const scrY = tabY + 1.2;
+        const scrW = tabW - 2.4;
+        const scrH = tabH - 2.4;
+
+        const scrGrad = ctx.createLinearGradient(scrX, scrY + scrH, scrX + scrW, scrY);
+        scrGrad.addColorStop(0, "#032845");
+        scrGrad.addColorStop(0.5, "#0b355c");
+        scrGrad.addColorStop(1, "#061c3a");
+        ctx.fillStyle = scrGrad;
+        ctx.fillRect(scrX, scrY, scrW, scrH);
+
+        ctx.strokeStyle = "#00CCFF";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(scrX, scrY, scrW, scrH);
+
+        // 屏幕高精 UI 与动态频谱波形
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(scrX, scrY, scrW, scrH);
+        ctx.clip();
+
+        // 水平细微扫描线
+        ctx.strokeStyle = "rgba(0, 229, 255, 0.18)";
+        ctx.lineWidth = 0.4;
+        for (let l = scrY + 1.2; l < scrY + scrH; l += 1.6) {
+            ctx.beginPath();
+            ctx.moveTo(scrX, l);
+            ctx.lineTo(scrX + scrW, l);
+            ctx.stroke();
+        }
+
+        // 实时波形曲线 (居中展开)
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 0.65;
+        ctx.beginPath();
+        for (let bx = 0; bx < scrW - 1; bx += 1.2) {
+            const by = scrY + scrH / 2 + Math.sin(time * 5.0 + bx * 0.9 + k * 1.5) * 1.4;
+            if (bx === 0) ctx.moveTo(scrX + 0.5 + bx, by);
+            else ctx.lineTo(scrX + 0.5 + bx, by);
+        }
+        ctx.stroke();
+
+        // 顶部微型战术状态文字条 (朝向桌心 +y)
+        ctx.fillStyle = "rgba(0, 229, 255, 0.75)";
+        ctx.fillRect(scrX + 1.0, scrY + scrH - 1.4, 4.0, 0.6);
+
+        // 底部触控指示条 (朝向座位 -y)
+        ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+        ctx.fillRect(scrX + scrW / 2 - 2.0, scrY + 0.6, 4.0, 0.5);
+
+        // 45° 玻璃反光
+        ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+        ctx.beginPath();
+        ctx.moveTo(scrX, scrY);
+        ctx.lineTo(scrX + 4.5, scrY);
+        ctx.lineTo(scrX + 1.5, scrY + scrH);
+        ctx.lineTo(scrX, scrY + scrH);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore();
+
+        // 平板右上角绿/蓝微型指示灯点 (朝向桌心 +y 侧)
+        ctx.fillStyle = (k % 3 === 0) ? "#00FF66" : "#00E5FF";
+        ctx.beginPath();
+        ctx.arc(scrX + scrW - 1.2, scrY + scrH - 1.2, 0.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    // =========================================================================
+    // 5. 大圆会议桌悬挂发光灯环 (圆环形灯环保持原本形状与颜色，做出一颗一颗微型灯珠和发光点亮效果)
+    // 半径严格保持原本 143px，配色保持天空蓝/极光青蓝 (rgba(56, 189, 248, 0.95) 与 #00E5FF)
+    // =========================================================================
+    const ringRadius = 143;
+    const numBeads = 64; // 64 颗高精度独立 LED 灯珠
+
+    // 5A. 灯环在木质桌面上的宏大发光光晕与泛光投影
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.24)";
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 5B. 原原本本的圆环灯槽基座导轨 (宽 8px 的金属灯环凹槽)
+    ctx.strokeStyle = "#041620";
+    ctx.lineWidth = 7.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 双侧导轨金属边缘线
+    ctx.strokeStyle = "#0284c7";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius - 3.8, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius + 3.8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 导轨中央高亮青蓝光纤发光管
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.65)";
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 5C. 一颗一颗清晰可辨的 LED 灯珠与点亮效果 ("做出一颗一颗灯珠和点亮的效果")
+    for (let b = 0; b < numBeads; b++) {
+        const bAngle = b * (Math.PI * 2 / numBeads);
+        const bx = cx + Math.cos(bAngle) * ringRadius;
+        const by = cy + Math.sin(bAngle) * ringRadius;
+
+        // 柔和的顺时针巡回发光微波动效 (点亮闪耀质感)
+        const beadPulse = Math.sin(time * 3.2 + b * 0.35) * 0.18 + 0.82;
+
+        // 1) 微型灯珠固定金属底座
+        ctx.fillStyle = "#010e17";
+        ctx.beginPath();
+        ctx.arc(bx, by, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#0369a1";
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+
+        // 2) 独立灯珠发光光晕 (Illuminated Glow Corona)
+        ctx.fillStyle = `rgba(56, 189, 248, ${0.48 * beadPulse})`;
+        ctx.beginPath();
+        ctx.arc(bx, by, 3.8, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 3) 原版经典青蓝发光灯体核心 (Electric Cyan Phosphor Lens)
+        ctx.fillStyle = "#00E5FF";
+        ctx.beginPath();
+        ctx.arc(bx, by, 1.35, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 4) 极其明亮的一颗颗点亮发光极小亮点 (Specular Lit Phosphor Core)
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(bx, by, 0.65, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.restore();
+}
+
+window.drawConferenceTableSystem = drawConferenceTableSystem;
+
 const LEVEL_8_TEST = {
     id: "level8_test",
     name: "第 8 关 · 隔离测试关卡",
@@ -772,67 +1419,16 @@ const LEVEL_8_TEST = {
                 hideLabel: true
             },
 
-            // E. 正中央圆台
+            // E. 正中央大圆会议桌系统 (保留正圆实体碰撞与物理阻挡，由专属绘制闭包渲染深色木纹、一圈平板电脑文件夹笔、发光灯珠灯环与环绕座位)
             {
                 type: 'solid',
                 circle: { cx: cx, cy: cy, radius: 155 },
-                innerRing: { radius: 143, width: 8 },
-                label: 'CENTRAL ROUND TABLE',
-                hideLabel: true
-            },
-
-            // F. 环绕在中央圆台四周的 4 个加长圆弧结构
-            {
-                type: 'solid',
-                arc: {
-                    cx: cx,
-                    cy: cy,
-                    radius: 180,
-                    startAngle: -1.487,
-                    endAngle: -0.084,
-                    thickness: 20
-                },
-                label: 'CURVED ARC NE',
-                hideLabel: true
-            },
-            {
-                type: 'solid',
-                arc: {
-                    cx: cx,
-                    cy: cy,
-                    radius: 180,
-                    startAngle: 0.084,
-                    endAngle: 1.487,
-                    thickness: 20
-                },
-                label: 'CURVED ARC SE',
-                hideLabel: true
-            },
-            {
-                type: 'solid',
-                arc: {
-                    cx: cx,
-                    cy: cy,
-                    radius: 180,
-                    startAngle: 1.655,
-                    endAngle: 3.058,
-                    thickness: 20
-                },
-                label: 'CURVED ARC SW',
-                hideLabel: true
-            },
-            {
-                type: 'solid',
-                arc: {
-                    cx: cx,
-                    cy: cy,
-                    radius: 180,
-                    startAngle: 3.226,
-                    endAngle: 4.628,
-                    thickness: 20
-                },
-                label: 'CURVED ARC NW',
-                hideLabel: true
+                label: 'CENTRAL CONFERENCE TABLE',
+                displayName: 'CONFERENCE TABLE',
+                hideLabel: true,
+                draw: (ctx) => {
+                    drawConferenceTableSystem(ctx, cx, cy, 155);
+                }
             },
 
             // H. 南侧 6 个控制长方台
@@ -871,18 +1467,6 @@ const LEVEL_8_TEST = {
                     ctx.fillStyle = '#0a101d';
                     ctx.fill();
 
-                    // --- 2. 中间大圆形内部悬挂发光灯环 ---
-                    ctx.beginPath();
-                    ctx.arc(cx, cy, 143, 0, Math.PI * 2);
-                    ctx.strokeStyle = 'rgba(56, 189, 248, 0.95)';
-                    ctx.lineWidth = 8;
-                    ctx.stroke();
-
-                    ctx.beginPath();
-                    ctx.arc(cx, cy, 143, 0, Math.PI * 2);
-                    ctx.strokeStyle = '#e0f2fe';
-                    ctx.lineWidth = 2;
-                    ctx.stroke();
 
                     // --- 3. 最上方 3 大高科技控制显示屏 ---
                     ctx.save();
