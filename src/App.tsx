@@ -330,6 +330,14 @@ export default function App() {
   const [showLevelSelect, setShowLevelSelect] = useState(false);
   const [gameLoaded, setGameLoaded] = useState(false);
   const [activeWeapon, setActiveWeapon] = useState<number>(1);
+  // 实验 v6：步枪快慢机状态（L7/L8），轮询 window.__l7RifleAutoMode 同步
+  const [rifleAutoMode, setRifleAutoMode] = useState<boolean>(false);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setRifleAutoMode(!!(window as any).__l7RifleAutoMode);
+    }, 200);
+    return () => clearInterval(timer);
+  }, []);
   const [selectedLevelIndex, setSelectedLevelIndex] = useState<number>(() => (GAME_CONFIG.ENABLE_LEVEL_0 ? 0 : 1));
   const [showObjectiveModal, setShowObjectiveModal] = useState(false);
   const [objectiveStats, setObjectiveStats] = useState<{
@@ -627,19 +635,20 @@ export default function App() {
 
   const currentLevelId = (window as any).levelManager?.getCurrentLevel()?.id;
   const isLevel0 = (selectedLevelIndex === 0) || (currentLevelId === 'level0_test');
+  const isL78 = (selectedLevelIndex === 7 || selectedLevelIndex === 8) || (currentLevelId === 'level7_lab' || currentLevelId === 'level8_test');
 
   return (
-    <div className={`relative w-full h-screen overflow-hidden bg-[#020403] font-mono select-none ${isLevel0 ? 'text-[#FF3344]' : 'text-[#00FF66]'}`}>
+    <div className={`relative w-full h-screen overflow-hidden bg-[#020403] font-mono select-none ${isLevel0 ? 'text-[#FF3344]' : (isL78 ? 'text-[#10b981]' : 'text-[#00FF66]')}`}>
       {/* HUD Bar (Top Right Controls in Playing Mode) */}
       {viewState === 'playing' && (
         <div className={`absolute top-3 right-5 z-30 flex items-center gap-1.5 bg-black/80 backdrop-blur border px-2 py-1.5 rounded text-xs shadow-lg ${
           isLevel0
             ? 'border-[#FF3344]/50 text-[#FF3344] shadow-[#FF3344]/20'
-            : 'border-[#00FF66]/40 text-[#00FF66] shadow-[#00FF66]/10'
+            : (isL78 ? 'border-[#10b981]/40 text-[#10b981] shadow-[#10b981]/10' : 'border-[#00FF66]/40 text-[#00FF66] shadow-[#00FF66]/10')
         }`}>
           {/* Target Objective Indicator */}
           {GAME_CONFIG.ENABLE_STORY_BRIEFING && (
-            <div className="hidden xl:flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/60 border border-[#00FF66]/30 text-[11px] text-[#00FF66]">
+            <div className={`hidden xl:flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/60 border text-[11px] ${isLevel0 ? 'border-[#FF3344]/30 text-[#FF3344]' : (isL78 ? 'border-[#10b981]/30 text-[#10b981]' : 'border-[#00FF66]/30 text-[#00FF66]')}`}>
               <span>🎯</span>
               <span className="font-bold truncate max-w-[200px]" title={t.levelBriefing.levels[selectedLevelIndex]?.objective}>
                 {t.levelBriefing.levels[selectedLevelIndex]?.objective || (lang === 'zh' ? '坚守防线' : 'Hold Defense')}
@@ -659,41 +668,13 @@ export default function App() {
             </button>
           )}
 
-          {/* Quick Weapon Selection */}
-          <div className={`hidden lg:flex items-center gap-1 pr-1.5 border-r my-0.5 ${isLevel0 ? 'border-[#FF3344]/20' : 'border-[#00FF66]/20'}`}>
-            {(isLevel0 ? [
-              { id: 8, name: lang === 'zh' ? '三管猎枪' : 'Triple Shotgun' },
-              { id: 9, name: lang === 'zh' ? '符文光镰' : 'Rune Scythe' },
-              { id: 10, name: lang === 'zh' ? '熔岩阵' : 'Lava Circle' },
-              { id: 11, name: lang === 'zh' ? '灵魂汲取' : 'Soul Siphon' },
-            ] : [
-              { id: 1, name: t.weapons.rifle },
-              { id: 2, name: t.weapons.pistol },
-              { id: 3, name: t.weapons.smg },
-              { id: 4, name: t.weapons.sniper },
-              { id: 5, name: t.weapons.grenade },
-            ]).map((wp) => (
-              <button
-                key={wp.id}
-                onClick={() => handleSelectWeapon(wp.id)}
-                className={`px-1.5 py-0.5 rounded text-[11px] transition-colors cursor-pointer ${
-                  activeWeapon === wp.id
-                    ? (isLevel0 ? 'bg-[#FF3344] text-black font-bold shadow-[0_0_8px_rgba(255,51,68,0.5)]' : 'bg-[#00FF66] text-black font-bold shadow-[0_0_8px_rgba(0,255,102,0.5)]')
-                    : (isLevel0 ? 'hover:bg-[#FF3344]/20 text-[#FF3344]' : 'hover:bg-[#00FF66]/20 text-[#00FF66]')
-                }`}
-              >
-                {wp.name}
-              </button>
-            ))}
-          </div>
-
           {/* Language Toggle in Top Right */}
           <button
             onClick={toggleLanguage}
             className={`flex items-center gap-1 px-2 py-1 rounded border transition-all font-bold cursor-pointer text-xs ${
               isLevel0
                 ? 'bg-[#FF3344]/10 hover:bg-[#FF3344]/25 border-[#FF3344]/40 text-[#FF3344]'
-                : 'bg-[#00FF66]/10 hover:bg-[#00FF66]/25 border-[#00FF66]/40 text-[#00FF66]'
+                : (isL78 ? 'bg-[#10b981]/10 hover:bg-[#10b981]/25 border-[#10b981]/40 text-[#10b981]' : 'bg-[#00FF66]/10 hover:bg-[#00FF66]/25 border-[#00FF66]/40 text-[#00FF66]')
             }`}
             title={lang === 'zh' ? 'Switch to English' : '切换为中文'}
           >
@@ -706,7 +687,7 @@ export default function App() {
             className={`flex items-center gap-1 px-2 py-1 rounded border transition-all cursor-pointer text-xs ${
               isLevel0
                 ? 'bg-[#FF3344]/10 hover:bg-[#FF3344]/20 border-[#FF3344]/30 text-[#FF3344]'
-                : 'bg-[#00FF66]/10 hover:bg-[#00FF66]/20 border-[#00FF66]/30 text-[#00FF66]'
+                : (isL78 ? 'bg-[#10b981]/10 hover:bg-[#10b981]/20 border-[#10b981]/30 text-[#10b981]' : 'bg-[#00FF66]/10 hover:bg-[#00FF66]/20 border-[#00FF66]/30 text-[#00FF66]')
             }`}
             title={lang === 'zh' ? '查看操作指南' : 'How to Play'}
           >
@@ -724,7 +705,7 @@ export default function App() {
             className={`flex items-center gap-1 px-2 py-1 rounded border transition-all cursor-pointer text-xs ${
               isLevel0
                 ? 'bg-[#FF3344]/10 hover:bg-[#FF3344]/20 border-[#FF3344]/30 text-[#FF3344]'
-                : 'bg-[#00FF66]/10 hover:bg-[#00FF66]/20 border-[#00FF66]/30 text-[#00FF66]'
+                : (isL78 ? 'bg-[#10b981]/10 hover:bg-[#10b981]/20 border-[#10b981]/30 text-[#10b981]' : 'bg-[#00FF66]/10 hover:bg-[#00FF66]/20 border-[#00FF66]/30 text-[#00FF66]')
             }`}
             title={lang === 'zh' ? '选择关卡' : 'Select Level'}
           >
@@ -737,7 +718,7 @@ export default function App() {
             className={`flex items-center gap-1 px-2 py-1 rounded border transition-all font-bold cursor-pointer text-xs ${
               isPaused
                 ? 'bg-[#FFCC00]/20 hover:bg-[#FFCC00]/40 border-[#FFCC00] text-[#FFCC00]'
-                : (isLevel0 ? 'bg-[#FF3344]/15 hover:bg-[#FF3344]/30 border-[#FF3344]/50 text-[#FF3344]' : 'bg-[#00FF66]/15 hover:bg-[#00FF66]/30 border-[#00FF66]/50 text-[#00FF66]')
+                : (isLevel0 ? 'bg-[#FF3344]/15 hover:bg-[#FF3344]/30 border-[#FF3344]/50 text-[#FF3344]' : (isL78 ? 'bg-[#10b981]/15 hover:bg-[#10b981]/30 border-[#10b981]/50 text-[#10b981]' : 'bg-[#00FF66]/15 hover:bg-[#00FF66]/30 border-[#00FF66]/50 text-[#00FF66]'))
             }`}
             title={lang === 'zh' ? '暂停/恢复 (ESC/P)' : 'Pause/Resume (ESC/P)'}
           >
@@ -762,6 +743,42 @@ export default function App() {
             <Home className="w-3.5 h-3.5" />
             <span>{t.hudMenu}</span>
           </button>
+        </div>
+      )}
+
+      {/* Vertical Weapon List (below top bar, left of wave counter) */}
+      {viewState === 'playing' && (
+        <div className="absolute top-[63px] right-[210px] z-30 hidden lg:flex flex-col items-stretch gap-0.5 bg-black/60 rounded border border-white/10 px-1 py-1">
+          {(isLevel0 ? [
+            { id: 8, name: lang === 'zh' ? '三管猎枪' : 'Triple Shotgun' },
+            { id: 9, name: lang === 'zh' ? '符文光镰' : 'Rune Scythe' },
+            { id: 10, name: lang === 'zh' ? '熔岩阵' : 'Lava Circle' },
+            { id: 11, name: lang === 'zh' ? '灵魂汲取' : 'Soul Siphon' },
+          ] : [
+            { id: 1, name: t.weapons.rifle },
+            { id: 2, name: t.weapons.pistol },
+            { id: 3, name: isL78 ? (lang === 'zh' ? '3: 霰弹枪' : '3: Shotgun') : t.weapons.smg },
+            { id: 4, name: t.weapons.sniper },
+            { id: 5, name: t.weapons.grenade },
+          ]).map((wp) => (
+            <button
+              key={wp.id}
+              onClick={() => handleSelectWeapon(wp.id)}
+              className={`px-2 py-0.5 rounded text-[11px] text-left transition-colors cursor-pointer flex items-center gap-1.5 ${
+                activeWeapon === wp.id
+                  ? (isLevel0 ? 'bg-[#FF3344] text-black font-bold shadow-[0_0_8px_rgba(255,51,68,0.5)]' : (isL78 ? 'bg-[rgba(56,189,248,0.15)] text-[#38bdf8] font-bold shadow-[0_0_8px_rgba(56,189,248,0.5)]' : 'bg-[#00FF66] text-black font-bold shadow-[0_0_8px_rgba(0,255,102,0.5)]'))
+                  : (isLevel0 ? 'hover:bg-[#FF3344]/20 text-[#FF3344]' : (isL78 ? 'hover:bg-[#10b981]/20 text-[#10b981]' : 'hover:bg-[#00FF66]/20 text-[#00FF66]'))
+              }`}
+            >
+              {/* 实验 v6：快慢机状态指示——仅 L7/L8 且选中步枪时显示，在武器名左侧 */}
+              {isL78 && wp.id === 1 && activeWeapon === 1 && (
+                <span className={`text-[10px] font-bold shrink-0 ${isLevel0 ? 'text-[#FF3344]' : (isL78 ? 'text-[#38bdf8]' : 'text-[#00FF66]')}`}>
+                  <span className="text-[9px]">[V]</span> {rifleAutoMode ? (lang === 'zh' ? '全自动' : 'AUTO') : (lang === 'zh' ? '半自动' : 'SEMI')}
+                </span>
+              )}
+              {wp.name}
+            </button>
+          ))}
         </div>
       )}
 

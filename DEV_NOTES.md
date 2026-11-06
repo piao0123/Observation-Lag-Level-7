@@ -615,3 +615,81 @@ const isL7SpecialModel = isPlayer && (getCurrentLevelId() === 'level7_lab') && p
 - **现在两个分支画一样的模型（占位）**，等特殊模型设计好后，只改 `isL7SpecialModel` 为真时那个分支里的颜色/形状。
 - **不要改 `isPlayer` 判断本身**，不要在其他地方加模型分支，所有模型切换走 `player.modelVariant` 这一个字段。
 - 切换触发条件（按键、拾取、剧情点）由关卡设计定，调 `setPlayerModelVariant()` 就行，不用改引擎。
+
+---
+## Record 014：角色模型新画法（参考用，未启用，2026-11-06）
+
+v1–v7 实验版 drawAgent 里加过的人物模型优化，v8 已换回原版画法（用户 verdict：渐变/描边没质变）。
+以下代码存档，日后设计**新敌人**外观时参考，不要直接启用到玩家/现有敌人身上。
+
+### 1. lightenColor 辅助函数（hex 提亮）
+```js
+function lightenColor(hex, amt) {
+    const n = hex.replace('#', '');
+    const r = Math.min(255, parseInt(n.substring(0, 2), 16) + amt);
+    const g = Math.min(255, parseInt(n.substring(2, 4), 16) + amt);
+    const b = Math.min(255, parseInt(n.substring(4, 6), 16) + amt);
+    return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+}
+```
+
+### 2. 身体/头盔径向渐变（Section 1.5，放在颜色分支后、四肢前）
+```js
+    // ------------------- 1.5 实验优化：身体渐变 + 描边光晕 (2026-11-06) -------------------
+    // 只给玩家和普通守卫加（恶魔/干扰者/观察者保持原样）
+    const isStandardAgent = isPlayer || (!isDemon && !isJammer && !isObserver);
+    // 身体主色径向渐变：中心亮 → 边缘暗（立体感）
+    let bodyGrad = null;
+    let helmetGrad = null;
+    if (isStandardAgent) {
+        bodyGrad = ctx.createRadialGradient(0, 0, 2, -1, 0, 14);
+        bodyGrad.addColorStop(0, lightenColor(baseTacticalColor, 40));
+        bodyGrad.addColorStop(1, baseTacticalColor);
+        helmetGrad = ctx.createRadialGradient(-0.5, 0, 1, -0.5, 0, 9);
+        helmetGrad.addColorStop(0, lightenColor(gearColor, 35));
+        helmetGrad.addColorStop(1, gearColor);
+    }
+```
+
+### 3. 躯干渐变填充 + 光晕描边 + 胸前背心横纹（替代原版 3.1）
+```js
+    // 实验优化：身体渐变 + 光晕描边（只给玩家/普通守卫）
+    if (isStandardAgent && bodyGrad) {
+        ctx.fillStyle = bodyGrad;
+        ctx.shadowColor = mainColor;
+        ctx.shadowBlur = 8;
+    } else {
+        ctx.fillStyle = baseTacticalColor;
+    }
+    ctx.strokeStyle = mainColor;
+    ctx.lineWidth = isInBlind ? 2.8 : 1.8;
+    ctx.beginPath();
+    ctx.roundRect(-10, -10, 18, 20, 4.5);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0; // 光晕只作用于躯干基底，后续不再发光
+    // 实验优化：胸前战术背心横纹（两条亮色横线，区别于 MOLLE 织带）
+    if (isStandardAgent) {
+        ctx.strokeStyle = mainColor;
+        ctx.globalAlpha = alpha * 0.85;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(-6, -3); ctx.lineTo(4, -3); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(-6, 2); ctx.lineTo(4, 2); ctx.stroke();
+        ctx.globalAlpha = alpha;
+    }
+```
+
+### 4. 头盔渐变 + 反光带（替代原版 7.2 头盔 fillStyle）
+```js
+    // 实验优化：头盔渐变（只给玩家/普通守卫）
+    ctx.fillStyle = (isStandardAgent && helmetGrad) ? helmetGrad : gearColor;
+    ctx.beginPath(); ctx.arc(-0.5, 0, 8.8, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = mainColor; ctx.lineWidth = 1.6; ctx.stroke();
+    // 实验优化：头盔反光带（亮色细横带，横贯头盔中部）
+    if (isStandardAgent) {
+        ctx.fillStyle = mainColor;
+        ctx.globalAlpha = alpha * 0.9;
+        ctx.fillRect(-8.5, -1.2, 16, 2.2);
+        ctx.globalAlpha = alpha;
+    }
+```

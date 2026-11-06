@@ -384,67 +384,66 @@ class SoundManager {
     }
 
     // DSP 写实玩家开枪：增强突刺与火药冲击力
+    // 实验优化：三层叠加 + lowpass 扫频 + 随机化 (2026-11-06)
     playSynthesizedGunshot() {
         if (!this.ctx) return;
         const now = this.ctx.currentTime;
-        
-        // A. 爆鸣白噪音
-        const bufferSize = this.ctx.sampleRate * 0.3;
+        // 随机化：音调 ±5%、时长 ±10%，避免重复感
+        const detune = 1 + (Math.random() - 0.5) * 0.1;
+        const durScale = 1 + (Math.random() - 0.5) * 0.2;
+
+        // 总 lowpass 滤波器：3000Hz → 200Hz，0.1s 内指数衰减（真实枪声频谱特征）
+        const masterFilter = this.ctx.createBiquadFilter();
+        masterFilter.type = 'lowpass';
+        masterFilter.frequency.setValueAtTime(3000 * detune, now);
+        masterFilter.frequency.exponentialRampToValueAtTime(200, now + 0.1 * durScale);
+        masterFilter.connect(this.ctx.destination);
+
+        // A. 高频爆裂：白噪音 + highpass 2000Hz，0.05s（枪口爆裂）
+        const bufferSize = this.ctx.sampleRate * 0.05 * durScale;
         const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
         const data = buffer.getChannelData(0);
         for (let i = 0; i < bufferSize; i++) {
-            data[i] = Math.random() * 2 - 1;
+            data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.3));
         }
         const noise = this.ctx.createBufferSource();
         noise.buffer = buffer;
-        
-        const noiseFilter = this.ctx.createBiquadFilter();
-        noiseFilter.type = 'bandpass';
-        noiseFilter.frequency.setValueAtTime(1200, now);
-        noiseFilter.frequency.exponentialRampToValueAtTime(180, now + 0.12);
-        noiseFilter.Q.setValueAtTime(3.5, now);
-        
+        const hpFilter = this.ctx.createBiquadFilter();
+        hpFilter.type = 'highpass';
+        hpFilter.frequency.value = 2000 * detune;
         const noiseGain = this.ctx.createGain();
-        noiseGain.gain.setValueAtTime(this.bgmVolume * 2.4, now); // 明显增强
-        noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
-        
-        noise.connect(noiseFilter);
-        noiseFilter.connect(noiseGain);
-        noiseGain.connect(this.ctx.destination);
-        
-        // B. 低频膛内重击
+        noiseGain.gain.setValueAtTime(this.bgmVolume * 2.4, now);
+        noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05 * durScale);
+        noise.connect(hpFilter);
+        hpFilter.connect(noiseGain);
+        noiseGain.connect(masterFilter);
+        noise.start(now);
+        noise.stop(now + 0.06 * durScale);
+
+        // B. 低频冲击：sine 120Hz，0.12s（后坐力重击）
         const thumpOsc = this.ctx.createOscillator();
         const thumpGain = this.ctx.createGain();
-        thumpOsc.type = 'triangle';
-        thumpOsc.frequency.setValueAtTime(240, now);
-        thumpOsc.frequency.exponentialRampToValueAtTime(40, now + 0.07);
-        
-        thumpGain.gain.setValueAtTime(this.bgmVolume * 2.8, now); // 明显增强
-        thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
-        
+        thumpOsc.type = 'sine';
+        thumpOsc.frequency.setValueAtTime(120 * detune, now);
+        thumpOsc.frequency.exponentialRampToValueAtTime(40, now + 0.12 * durScale);
+        thumpGain.gain.setValueAtTime(this.bgmVolume * 2.8, now);
+        thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12 * durScale);
         thumpOsc.connect(thumpGain);
-        thumpGain.connect(this.ctx.destination);
-        
-        // C. 机械拉栓摩擦
-        const mechanicalOsc = this.ctx.createOscillator();
-        const mechanicalGain = this.ctx.createGain();
-        mechanicalOsc.type = 'sawtooth';
-        mechanicalOsc.frequency.setValueAtTime(3500, now + 0.06);
-        
-        mechanicalGain.gain.setValueAtTime(0, now);
-        mechanicalGain.gain.setValueAtTime(this.bgmVolume * 0.28, now + 0.06); // 明显增强
-        mechanicalGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-        
-        mechanicalOsc.connect(mechanicalGain);
-        mechanicalGain.connect(this.ctx.destination);
-        
-        noise.start(now);
+        thumpGain.connect(masterFilter);
         thumpOsc.start(now);
-        mechanicalOsc.start(now + 0.06);
-        
-        noise.stop(now + 0.28);
-        thumpOsc.stop(now + 0.13);
-        mechanicalOsc.stop(now + 0.13);
+        thumpOsc.stop(now + 0.13 * durScale);
+
+        // C. 极短高频：sawtooth 3000Hz，0.03s（破空声）
+        const crackOsc = this.ctx.createOscillator();
+        const crackGain = this.ctx.createGain();
+        crackOsc.type = 'sawtooth';
+        crackOsc.frequency.setValueAtTime(3000 * detune, now);
+        crackGain.gain.setValueAtTime(this.bgmVolume * 0.5, now);
+        crackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.03 * durScale);
+        crackOsc.connect(crackGain);
+        crackGain.connect(masterFilter);
+        crackOsc.start(now);
+        crackOsc.stop(now + 0.04 * durScale);
     }
 
     // =======================================================
@@ -459,6 +458,9 @@ class SoundManager {
     playSynthesizedExplosion() {
         if (!this.ctx) return;
         const now = this.ctx.currentTime;
+        // 实验优化：随机化（音调 ±5%、时长 ±10%）+ 低频下潜加深 (2026-11-06)
+        const detune = 1 + (Math.random() - 0.5) * 0.1;
+        const durScale = 1 + (Math.random() - 0.5) * 0.2;
         
         // 【第 1 阶段】：击针弹片瞬间 (调小音量)
         const crackBuffer = this.ctx.createBuffer(1, this.ctx.sampleRate * 0.04, this.ctx.sampleRate);
@@ -483,8 +485,8 @@ class SoundManager {
         const subOsc = this.ctx.createOscillator();
         const subGain = this.ctx.createGain();
         subOsc.type = 'sine';
-        subOsc.frequency.setValueAtTime(260, now);
-        subOsc.frequency.exponentialRampToValueAtTime(24, now + 0.18);
+        subOsc.frequency.setValueAtTime(300 * detune, now);
+        subOsc.frequency.exponentialRampToValueAtTime(20, now + 0.18 * durScale);
         
         subGain.gain.setValueAtTime(this.bgmVolume * 1.9, now); // 原 5.0 -> 现 1.9 (大幅度调小)
         subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
