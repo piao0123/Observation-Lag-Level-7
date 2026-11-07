@@ -68,7 +68,23 @@
     for (i = 0; i < (obstacles || []).length; i++) {
       o = obstacles[i];
       if (!o || o.type === 'glass' || o.type === 'low_wall') continue;
-      rect(o.x, o.y, o.w, o.h);
+      if (o.points && o.points.length >= 2) {
+        // 多边形障碍（L0/L7/L8）：逐边转线段，首尾闭合
+        for (var k = 0; k < o.points.length; k++) {
+          var a = o.points[k], b = o.points[(k + 1) % o.points.length];
+          segs.push([a.x, a.y, b.x, b.y]);
+        }
+      } else if (o.circle) {
+        // 圆形障碍（L7/L8 中央会议桌）：按引擎惯例用 48 边形逼近
+        var cc = o.circle, N = 48;
+        for (var m = 0; m < N; m++) {
+          var a1 = (m * Math.PI * 2) / N, a2 = ((m + 1) % N) * Math.PI * 2 / N;
+          segs.push([cc.cx + Math.cos(a1) * cc.radius, cc.cy + Math.sin(a1) * cc.radius,
+                     cc.cx + Math.cos(a2) * cc.radius, cc.cy + Math.sin(a2) * cc.radius]);
+        }
+      } else {
+        rect(o.x, o.y, o.w, o.h);
+      }
     }
     for (i = 0; i < (props || []).length; i++) {
       o = props[i];
@@ -101,6 +117,10 @@
     }
     if (hasCone) {
       angs.push(aMin, aMax);
+      // 视锥内无障碍物顶点时只有两条射线，多边形退化成线、画不出辉光；
+      // 补 7 个中间采样角，保证扇形始终有面积（射线仍会被障碍物截断，遮挡不变）
+      var span = aMax - aMin;
+      for (k = 1; k < 8; k++) angs.push(aMin + span * k / 8);
     } else {
       for (k = 0; k < 24; k++) angs.push(k * Math.PI * 2 / 24);
     }
@@ -116,7 +136,7 @@
       pts.push([a, lx + dx * best, ly + dy * best]);
     }
     pts.sort(function (p1, p2) { return p1[0] - p2[0]; });
-    var out = [];
+    var out = [[lx, ly]];
     for (i = 0; i < pts.length; i++) out.push([pts[i][1], pts[i][2]]);
     return out;
   }
@@ -326,12 +346,26 @@
       var cams = G.cameras || [];
       for (i = 0; i < cams.length; i++) {
         cam = cams[i];
-        if (!cam || (cam.type && cam.type !== 'default')) continue;
+        if (!cam) continue;
         // 2026-11-02：盲区内无光影——摄像头在盲区内不画辉光
         if (cam.__inBlindZone) continue;
         a = cam.currentAngle || 0;
-        coneGlow(ctx, cam.x, cam.y, a, 0.45, 330, segs,
-                 cam.detecting ? '255,51,51' : '0,255,102', 0.42);
+        // 2026-11-07：L0 三种地狱装置之前被 type 过滤整批跳过、辉光全无；按各自原色给辉光，顶点移到眼睛处
+        if (cam.type === 'soul_lantern' || cam.type === 'gargoyle_sentinel' || cam.type === 'infernal_eye') {
+          var wHalf = (typeof cam.fovAngle === 'number' && cam.fovAngle > 0) ? cam.fovAngle / 2 : 0.42;
+          var wRange = (typeof cam.fovRange === 'number' && cam.fovRange > 0) ? cam.fovRange : 450;
+          var wOff = cam.type === 'soul_lantern' ? 18 : cam.type === 'gargoyle_sentinel' ? 7 : 3.5;
+          var wRgb = cam.type === 'soul_lantern'
+              ? (cam.detecting ? '168,85,247' : '56,189,248')
+              : cam.type === 'gargoyle_sentinel'
+              ? (cam.detecting ? '239,68,68' : '249,115,22')
+              : (cam.detecting ? '255,17,34' : '239,68,68');
+          coneGlow(ctx, cam.x + Math.cos(a) * wOff, cam.y + Math.sin(a) * wOff, a, wHalf, wRange, segs, wRgb, 0.42);
+        } else if (!cam.type || cam.type === 'default') {
+          // 2026-11-07：辉光顶点跟视锥走，移到镜头处（前方 16.5px）
+          coneGlow(ctx, cam.x + Math.cos(a) * 16.5, cam.y + Math.sin(a) * 16.5, a, 0.45, 330, segs,
+                   cam.detecting ? '255,51,51' : '0,255,102', 0.42);
+        }
       }
 
       // 2) 主角视锥辉光增强（原版已画带阴影视锥，这里加同色辉光；主角身上不再加光斑）
@@ -340,7 +374,11 @@
       if (pl && typeof pl.x === 'number' && pl.hp > 0 && !pl.__inBlindZone) {
         var pfov = (typeof pl.fov === 'number' && pl.fov > 0) ? pl.fov : Math.PI / 2.2;
         var pdist = (typeof pl.viewDistance === 'number' && pl.viewDistance > 0) ? pl.viewDistance : 500;
-        coneGlow(ctx, pl.x, pl.y, pl.angle || 0, pfov / 2, pdist, segs, '0,255,102', 0.25);
+        var pa = pl.angle || 0;
+        // 2026-11-07：L0 玩家视锥是红的，辉光改红跟锥走（之前是绿，叠出来暗黄）；其他关保持绿
+        // 2026-11-07：辉光顶点跟视锥走，移到眼睛处（前方 10px）
+        var pRgb = (lid === 'level0_test') ? '255,51,68' : '0,255,102';
+        coneGlow(ctx, pl.x + Math.cos(pa) * 10, pl.y + Math.sin(pa) * 10, pa, pfov / 2, pdist, segs, pRgb, 0.25);
       }
 
       // 3) 敌人视锥辉光增强（与原版各状态配色一致）
@@ -356,7 +394,12 @@
         if (e.__inBlindZone) continue;
         // 视口外裁剪
         if (e.x < cx0 - 400 || e.x > cx0 + W + 400 || e.y < cy0 - 400 || e.y > cy0 + H + 400) continue;
-        coneGlow(ctx, e.x, e.y, e.angle || 0, (Math.PI / 3) / 2, 260, segs, enemyConeColor(e), 0.25);
+        // 2026-11-07：辉光顶点跟视锥走，移到眼睛处（恶魔 4px，其余 10px）；锥角/锥距跟实际视锥走（之前写死 60°/260，三头犬只盖一半）
+        var ea = e.angle || 0;
+        var eOff = e.isDemon ? 4 : 10;
+        var eHalf = (typeof e.__fovAngle === 'number' && e.__fovAngle > 0) ? e.__fovAngle / 2 : (Math.PI / 3) / 2;
+        var eRange = (typeof e.__fovRange === 'number' && e.__fovRange > 0) ? e.__fovRange : 260;
+        coneGlow(ctx, e.x + Math.cos(ea) * eOff, e.y + Math.sin(ea) * eOff, ea, eHalf, eRange, segs, enemyConeColor(e), 0.25);
       }
     } finally {
       ctx.globalCompositeOperation = 'source-over';

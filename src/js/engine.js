@@ -149,6 +149,7 @@ const LEVEL7_WEAPON_OVERRIDES = {
 const L78_MAG_SIZE = { 1: 30, 2: 15, 3: 6, 4: 5, 5: 1 };
 const L78_RESERVE_INIT = { 1: 120, 2: 60, 3: 30, 4: 20, 5: 5 };
 const __l78Ammo = {}; // { weaponId: { mag, reserve } }
+let lastAltarHintTime = 0; // 2026-11-07：祭坛外击杀提示节流（8 秒内只提示一次）
 function __l78AmmoGet(id) {
     if (!__l78Ammo[id]) {
         __l78Ammo[id] = { mag: (L78_MAG_SIZE[id] || 30), reserve: (L78_RESERVE_INIT[id] !== undefined ? L78_RESERVE_INIT[id] : 0) };
@@ -263,6 +264,7 @@ function settleAllPendingDamage() {
             if (e.pendingDamage > 0) {
                 applyDamageToEnemy(e, e.pendingDamage);
                 e.pendingDamage = 0;
+                e.pendingDamageInAltar = false;
                 e.hitTimer = 8;
                 const isDemon = e.isDemon || (getCurrentLevelId() === 'level0_test');
                 createExplosion(e.x, e.y, 20, isDemon ? '#ff2200' : '#00FF66');
@@ -817,6 +819,12 @@ function getVisionBlockingSegments() {
     cachedVisionSegments = segments;
     cachedVisionFrame = currentFrameCount;
     return segments;
+}
+
+// 2026-11-07：视锥顶点前移到眼睛/镜头处（之前传身体/底座中心，扇形像从脑袋里长出来）。
+// 只改视觉顶点，不改玩法判定（canSee、夜幕、黄色高亮仍用身体中心）。
+function fovEyePoint(x, y, angle, forward) {
+    return { x: x + Math.cos(angle) * forward, y: y + Math.sin(angle) * forward };
 }
 
 function drawTacticalFOV(x, y, angle, fovAngle, maxDist, fillColor, strokeColor) {
@@ -3249,6 +3257,7 @@ function closeBlindZone(reason = "COLLAPSED") {
         if (e.pendingDamage > 0) {
             applyDamageToEnemy(e, e.pendingDamage);
             e.pendingDamage = 0;
+            e.pendingDamageInAltar = false;
             if (currentLevelId !== 'level0_test') {
                 e.alert = true; e.alertCooldown = 300;
             }
@@ -3277,7 +3286,7 @@ function triggerHellAltarSeal() {
             life: 70 + Math.random() * 50,
             maxLife: 120,
             color: '#f43f5e',
-            size: 3 + Math.random() * 4,
+            size: 2 + Math.random() * 1,
             isHellRiteParticle: true,
             spawnY: sy
         });
@@ -3410,8 +3419,10 @@ function applyDamageToEnemy(enemy, amount, isSoulSiphon = false) {
             const healHp = Math.round(strength * 0.15);
             const healShield = Math.round(strength * 0.20);
             // 2026-11-01 地狱任务：祭坛区域灵魂汲取击杀计数
+            // 2026-11-07：推迟伤害结算时也算——以造成伤害时的位置（pendingDamageInAltar 标记）为准，
+            // 而非结算时位置（恶魔在盲区内游走，结算时常已走出祭坛）
             const hs = window.__hellState;
-            if (hs && hs.active && currentLevelId === 'level0_test' && isInAltarArea(enemy.x, enemy.y)) {
+            if (hs && hs.active && currentLevelId === 'level0_test' && (isInAltarArea(enemy.x, enemy.y) || enemy.pendingDamageInAltar)) {
                 hs.altarKills++;
                 if (enemy.isCerberus) hs.altarCerberusKills++;
                 if (typeof addLog !== 'undefined') {
@@ -3423,6 +3434,15 @@ function applyDamageToEnemy(enemy, amount, isSoulSiphon = false) {
                 // 检查任务完成
                 if (checkHellQuestComplete()) {
                     onHellQuestComplete();
+                }
+            } else if (hs && hs.active && currentLevelId === 'level0_test') {
+                // 2026-11-07：祭坛外用灵魂汲取击杀不计数，提示玩家（8 秒内只提示一次，免刷屏）
+                if (typeof addLog !== 'undefined' && Date.now() - lastAltarHintTime > 8000) {
+                    lastAltarHintTime = Date.now();
+                    const isEn = (window.__gameLang === 'en');
+                    addLog(isEn
+                        ? 'Soul Siphon kill not counted: sacrifices must be made within the altar area!'
+                        : '灵魂汲取击杀未计数：需在祭坛区域内献祭才计数！', '#fca5a5');
                 }
             }
             triggerSoulSacrificeEffect(enemy.x, enemy.y, healHp, healShield);
@@ -4125,8 +4145,8 @@ function onHellQuestComplete() {
     }
     triggerHellAltarSeal();
     if (window.__hellState) window.__hellState.questDone = true;
-    // 法阵动画播 1.5 秒后弹选择窗
-    setTimeout(() => showHellCompletePopup(), 1500);
+    // 法阵动画播完（240 帧 ≈ 4 秒）再弹选择窗：updateHellAltarSeals 在法阵移除时弹
+    if (window.__hellState) window.__hellState.hellPopupPending = true;
 }
 
 // 从地狱返回原关卡（保留波次）
@@ -4786,6 +4806,7 @@ function update() {
                         if (e.pendingDamage > 0) {
                             applyDamageToEnemy(e, e.pendingDamage);
                             e.pendingDamage = 0;
+                            e.pendingDamageInAltar = false;
                             createExplosion(e.x, e.y, 20);
                         }
                         e.alert = true; e.alertCooldown = 300; e.hitTimer = 6;
@@ -4860,6 +4881,11 @@ function update() {
 
                 if (inBlindZone(e.x, e.y) && !isObsSeesPlayer) {
                     e.pendingDamage += effectiveDamage;
+                    // 2026-11-07 地狱任务修复：推迟伤害若由灵魂汲取在祭坛区内造成，记下标记；
+                    // 结算时敌人可能已走出祭坛（恶魔在盲区内仍会游走），按造成伤害时的位置判定才合理
+                    if (b.isSoulSiphon && currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id && isInAltarArea(e.x, e.y)) {
+                        e.pendingDamageInAltar = true;
+                    }
                 } else {
                     applyDamageToEnemy(e, effectiveDamage, !!b.isSoulSiphon);
                     e.hitTimer = 6;
@@ -4876,6 +4902,7 @@ function update() {
                     if (e.pendingDamage > 0) {
                         applyDamageToEnemy(e, e.pendingDamage);
                         e.pendingDamage = 0;
+                        e.pendingDamageInAltar = false;
                         createExplosion(e.x, e.y, 20);
                     }
                     if (inBlindZone(player.x, player.y) && !e.isObserver && !e.isJammer) {
@@ -5106,6 +5133,7 @@ function update() {
             if (!blindActive || !inBlindZone(e.x, e.y)) {
                 applyDamageToEnemy(e, e.pendingDamage);
                 e.pendingDamage = 0;
+                e.pendingDamageInAltar = false;
                 e.hitTimer = 8;
                 createExplosion(e.x, e.y, 20, e.isDemon ? '#ff2200' : '#f43f5e');
                 e.alert = true;
@@ -23058,9 +23086,11 @@ function drawWeaponIcons() {
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'top';
                 // 实验 v5：L7/L8 的 3 号位叫霰弹枪（只改显示，不改 WEAPONS 表，其他关卡还是冲锋枪）
-                const wname = (w.id === 3)
-                    ? ((window.__gameLang === 'en') ? 'SHOTGUN' : '霰弹枪')
-                    : (w.nameEn || w.name || '').toUpperCase();
+                // 2026-11-07：切中文后全部枪名走中文（之前只有 3 号位走了语言分支，其余写死 nameEn）；
+                // 5 号位中文用“手雷”，与右上武器列表（translations.ts）一致
+                const wname = (window.__gameLang === 'zh')
+                    ? (w.id === 3 ? '霰弹枪' : w.id === 5 ? '手雷' : (w.name || w.nameEn || '').toUpperCase())
+                    : (w.id === 3 ? 'SHOTGUN' : (w.nameEn || w.name || '').toUpperCase());
                 ctx.fillText(wname, x + 5, y + 3);
                 // 键位（右上角，实验 v10：改成 [1] [2] 格式，避免和弹药数混淆）
                 ctx.fillStyle = cellColor;
@@ -23275,6 +23305,20 @@ function drawInfernalWatcher(cam) {
     // =========================================================
     ctx.save();
     const timeNow = Date.now() * 0.001;
+    // 2026-11-07：视锥顶点移到眼睛处（魂灯烈焰核心前方 18px、石像鬼双眼中点 7px、魔眼瞳孔 3.5px）；
+    // 扇形按遮挡裁剪（之前是纯圆扇形，符文弧线会穿墙、横贯其他扇形）
+    const eyeOff = type === 'soul_lantern' ? 18 : type === 'gargoyle_sentinel' ? 7 : 3.5;
+    const ex = Math.cos(ang) * eyeOff, ey = Math.sin(ang) * eyeOff;
+    const _wpoly = (typeof getVisionConePolygon === 'function')
+        ? getVisionConePolygon(cam.x + ex, cam.y + ey, ang, halfAngle * 2, range)
+        : null;
+    if (_wpoly && _wpoly.length >= 3) {
+        ctx.beginPath();
+        ctx.moveTo(_wpoly[0].x - cam.x, _wpoly[0].y - cam.y);
+        for (let _wi = 1; _wi < _wpoly.length; _wi++) ctx.lineTo(_wpoly[_wi].x - cam.x, _wpoly[_wi].y - cam.y);
+        ctx.closePath();
+        ctx.clip();
+    }
     if (type === 'soul_lantern') {
         ctx.fillStyle = isDetecting ? 'rgba(168, 85, 247, 0.48)' : 'rgba(56, 189, 248, 0.25)';
         ctx.strokeStyle = isDetecting ? 'rgba(216, 180, 254, 0.9)' : 'rgba(56, 189, 248, 0.7)';
@@ -23287,26 +23331,27 @@ function drawInfernalWatcher(cam) {
     }
 
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.arc(0, 0, range, ang - halfAngle, ang + halfAngle);
+    ctx.moveTo(ex, ey);
+    ctx.arc(ex, ey, range, ang - halfAngle, ang + halfAngle);
     ctx.closePath();
     ctx.fill();
 
     ctx.lineWidth = 2.0;
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(ang - halfAngle) * range, Math.sin(ang - halfAngle) * range);
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(ang + halfAngle) * range, Math.sin(ang + halfAngle) * range);
-    ctx.arc(0, 0, range, ang - halfAngle, ang + halfAngle);
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex + Math.cos(ang - halfAngle) * range, ey + Math.sin(ang - halfAngle) * range);
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex + Math.cos(ang + halfAngle) * range, ey + Math.sin(ang + halfAngle) * range);
+    ctx.arc(ex, ey, range, ang - halfAngle, ang + halfAngle);
     ctx.stroke();
 
-    // 动态符文矩阵弧线
+    // 动态符文矩阵弧线（2026-11-07：起点抖动钳制在扇形边内，之前摆到负向时会越过扇形边约 20px）
     ctx.lineWidth = 1.2;
     ctx.strokeStyle = isDetecting ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.35)';
     for (let rFactor of [0.35, 0.65, 0.88]) {
+        const arcStart = Math.max(ang - halfAngle, ang - halfAngle + Math.sin(timeNow + rFactor) * 0.05);
         ctx.beginPath();
-        ctx.arc(0, 0, range * rFactor, ang - halfAngle + Math.sin(timeNow + rFactor) * 0.05, ang + halfAngle);
+        ctx.arc(ex, ey, range * rFactor, arcStart, ang + halfAngle);
         ctx.stroke();
     }
     ctx.restore();
@@ -23529,45 +23574,60 @@ function drawCamera(cam) {
     ctx.save();
     try {
         ctx.translate(cam.x, cam.y);
-    
+
+    // 2026-11-07：视锥顶点移到镜头处（镜片中心在前方 16.5px）；扇形按遮挡裁剪（之前是纯圆扇形，弧线会穿墙、横贯其他扇形）
+    const _camA = cam.currentAngle;
+    const _ax = Math.cos(_camA) * 16.5, _ay = Math.sin(_camA) * 16.5;
+    const _poly = (typeof getVisionConePolygon === 'function')
+        ? getVisionConePolygon(cam.x + _ax, cam.y + _ay, _camA, 0.9, 320)
+        : null;
+    ctx.save();
+    if (_poly && _poly.length >= 3) {
+        ctx.beginPath();
+        ctx.moveTo(_poly[0].x - cam.x, _poly[0].y - cam.y);
+        for (let _pi = 1; _pi < _poly.length; _pi++) ctx.lineTo(_poly[_pi].x - cam.x, _poly[_pi].y - cam.y);
+        ctx.closePath();
+        ctx.clip();
+    }
     // 1. 监控扇区视觉：显著加强的半透明锥形光，保留高对比度原色且十分凸显 (Highly visible scan cone)
     ctx.fillStyle = cam.detecting ? 'rgba(255, 51, 51, 0.32)' : 'rgba(0, 255, 102, 0.16)';
-    ctx.beginPath(); 
-    ctx.moveTo(0, 0);
-    ctx.arc(0, 0, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
-    ctx.closePath(); 
+    ctx.beginPath();
+    ctx.moveTo(_ax, _ay);
+    ctx.arc(_ax, _ay, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.closePath();
     ctx.fill();
 
     // 绘制清晰的扇区边缘线与轮廓弧线，使视野边界分外凸显
     ctx.strokeStyle = cam.detecting ? 'rgba(255, 51, 51, 0.75)' : 'rgba(0, 255, 102, 0.45)';
     ctx.lineWidth = 1.5;
-    
+
     // 左边界
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(cam.currentAngle - 0.45) * 320, Math.sin(cam.currentAngle - 0.45) * 320);
+    ctx.moveTo(_ax, _ay);
+    ctx.lineTo(_ax + Math.cos(cam.currentAngle - 0.45) * 320, _ay + Math.sin(cam.currentAngle - 0.45) * 320);
     ctx.stroke();
-    
+
     // 右边界
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(cam.currentAngle + 0.45) * 320, Math.sin(cam.currentAngle + 0.45) * 320);
+    ctx.moveTo(_ax, _ay);
+    ctx.lineTo(_ax + Math.cos(cam.currentAngle + 0.45) * 320, _ay + Math.sin(cam.currentAngle + 0.45) * 320);
     ctx.stroke();
-    
+
     // 最外圈扇区弧线
     ctx.beginPath();
-    ctx.arc(0, 0, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.arc(_ax, _ay, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
     ctx.stroke();
 
     // 扫描扇区中间的同心雷达辅助线
     ctx.strokeStyle = cam.detecting ? 'rgba(255, 51, 51, 0.45)' : 'rgba(0, 255, 102, 0.3)';
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.arc(0, 0, 160, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.arc(_ax, _ay, 160, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(0, 0, 260, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.arc(_ax, _ay, 260, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
     ctx.stroke();
+    ctx.restore();
 
     // 2. 墙体壁挂支架结构 (Camera Mounting Bracket - opposite to camera angle for realism)
     const oppositeAngle = cam.currentAngle + Math.PI;
@@ -26199,10 +26259,11 @@ function draw() {
     drawProps();
     drawTraps();
     drawBloodSacrificeSeals();
-    drawHellAltarSeals();
     // 3. 绘制普通墙体与遮挡建筑物
     obstacles.filter(o => o.type !== 'pool' && o.label !== 'SWIMMING POOL').forEach(drawObstacle);
     drawSecurityGates();
+    // 2026-11-07：血祭法阵必须浮在祭坛之上——之前画在墙体之前，黑曜石祭台（drawAbyssalAltar）会盖住法阵中心
+    drawHellAltarSeals();
     // 4. 顶层绘制车厢区域与道具文字标签，确保不被墙体遮挡
     drawZones();
     drawAllPropLabels();
@@ -26300,7 +26361,8 @@ function draw() {
         const playerFovFill = (levelId === 'level0_test') ? 'rgba(255, 51, 68, 0.28)' : 'rgba(0, 255, 102, 0.28)';
         const playerFovStroke = (levelId === 'level0_test') ? 'rgba(255, 51, 68, 0.85)' : 'rgba(0, 255, 102, 0.85)';
         const effFov = getPlayerEffectiveFOV();
-        drawTacticalFOV(player.x, player.y, player.angle, effFov.fov, effFov.viewDistance, playerFovFill, playerFovStroke);
+        const playerEye = fovEyePoint(player.x, player.y, player.angle, 10);
+        drawTacticalFOV(playerEye.x, playerEye.y, player.angle, effFov.fov, effFov.viewDistance, playerFovFill, playerFovStroke);
     }
 
     const activeEnemies = Array.isArray(enemies) ? enemies.slice() : [];
@@ -26383,10 +26445,15 @@ function draw() {
                             ? (e.alert ? 'rgba(236, 72, 153, 0.85)' : 'rgba(168, 85, 247, 0.80)')
                             : (e.alert ? 'rgba(255, 51, 51, 0.8)' : (e.isObserver ? 'rgba(0, 204, 255, 0.75)' : 'rgba(255, 185, 0, 0.65)'))));
 
-                // 2026-11-02：普通敌人在盲区内视锥直接消失（不是缩小）；Observer/Jammer/恶魔/三头犬画缩小版
+                // 2026-11-07：普通敌人在盲区内视锥直接消失（不是缩小）；Observer/Jammer/恶魔/三头犬画缩小版
                 const isNormalInBlind = isInBlindTarget && !e.isObserver && !e.isJammer && !e.isDemon && !e.isCerberus;
                 if (!isNormalInBlind) {
-                    drawTacticalFOV(e.x, e.y, e.angle, fovAngle, fovRange, fovFill, fovStroke);
+                    // 2026-11-07：视锥顶点移到眼睛处（恶魔眼在前方约 4px，其余约 10px）；真实锥角/锥距存给光照 pass 用
+                    e.__fovAngle = fovAngle;
+                    e.__fovRange = fovRange;
+                    const eyeOff = e.isDemon ? 4 : 10;
+                    const eEye = fovEyePoint(e.x, e.y, e.angle, eyeOff);
+                    drawTacticalFOV(eEye.x, eEye.y, e.angle, fovAngle, fovRange, fovFill, fovStroke);
                 }
             }
             if (e.isCerberus) {
@@ -27174,7 +27241,7 @@ function updateHellAltarSeals() {
                 life: 80 + Math.floor(Math.random() * 40),
                 maxLife: 120,
                 color: '#f43f5e',
-                size: 2.5 + Math.random() * 3.5,
+                size: 2 + Math.random() * 1,
                 isHellRiteParticle: true,
                 spawnY: sy
             });
@@ -27182,6 +27249,11 @@ function updateHellAltarSeals() {
 
         if (seal.timer >= seal.duration) {
             hellAltarSeals.splice(i, 1);
+            // 法阵播完才弹完成窗口（动画 240 帧 ≈ 4 秒；之前是 1.5 秒就弹，遮住后半段动画）
+            if (hellAltarSeals.length === 0 && window.__hellState && window.__hellState.hellPopupPending && !isGameOver) {
+                window.__hellState.hellPopupPending = false;
+                showHellCompletePopup();
+            }
         }
     }
 }
