@@ -24728,7 +24728,7 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
             ctx.fillText("🔥 DEMON 🔥", 0, -47);
         } else {
             ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; ctx.fillRect(-20, -36, 40, 5);
-            ctx.fillStyle = isPlayer ? ((getCurrentLevelId() === 'level0_test') ? '#FF3344' : '#00FF66') : (isInBlind ? '#FFFF00' : '#FF3344');
+            ctx.fillStyle = isPlayer ? ((getCurrentLevelId() === 'level0_test') ? '#FF3344' : '#00FF66') : (isInBlind ? (isL78Level ? '#38bdf8' : '#FFFF00') : '#FF3344');
             ctx.fillRect(-20, -36, (Math.max(0, hp) / maxHp) * 40, 5);
             
             if (enemyShield > 0) {
@@ -24917,7 +24917,7 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
             gearColor2 = '#081f17';
         }
     } else if (isInBlind) {
-        mainColor = '#FFFF00';
+        mainColor = isL78Level ? '#38bdf8' : '#FFFF00';
     } else if (isJammer) {
         mainColor = alert ? '#F43F5E' : '#C084FC';
         baseTacticalColor = '#1c102b';
@@ -24999,7 +24999,7 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
 
     // ------------------- 4. 技能与状态光环 -------------------
     if (isInBlind && hp > 0) {
-        ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = 2; ctx.shadowColor = '#FFFF00'; ctx.shadowBlur = 12;
+        ctx.strokeStyle = isL78Level ? '#38bdf8' : '#FFFF00'; ctx.lineWidth = 2; ctx.shadowColor = isL78Level ? '#38bdf8' : '#FFFF00'; ctx.shadowBlur = 12;
         ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.stroke();
         ctx.shadowBlur = 0;
     }
@@ -25279,7 +25279,7 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
 
     // ------------------- 8. 文字标识 (不随视角旋转) -------------------
     if (isInBlind && hp > 0) {
-        ctx.fillStyle = '#FFFF00'; ctx.font = 'bold 10px monospace';
+        ctx.fillStyle = isL78Level ? '#38bdf8' : '#FFFF00'; ctx.font = 'bold 10px monospace';
         ctx.fillText("[IN BLIND ZONE]", x - 35, y - 46);
     } else if (!isPlayer && isJammer && hp > 0) {
         ctx.fillStyle = alert ? '#F43F5E' : '#C084FC'; ctx.font = 'bold 9px monospace';
