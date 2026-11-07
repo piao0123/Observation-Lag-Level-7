@@ -192,7 +192,7 @@ const LEVEL_TEST = {
                     sweepRange: 0.75,
                     sweepSpeed: 0.011,
                     sweepTimer: 0,
-                    fovRange: 420,
+                    fovRange: 520,
                     fovAngle: 0.8,
                     type: 'soul_lantern',
                     label: '冰狱西隘口魂灯'
@@ -206,7 +206,7 @@ const LEVEL_TEST = {
                     sweepRange: 0.75,
                     sweepSpeed: 0.012,
                     sweepTimer: 1.5,
-                    fovRange: 420,
+                    fovRange: 520,
                     fovAngle: 0.8,
                     type: 'soul_lantern',
                     label: '北冰湖畔魂灯'
@@ -220,7 +220,7 @@ const LEVEL_TEST = {
                     sweepRange: 0.8,
                     sweepSpeed: 0.013,
                     sweepTimer: 0.8,
-                    fovRange: 450,
+                    fovRange: 550,
                     fovAngle: 0.82,
                     type: 'gargoyle_sentinel',
                     label: '熔岩北池石像鬼'
@@ -234,7 +234,7 @@ const LEVEL_TEST = {
                     sweepRange: 0.8,
                     sweepSpeed: 0.012,
                     sweepTimer: 2.2,
-                    fovRange: 450,
+                    fovRange: 550,
                     fovAngle: 0.82,
                     type: 'gargoyle_sentinel',
                     label: '熔岩南河石像鬼'
@@ -248,7 +248,7 @@ const LEVEL_TEST = {
                     sweepRange: Math.PI * 2,
                     sweepSpeed: 0.009,
                     sweepTimer: 3.0,
-                    fovRange: 460,
+                    fovRange: 560,
                     fovAngle: 0.85,
                     type: 'infernal_eye',
                     label: '深渊祭坛全视魔眼'

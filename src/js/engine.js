@@ -3860,38 +3860,50 @@ function shoot() {
 }
 
 function triggerGameOver(success) {
+    if (isGameOver) return; // 防止每帧重复进入触发 Game Over
     const currentLevelId = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
     const isHell = (currentLevelId === 'level0_test');
     const isEn = (window.__gameLang === 'en');
 
-    // 2026-11-01 地狱隐藏关：普通关死亡 → 保存进度并跳转地狱
+    // 2026-11-01 地狱隐藏关：普通关死亡 → 保存进度并先弹战绩窗，确认后再跳转地狱 (Level 0)
     if (!success && !isHell) {
+        if (document.getElementById('pre-hell-popup')) return;
+        isGameOver = true;
+        isPaused = true;
+        const fromLevelIndex = (window.levelManager && window.levelManager.currentIndex) || 1;
+        const fromWave = (typeof wave !== 'undefined') ? wave : 1;
+        const fromKillCount = (typeof killCount !== 'undefined') ? killCount : 0;
+
         window.__hellState = {
-            fromLevelIndex: (window.levelManager && window.levelManager.currentIndex) || 1,
-            fromWave: (typeof wave !== 'undefined') ? wave : 1,
-            fromKillCount: (typeof killCount !== 'undefined') ? killCount : 0,
+            fromLevelIndex,
+            fromWave,
+            fromKillCount,
             wavesSurvived: 0,
             altarKills: 0,
             altarCerberusKills: 0,
             active: false
         };
-        // 跳转到地狱（L0）
-        if (typeof window.__launchGameLevel === 'function') {
-            window.__launchGameLevel(0);
+        if (typeof soundManager !== 'undefined' && soundManager.updateGameState) {
+            soundManager.updateGameState(true, true);
         }
-        // 弹出地狱选择
-        showHellChoicePopup();
+        showPreHellFallPopup({ fromLevelIndex, fromWave, fromKillCount });
         return;
     }
 
-    // 2026-11-01 地狱隐藏关：地狱中死亡 → 战绩弹窗，确认后回主菜单（2026-11-02 改）
+    // 2026-11-01 地狱隐藏关：地狱中死亡 → 战绩弹窗，确认后回主菜单
     if (!success && isHell) {
+        if (document.getElementById('hell-death-popup')) return;
         isGameOver = true;
+        isPaused = true;
+        if (typeof soundManager !== 'undefined' && soundManager.updateGameState) {
+            soundManager.updateGameState(true, true);
+        }
         showHellDeathPopup();
         return;
     }
 
     isGameOver = true;
+    isPaused = true;
     const screen = document.getElementById('game-over-screen');
     const title = document.getElementById('over-title');
     const desc = document.getElementById('over-desc');
@@ -3920,7 +3932,89 @@ function isInAltarArea(x, y) {
     return Math.hypot(x - 1920, y - 500) < 150;
 }
 
-// 显示地狱选择弹窗（2026-11-01：样式对齐游戏 UI：tactical mono + 辉光 + 描边按钮）
+// 显示普通关阵亡战报弹窗：采用游戏原本 UI 默认非等宽字体，显示阵亡、波次、击杀数，??? 倒计时自动跳转 Level 0（不可主动点击）
+function showPreHellFallPopup(stats) {
+    const isEn = (window.__gameLang === 'en');
+    // 如果已经存在弹窗，不重复创建
+    if (document.getElementById('pre-hell-popup')) return;
+
+    const fromWave = (stats && stats.fromWave) || (typeof wave !== 'undefined' ? wave : 1);
+    const fromKills = (stats && typeof stats.fromKillCount === 'number') ? stats.fromKillCount : ((typeof killCount !== 'undefined') ? killCount : 0);
+
+    const overlay = document.createElement('div');
+    overlay.id = 'pre-hell-popup';
+    overlay.className = 'pre-hell-modal-overlay';
+
+    let countdown = 5;
+
+    overlay.innerHTML = `
+        <div class="pre-hell-modal-card">
+            <h1 style="font-size: 24px; margin-bottom: 14px; color: #FF3344; letter-spacing: 3px; font-weight: bold; text-shadow: 0 0 10px rgba(255,51,68,0.7);">
+                ${isEn ? 'MISSION FAILED' : '阵 亡'}
+            </h1>
+            <div style="font-size: 15px; color: #d1d5db; line-height: 2; margin-bottom: 22px; text-align: center;">
+                ${isEn ? 'Wave' : '波次'}：<span style="color: #00FF66; font-weight: bold; text-shadow: 0 0 6px rgba(0,255,102,0.6);">${fromWave}</span><br>
+                ${isEn ? 'Total Kills' : '击杀数'}：<span style="color: #00FF66; font-weight: bold; text-shadow: 0 0 6px rgba(0,255,102,0.6);">${fromKills}</span>
+            </div>
+            <div style="display: flex; gap: 16px; justify-content: center; align-items: center;">
+                <div id="prehell-countdown-btn" style="
+                    background: rgba(255, 51, 68, 0.12); border: 1px dashed rgba(255, 51, 68, 0.65); color: #fca5a5;
+                    padding: 8px 20px; font-weight: bold; font-size: 13px; letter-spacing: 2px;
+                    border-radius: 4px; box-shadow: 0 0 10px rgba(255, 51, 68, 0.2);
+                    pointer-events: none; cursor: not-allowed; user-select: none;
+                ">
+                    ${isEn ? `???: ${countdown}s` : `???: ${countdown}秒`}
+                </div>
+                <button id="prehell-abort-btn" style="
+                    background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
+                    padding: 8px 22px; font-weight: bold; cursor: pointer;
+                    font-size: 13px; letter-spacing: 2px; border-radius: 4px;
+                    box-shadow: 0 0 12px rgba(0, 255, 102, 0.25); transition: all 0.2s;
+                ">${isEn ? '[ MAIN MENU ]' : '[ 返回主菜单 ]'}</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    const countdownBtn = document.getElementById('prehell-countdown-btn');
+    const abortBtn = document.getElementById('prehell-abort-btn');
+
+    const timer = setInterval(() => {
+        countdown--;
+        if (countdown > 0) {
+            if (countdownBtn) {
+                countdownBtn.innerText = isEn ? `???: ${countdown}s` : `???: ${countdown}秒`;
+            }
+        } else {
+            clearInterval(timer);
+            overlay.remove();
+            isGameOver = false;
+            // 倒计时结束，自动跳转 Level 0
+            if (typeof window.__launchGameLevel === 'function') {
+                window.__launchGameLevel(0);
+            }
+            showHellChoicePopup();
+        }
+    }, 1000);
+
+    overlay.__preHellTimer = timer;
+
+    if (abortBtn) {
+        abortBtn.onmouseenter = () => { abortBtn.style.background = '#00FF66'; abortBtn.style.color = '#000'; };
+        abortBtn.onmouseleave = () => { abortBtn.style.background = 'rgba(0, 255, 102, 0.15)'; abortBtn.style.color = '#00FF66'; };
+        abortBtn.onclick = () => {
+            clearInterval(timer);
+            overlay.remove();
+            window.__hellState = null;
+            if (typeof window.__returnToMenu === 'function') {
+                window.__returnToMenu();
+            }
+        };
+    }
+}
+
+// 显示地狱选择弹窗（保留原版文案、字体与颜色，套用通用 UI 黑底绿色外框并缩小紧凑排版）
 function showHellChoicePopup() {
     const isEn = (window.__gameLang === 'en');
     const old = document.getElementById('hell-choice-popup');
@@ -3928,58 +4022,67 @@ function showHellChoicePopup() {
 
     const TACTICAL_FONT = `ui-monospace, "SF Mono", Monaco, Menlo, Consolas, "Cascadia Code", "Roboto Mono", "PingFang SC", "Microsoft YaHei", "Source Han Sans CN", monospace`;
 
-    const popup = document.createElement('div');
-    popup.id = 'hell-choice-popup';
-    popup.style.cssText = `
+    const overlay = document.createElement('div');
+    overlay.id = 'hell-choice-popup';
+    overlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(2, 6, 4, 0.94); z-index: 10000;
-        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        z-index: 10000; display: flex; justify-content: center; align-items: center;
         font-family: ${TACTICAL_FONT};
-        text-shadow: 0 0 10px #FF3344;
     `;
-    popup.innerHTML = `
-        <h1 style="font-size: 42px; margin-bottom: 10px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
-            ${isEn ? 'YOU HAVE DIED' : '你 已 阵 亡'}
-        </h1>
-        <p style="font-size: 16px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
-            ${isEn ? '// SOUL DRAGGED INTO THE ABYSS' : '// 灵魂坠入地狱深渊'}
-        </p>
-        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #FF3344;">
-            ${isEn
-                ? 'Survive <span style="color:#FF3344">3 WAVES</span>, then in the <span style="color:#FF3344">ALTAR AREA</span> use <span style="color:#FF3344">SOUL SIPHON</span> to slay <span style="color:#FF3344">5 ENEMIES</span> (incl. <span style="color:#FF3344">1 CERBERUS</span>)<br>to return with wave progress intact.<br>Leave now, or die in Hell — back to main menu.'
-                : '在地狱坚持 <span style="color:#FF3344">3 波</span>，并在<span style="color:#FF3344">祭坛区域</span>使用<span style="color:#FF3344">灵魂汲取</span>击杀 <span style="color:#FF3344">5 名敌人</span><br>（至少包括 <span style="color:#FF3344">1 只地狱犬</span>），即可返回原关卡并保留波次。<br>若选择离开，或在地狱中死亡，将直接返回主菜单。'}
-        </p>
-        <div style="display: flex; gap: 24px;">
-            <button id="hell-stay-btn" style="
-                background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(255,51,68,0.3); transition: all 0.2s;
-            ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
-            <button id="hell-leave-btn" style="
-                background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(0,255,102,0.3); transition: all 0.2s;
-            ">${isEn ? '[ LEAVE ]' : '[ 离 开 ]'}</button>
+
+    overlay.innerHTML = `
+        <div style="
+            background: #030d07; border: 1.5px solid #00FF66; border-radius: 8px;
+            box-shadow: 0 0 25px rgba(0, 255, 102, 0.22);
+            padding: 24px 30px; max-width: 580px; width: 92%;
+            box-sizing: border-box; text-align: center; font-family: ${TACTICAL_FONT};
+            text-shadow: 0 0 10px #FF3344;
+        ">
+            <h1 style="font-size: 24px; margin-bottom: 8px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
+                ${isEn ? 'YOU HAVE DIED' : '你 已 阵 亡'}
+            </h1>
+            <p style="font-size: 13px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
+                ${isEn ? '// SOUL DRAGGED INTO THE ABYSS' : '// 灵魂坠入地狱深渊'}
+            </p>
+            <p style="font-size: 13px; color: #e5e7eb; line-height: 1.8; margin-bottom: 22px; text-align: center; text-shadow: 0 0 6px #FF3344;">
+                ${isEn
+                    ? 'Survive <span style="color:#FF3344">3 WAVES</span>, then in the <span style="color:#FF3344">ALTAR AREA</span> use <span style="color:#FF3344">SOUL SIPHON</span> to slay <span style="color:#FF3344">5 ENEMIES</span> (incl. <span style="color:#FF3344">1 CERBERUS</span>)<br>to return with wave progress intact.<br>Leave now, or die in Hell — back to main menu.'
+                    : '在地狱坚持 <span style="color:#FF3344">3 波</span>，并在<span style="color:#FF3344">祭坛区域</span>使用<span style="color:#FF3344">灵魂汲取</span>击杀 <span style="color:#FF3344">5 名敌人</span><br>（至少包括 <span style="color:#FF3344">1 只地狱犬</span>），即可返回原关卡并保留波次。<br>若选择离开，或在地狱中死亡，将直接返回主菜单。'}
+            </p>
+            <div style="display: flex; gap: 20px; justify-content: center;">
+                <button id="hell-stay-btn" style="
+                    background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
+                    padding: 8px 24px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(255,51,68,0.3); transition: all 0.2s;
+                ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
+                <button id="hell-leave-btn" style="
+                    background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
+                    padding: 8px 24px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(0,255,102,0.3); transition: all 0.2s;
+                ">${isEn ? '[ LEAVE ]' : '[ 离 开 ]'}</button>
+            </div>
         </div>
     `;
-    document.body.appendChild(popup);
 
-    // hover 效果对齐 .restart-btn
+    document.body.appendChild(overlay);
+
     const stayBtn = document.getElementById('hell-stay-btn');
     const leaveBtn = document.getElementById('hell-leave-btn');
+
     stayBtn.onmouseenter = () => { stayBtn.style.background = '#FF3344'; stayBtn.style.color = '#000'; };
     stayBtn.onmouseleave = () => { stayBtn.style.background = 'rgba(255, 51, 68, 0.15)'; stayBtn.style.color = '#FF3344'; };
     leaveBtn.onmouseenter = () => { leaveBtn.style.background = '#00FF66'; leaveBtn.style.color = '#000'; };
     leaveBtn.onmouseleave = () => { leaveBtn.style.background = 'rgba(0, 255, 102, 0.15)'; leaveBtn.style.color = '#00FF66'; };
 
     stayBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         if (window.__hellState) window.__hellState.active = true;
     };
     leaveBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         window.__hellState = null;
         if (typeof window.__returnToMenu === 'function') {
             window.__returnToMenu();
@@ -3987,7 +4090,7 @@ function showHellChoicePopup() {
     };
 }
 
-// 2026-11-02：地狱血祭完成弹窗（三选一：留在地狱 / 返回原关卡 / 主菜单）
+// 2026-11-02：地狱血祭完成弹窗（保留原版文案、字体与颜色，套用通用 UI 黑底绿色外框并缩小紧凑排版）
 function showHellCompletePopup() {
     const isEn = (window.__gameLang === 'en');
     const old = document.getElementById('hell-complete-popup');
@@ -3999,53 +4102,63 @@ function showHellCompletePopup() {
     const waves = hs.wavesSurvived || 0;
     const kills = (typeof killCount !== 'undefined') ? killCount : 0;
 
-    const popup = document.createElement('div');
-    popup.id = 'hell-complete-popup';
-    popup.style.cssText = `
+    const overlay = document.createElement('div');
+    overlay.id = 'hell-complete-popup';
+    overlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(2, 6, 4, 0.94); z-index: 10000;
-        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        z-index: 10000; display: flex; justify-content: center; align-items: center;
         font-family: ${TACTICAL_FONT};
-        text-shadow: 0 0 10px #22d3ee;
     `;
-    popup.innerHTML = `
-        <h1 style="font-size: 42px; margin-bottom: 10px; color: #22d3ee; letter-spacing: 4px; font-weight: bold;">
-            ${isEn ? 'DEMON BLOOD RITE COMPLETE' : '恶 魔 血 祭 已 完 成'}
-        </h1>
-        <p style="font-size: 16px; color: #a5f3fc; margin-bottom: 12px; letter-spacing: 2px;">
-            ${isEn ? '// THE ALTAR HAS DRUNK ITS FILL' : '// 祭坛已饮饱鲜血'}
-        </p>
-        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #22d3ee;">
-            ${isEn
-                ? `Survived <span style="color:#22d3ee">${waves} WAVES</span> · Altar sacrifices complete.<br>Total Kills: <span style="color:#22d3ee">${kills}</span><br>Choose your path:`
-                : `在地狱坚持 <span style="color:#22d3ee">${waves} 波</span> · 祭坛献祭完成。<br>总击杀数：<span style="color:#22d3ee">${kills}</span><br>选择你的去路：`}
-        </p>
-        <div style="display: flex; gap: 24px;">
-            <button id="hellc-stay-btn" style="
-                background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(34,211,238,0.3); transition: all 0.2s;
-            ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
-            <button id="hellc-return-btn" style="
-                background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(34,211,238,0.3); transition: all 0.2s;
-            ">${isEn ? '[ RETURN TO ORIGIN ]' : '[ 返回原关卡 ]'}</button>
-            <button id="hellc-menu-btn" style="
-                background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(0,255,102,0.3); transition: all 0.2s;
-            ">${isEn ? '[ MAIN MENU ]' : '[ 主菜单 ]'}</button>
+
+    overlay.innerHTML = `
+        <div style="
+            background: #030d07; border: 1.5px solid #00FF66; border-radius: 8px;
+            box-shadow: 0 0 25px rgba(0, 255, 102, 0.22);
+            padding: 24px 30px; max-width: 580px; width: 92%;
+            box-sizing: border-box; text-align: center; font-family: ${TACTICAL_FONT};
+            text-shadow: 0 0 10px #22d3ee;
+        ">
+            <h1 style="font-size: 24px; margin-bottom: 8px; color: #22d3ee; letter-spacing: 4px; font-weight: bold;">
+                ${isEn ? 'DEMON BLOOD RITE COMPLETE' : '恶 魔 血 祭 已 完 成'}
+            </h1>
+            <p style="font-size: 13px; color: #a5f3fc; margin-bottom: 12px; letter-spacing: 2px;">
+                ${isEn ? '// THE ALTAR HAS DRUNK ITS FILL' : '// 祭坛已饮饱鲜血'}
+            </p>
+            <p style="font-size: 13px; color: #e5e7eb; line-height: 1.8; margin-bottom: 22px; text-align: center; text-shadow: 0 0 6px #22d3ee;">
+                ${isEn
+                    ? `Survived <span style="color:#22d3ee">${waves} WAVES</span> · Altar sacrifices complete.<br>Total Kills: <span style="color:#22d3ee">${kills}</span><br>Choose your path:`
+                    : `在地狱坚持 <span style="color:#22d3ee">${waves} 波</span> · 祭坛献祭完成。<br>总击杀数：<span style="color:#22d3ee">${kills}</span><br>选择你的去路：`}
+            </p>
+            <div style="display: flex; gap: 16px; justify-content: center; flex-wrap: wrap;">
+                <button id="hellc-stay-btn" style="
+                    background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
+                    padding: 8px 20px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(34,211,238,0.3); transition: all 0.2s;
+                ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
+                <button id="hellc-return-btn" style="
+                    background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
+                    padding: 8px 20px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(34,211,238,0.3); transition: all 0.2s;
+                ">${isEn ? '[ RETURN TO ORIGIN ]' : '[ 返回原关卡 ]'}</button>
+                <button id="hellc-menu-btn" style="
+                    background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
+                    padding: 8px 20px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(0,255,102,0.3); transition: all 0.2s;
+                ">${isEn ? '[ MAIN MENU ]' : '[ 主菜单 ]'}</button>
+            </div>
         </div>
     `;
-    document.body.appendChild(popup);
+
+    document.body.appendChild(overlay);
 
     const stayBtn = document.getElementById('hellc-stay-btn');
     const returnBtn = document.getElementById('hellc-return-btn');
     const menuBtn = document.getElementById('hellc-menu-btn');
+
     stayBtn.onmouseenter = () => { stayBtn.style.background = '#22d3ee'; stayBtn.style.color = '#000'; };
     stayBtn.onmouseleave = () => { stayBtn.style.background = 'rgba(34, 211, 238, 0.15)'; stayBtn.style.color = '#22d3ee'; };
     returnBtn.onmouseenter = () => { returnBtn.style.background = '#22d3ee'; returnBtn.style.color = '#000'; };
@@ -4054,16 +4167,15 @@ function showHellCompletePopup() {
     menuBtn.onmouseleave = () => { menuBtn.style.background = 'rgba(0, 255, 102, 0.15)'; menuBtn.style.color = '#00FF66'; };
 
     stayBtn.onclick = () => {
-        popup.remove();
-        // 留在地狱：继续游玩（任务已完成，不再重复触发）
+        overlay.remove();
         if (window.__hellState) window.__hellState.questDone = true;
     };
     returnBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         returnFromHell();
     };
     menuBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         window.__hellState = null;
         if (typeof window.__returnToMenu === 'function') {
             window.__returnToMenu();
@@ -4071,7 +4183,7 @@ function showHellCompletePopup() {
     };
 }
 
-// 2026-11-02：地狱中死亡 → 战绩弹窗（波次/击杀），确认后回主菜单
+// 2026-11-02：地狱中死亡 → 战绩弹窗（保留原版文案、字体与颜色，套用通用 UI 黑底绿色外框并缩小紧凑排版）
 function showHellDeathPopup() {
     const isEn = (window.__gameLang === 'en');
     const old = document.getElementById('hell-death-popup');
@@ -4085,43 +4197,52 @@ function showHellDeathPopup() {
     const cerbK = hs.altarCerberusKills || 0;
     const kills = (typeof killCount !== 'undefined') ? killCount : 0;
 
-    const popup = document.createElement('div');
-    popup.id = 'hell-death-popup';
-    popup.style.cssText = `
+    const overlay = document.createElement('div');
+    overlay.id = 'hell-death-popup';
+    overlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(2, 6, 4, 0.94); z-index: 10000;
-        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        z-index: 10000; display: flex; justify-content: center; align-items: center;
         font-family: ${TACTICAL_FONT};
-        text-shadow: 0 0 10px #FF3344;
     `;
-    popup.innerHTML = `
-        <h1 style="font-size: 42px; margin-bottom: 10px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
-            ${isEn ? 'YOU DIED IN HELL' : '葬 身 地 狱'}
-        </h1>
-        <p style="font-size: 16px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
-            ${isEn ? '// THE ABYSS CLAIMS ANOTHER SOUL' : '// 深渊又吞噬了一个灵魂'}
-        </p>
-        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #FF3344;">
-            ${isEn
-                ? `Waves survived: <span style="color:#FF3344">${waves}</span><br>Altar sacrifices: <span style="color:#FF3344">${altarK}/5</span> (Cerberus: <span style="color:#FF3344">${cerbK}/1</span>)<br>Total Kills: <span style="color:#FF3344">${kills}</span>`
-                : `坚持波次：<span style="color:#FF3344">${waves}</span><br>祭坛献祭：<span style="color:#FF3344">${altarK}/5</span>（地狱犬：<span style="color:#FF3344">${cerbK}/1</span>）<br>总击杀数：<span style="color:#FF3344">${kills}</span>`}
-        </p>
-        <div style="display: flex; gap: 24px;">
-            <button id="helld-menu-btn" style="
-                background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(255,51,68,0.3); transition: all 0.2s;
-            ">${isEn ? '[ RETURN TO MENU ]' : '[ 返回主菜单 ]'}</button>
+
+    overlay.innerHTML = `
+        <div style="
+            background: #030d07; border: 1.5px solid #00FF66; border-radius: 8px;
+            box-shadow: 0 0 25px rgba(0, 255, 102, 0.22);
+            padding: 24px 30px; max-width: 500px; width: 92%;
+            box-sizing: border-box; text-align: center; font-family: ${TACTICAL_FONT};
+            text-shadow: 0 0 10px #FF3344;
+        ">
+            <h1 style="font-size: 24px; margin-bottom: 8px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
+                ${isEn ? 'YOU DIED IN HELL' : '葬 身 地 狱'}
+            </h1>
+            <p style="font-size: 13px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
+                ${isEn ? '// THE ABYSS CLAIMS ANOTHER SOUL' : '// 深渊又吞噬了一个灵魂'}
+            </p>
+            <p style="font-size: 13px; color: #e5e7eb; line-height: 1.8; margin-bottom: 22px; text-align: center; text-shadow: 0 0 6px #FF3344;">
+                ${isEn
+                    ? `Waves survived: <span style="color:#FF3344">${waves}</span><br>Altar sacrifices: <span style="color:#FF3344">${altarK}/5</span> (Cerberus: <span style="color:#FF3344">${cerbK}/1</span>)<br>Total Kills: <span style="color:#FF3344">${kills}</span>`
+                    : `坚持波次：<span style="color:#FF3344">${waves}</span><br>祭坛献祭：<span style="color:#FF3344">${altarK}/5</span>（地狱犬：<span style="color:#FF3344">${cerbK}/1</span>）<br>总击杀数：<span style="color:#FF3344">${kills}</span>`}
+            </p>
+            <div style="display: flex; gap: 20px; justify-content: center;">
+                <button id="helld-menu-btn" style="
+                    background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
+                    padding: 8px 24px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(255,51,68,0.3); transition: all 0.2s;
+                ">${isEn ? '[ RETURN TO MENU ]' : '[ 返回主菜单 ]'}</button>
+            </div>
         </div>
     `;
-    document.body.appendChild(popup);
+
+    document.body.appendChild(overlay);
 
     const menuBtn = document.getElementById('helld-menu-btn');
     menuBtn.onmouseenter = () => { menuBtn.style.background = '#FF3344'; menuBtn.style.color = '#000'; };
     menuBtn.onmouseleave = () => { menuBtn.style.background = 'rgba(255, 51, 68, 0.15)'; menuBtn.style.color = '#FF3344'; };
     menuBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         window.__hellState = null;
         isGameOver = true;
         if (typeof window.__returnToMenu === 'function') {
@@ -4258,6 +4379,7 @@ function resetGame() {
 }
 
 function update() {
+    if (isGameOver) return; // 游戏结束/死亡战报弹窗激活期间停止更新逻辑
     // 实验：L7/L8 换弹计时
     if (typeof __l78TickReload === 'function') __l78TickReload();
     if (window.__viewState && window.__viewState !== 'playing') {
@@ -23290,7 +23412,7 @@ function drawInfernalWatcher(cam) {
     if (cam.currentAngle === undefined || isNaN(cam.currentAngle)) {
         cam.currentAngle = baseAng;
     }
-    const range = (typeof cam.fovRange === 'number' && !isNaN(cam.fovRange) && cam.fovRange > 0) ? cam.fovRange : 450;
+    const range = (typeof cam.fovRange === 'number' && !isNaN(cam.fovRange) && cam.fovRange > 0) ? cam.fovRange : 520;
     const halfAngle = (typeof cam.fovAngle === 'number' && !isNaN(cam.fovAngle) && cam.fovAngle > 0) ? (cam.fovAngle / 2) : 0.42;
     const ang = (typeof cam.currentAngle === 'number' && !isNaN(cam.currentAngle)) ? cam.currentAngle : baseAng;
     const isDetecting = !!cam.detecting;
@@ -23305,20 +23427,10 @@ function drawInfernalWatcher(cam) {
     // =========================================================
     ctx.save();
     const timeNow = Date.now() * 0.001;
-    // 2026-11-07：视锥顶点移到眼睛处（魂灯烈焰核心前方 18px、石像鬼双眼中点 7px、魔眼瞳孔 3.5px）；
-    // 扇形按遮挡裁剪（之前是纯圆扇形，符文弧线会穿墙、横贯其他扇形）
+    // 2026-11-07：视锥顶点移到眼睛处（魂灯烈焰核心前方 18px、石像鬼双眼中点 7px、魔眼瞳孔 3.5px）
+    // Level 0 地狱装置（魂灯/石像鬼/魔眼）视野不受岩石等障碍物遮挡
     const eyeOff = type === 'soul_lantern' ? 18 : type === 'gargoyle_sentinel' ? 7 : 3.5;
     const ex = Math.cos(ang) * eyeOff, ey = Math.sin(ang) * eyeOff;
-    const _wpoly = (typeof getVisionConePolygon === 'function')
-        ? getVisionConePolygon(cam.x + ex, cam.y + ey, ang, halfAngle * 2, range)
-        : null;
-    if (_wpoly && _wpoly.length >= 3) {
-        ctx.beginPath();
-        ctx.moveTo(_wpoly[0].x - cam.x, _wpoly[0].y - cam.y);
-        for (let _wi = 1; _wi < _wpoly.length; _wi++) ctx.lineTo(_wpoly[_wi].x - cam.x, _wpoly[_wi].y - cam.y);
-        ctx.closePath();
-        ctx.clip();
-    }
     if (type === 'soul_lantern') {
         ctx.fillStyle = isDetecting ? 'rgba(168, 85, 247, 0.48)' : 'rgba(56, 189, 248, 0.25)';
         ctx.strokeStyle = isDetecting ? 'rgba(216, 180, 254, 0.9)' : 'rgba(56, 189, 248, 0.7)';
@@ -27660,7 +27772,7 @@ if (typeof document !== 'undefined') {
 // 挂载全局方法到 window
 window.resetGame = resetGame;
 // 2026-11-01 地狱隐藏关：暴露调试接口
-window.__hellDebug = { showHellChoicePopup, showHellCompletePopup, showHellDeathPopup, isInAltarArea, checkHellQuestComplete, returnFromHell, triggerHellAltarSeal };
+window.__hellDebug = { showPreHellFallPopup, showHellChoicePopup, showHellCompletePopup, showHellDeathPopup, isInAltarArea, checkHellQuestComplete, returnFromHell, triggerHellAltarSeal };
 window.initMapLayout = initMapLayout;
 window.switchWeapon = switchWeapon;
 window.togglePause = togglePause;

@@ -110,10 +110,117 @@ const WEAPONS = {
     SOUL_SIPHON:    { id: 11, name: "灵魂汲取",   nameEn: "Soul Siphon", range: 420, cooldown: 7,  damage: 26, speed: 22, radius: 8, type: 'soul_siphon' }
 };
 
+// --- Level 7 专属敌人覆盖表 (2026-11-05) ---
+// 用法：按敌人类型填要覆盖的属性，L7 里自动生效，其他关卡完全不受影响。
+// 类型键：'guard' 普通守卫 / 'observer' 观察者 / 'jammer' 干扰者
+// 示例：guard: { hp: 150, maxHp: 150, patrolSpeed: 1.5 }  // 只改 L7 守卫的血量和速度
+// 注意：绝不直接改 spawnWave() 里的敌人初始值（会污染所有关卡）。
+// 全新敌人类型（新 AI 行为）：不要在这里加，先在 DEV_NOTES.md 记录 012 里登记设计，
+// 再在 engine.js 里加独立的 drawAgentL7 / 行为分支，不要动原有敌人逻辑。
+const LEVEL7_ENEMY_OVERRIDES = {
+    // 现在是空的，L7 敌人 = 原版数值。以后要改 L7 敌人只填这里。
+    // guard: {},
+    // observer: {},
+    // jammer: {},
+};
+
+// L7 敌人覆盖应用函数：在 spawnWave() 里每个敌人创建后调用
+function applyLevel7EnemyOverrides(enemy) {
+    if (!enemy) return enemy;
+    const levelId = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+    if (levelId !== 'level7_lab') return enemy;
+    const type = enemy.isJammer ? 'jammer' : (enemy.isObserver ? 'observer' : 'guard');
+    const override = LEVEL7_ENEMY_OVERRIDES[type];
+    if (override) Object.assign(enemy, override);
+    return enemy;
+}
+
+// --- Level 7 专属武器覆盖表 (2026-11-05) ---
+// 用法：在这里填武器 id → 要覆盖的属性，L7 里自动生效，其他关卡完全不受影响。
+// 示例：RIFLE: { damage: 35, cooldown: 8 }  // 只改 L7 的步枪伤害和射速
+// 注意：绝不直接改上面的 WEAPONS 全局对象（会污染所有关卡）。
+const LEVEL7_WEAPON_OVERRIDES = {
+    // 实验 v5：L7/L8 的 3 号位是 GEN-12 霰弹枪，用三管猎枪数值做底（伤害 32x12、冷却 35f、射程 380）
+    3: { damage: 32, pellets: 12, spread: 0.28, speed: 20, radius: 3.8, range: 380, cooldown: 35, type: 'shotgun' },
+};
+
 // 关卡专有武器动态属性适配器 (仅在 Level 0 大地图生效，绝不波及其他关卡)
+// 实验：L7/L8 有限弹药系统（2026-11-06 v4）：弹匣容量 + 有限总弹药，弹匣打空从总弹药补，总弹药为 0 则无法开火
+const L78_MAG_SIZE = { 1: 30, 2: 15, 3: 6, 4: 5, 5: 1 };
+const L78_RESERVE_INIT = { 1: 120, 2: 60, 3: 30, 4: 20, 5: 5 };
+const __l78Ammo = {}; // { weaponId: { mag, reserve } }
+let lastAltarHintTime = 0; // 2026-11-07：祭坛外击杀提示节流（8 秒内只提示一次）
+function __l78AmmoGet(id) {
+    if (!__l78Ammo[id]) {
+        __l78Ammo[id] = { mag: (L78_MAG_SIZE[id] || 30), reserve: (L78_RESERVE_INIT[id] !== undefined ? L78_RESERVE_INIT[id] : 0) };
+    }
+    return __l78Ammo[id];
+}
+// 实验：L7/L8 自动换弹（2026-11-06 v11）：弹匣打空后进入 90 帧（1.5 秒）换弹，期间不能开火
+const L78_RELOAD_FRAMES = 90; // 所有武器统一 1.5 秒
+let __l78Reloading = false;   // 是否正在换弹
+let __l78ReloadTimer = 0;     // 换弹计时（帧）
+let __l78ReloadWeaponId = 0;  // 正在换弹的武器 id
+function __l78StartReload(id) {
+    const a = __l78AmmoGet(id);
+    if (a.reserve <= 0) return false; // 总弹药为 0，不进换弹
+    __l78Reloading = true;
+    __l78ReloadTimer = 0;
+    __l78ReloadWeaponId = id;
+    if (typeof soundManager !== 'undefined' && soundManager.playReload) soundManager.playReload();
+    return true;
+}
+function __l78CancelReload() {
+    __l78Reloading = false;
+    __l78ReloadTimer = 0;
+    __l78ReloadWeaponId = 0;
+}
+function __l78TickReload() {
+    if (!__l78Reloading) return;
+    __l78ReloadTimer++;
+    if (__l78ReloadTimer >= L78_RELOAD_FRAMES) {
+        const a = __l78AmmoGet(__l78ReloadWeaponId);
+        const need = (L78_MAG_SIZE[__l78ReloadWeaponId] || 30);
+        const refill = Math.min(need, a.reserve);
+        a.reserve -= refill;
+        a.mag = refill;
+        __l78Reloading = false;
+        __l78ReloadTimer = 0;
+        __l78ReloadWeaponId = 0;
+        if (typeof addLog === 'function') addLog("弹匣已更换");
+    }
+}
+// 开火扣弹：返回 true=成功扣弹可开火，false=无弹无法开火
+function __l78AmmoConsume(id) {
+    if (__l78Reloading) return false; // 换弹中不能开火
+    const a = __l78AmmoGet(id);
+    if (a.mag > 0) { a.mag--; return true; }
+    // 弹匣空：总弹药 > 0 则开始换弹（不再瞬间补满）
+    if (a.reserve > 0) {
+        __l78StartReload(id);
+        return false;
+    }
+    return false;
+}
+// 实验：L7/L8 步枪快慢机（2026-11-06 v4）：false=半自动（步枪原值），true=全自动（冲锋枪数值）
+window.__l7RifleAutoMode = false;
+
 function getEffectiveWeapon(wp) {
     if (!wp) return wp;
-    const isLevel0 = (typeof getCurrentLevelId === 'function' && getCurrentLevelId() === 'level0_test');
+    const levelId = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+
+    // Level 7/8：查专属覆盖表，有就返回修改后的副本，没有就返回原样
+    if (levelId === 'level7_lab' || levelId === 'level8_test') {
+        // 实验：步枪快慢机——全自动状态用冲锋枪数值（伤害 16、冷却 6f、射程 380）
+        if (wp.id === 1 && window.__l7RifleAutoMode) {
+            return { ...wp, damage: 16, cooldown: 6, range: 380 };
+        }
+        const override = LEVEL7_WEAPON_OVERRIDES[wp.id];
+        if (override) return { ...wp, ...override };
+        return wp;
+    }
+
+    const isLevel0 = (levelId === 'level0_test');
     if (!isLevel0) return wp;
 
     switch(wp.id) {
@@ -157,6 +264,7 @@ function settleAllPendingDamage() {
             if (e.pendingDamage > 0) {
                 applyDamageToEnemy(e, e.pendingDamage);
                 e.pendingDamage = 0;
+                e.pendingDamageInAltar = false;
                 e.hitTimer = 8;
                 const isDemon = e.isDemon || (getCurrentLevelId() === 'level0_test');
                 createExplosion(e.x, e.y, 20, isDemon ? '#ff2200' : '#00FF66');
@@ -324,8 +432,23 @@ const player = {
     x: 100, y: 350, angle: 0, speed: 3.8, walkCycle: 0, 
     flashTimer: 0, hp: 100, maxHp: 100,
     shield: 100, maxShield: 100, shieldActive: true, lastHitTimer: 0,
-    fov: Math.PI / 2.2, viewDistance: 500
+    fov: Math.PI / 2.2, viewDistance: 500,
+    // L7 专属角色模型切换 (2026-11-05)：'default' 默认模型，'special' 特殊模型
+    // 切换函数 setPlayerModelVariant() 在下面定义，drawAgent 里按此字段分支渲染
+    modelVariant: 'default'
 };
+
+// --- L7 专属角色模型切换 ---
+// 用法：setPlayerModelVariant('special') 切特殊模型，setPlayerModelVariant('default') 切回默认
+// 渲染分支在 drawAgent() 里按 player.modelVariant 判断，现在两个分支画一样的模型（占位），
+// 等特殊模型设计好后只改 drawAgent 里的 'special' 分支，不动其他代码。
+function setPlayerModelVariant(variant) {
+    if (variant !== 'default' && variant !== 'special') return;
+    player.modelVariant = variant;
+}
+window.setPlayerModelVariant = setPlayerModelVariant;
+function getPlayerModelVariant() { return player.modelVariant; }
+window.getPlayerModelVariant = getPlayerModelVariant;
 
 let blindActive = false;
 let blindEnergy = 100;
@@ -516,6 +639,9 @@ function initMapLayout() {
     if (currentLevelId === 'level0_test') {
         unlockedWeapons = [WEAPONS.TRIPLE_SHOTGUN.id, WEAPONS.RUNE_SCYTHE.id, WEAPONS.LAVA_CIRCLE.id, WEAPONS.SOUL_SIPHON.id];
         currentWeapon = WEAPONS.TRIPLE_SHOTGUN;
+    } else if (currentLevelId === 'level7_lab' || currentLevelId === 'level8_test') {
+        // L7/L8 设计：所有武器开局即解锁（本关不掉落武器，弹药靠击杀掉落补充）
+        unlockedWeapons = [WEAPONS.RIFLE.id, WEAPONS.PISTOL.id, WEAPONS.SMG.id, WEAPONS.SNIPER.id, WEAPONS.GRENADE.id];
     } else {
         unlockedWeapons = [WEAPONS.RIFLE.id];
         if (!currentWeapon || (currentWeapon.id === WEAPONS.MACHINE_GUN.id || currentWeapon.id === WEAPONS.UAV.id || currentWeapon.id === WEAPONS.TRIPLE_SHOTGUN.id || currentWeapon.id === WEAPONS.RUNE_SCYTHE.id || currentWeapon.id === WEAPONS.LAVA_CIRCLE.id || currentWeapon.id === WEAPONS.SOUL_SIPHON.id)) {
@@ -648,6 +774,31 @@ function getVisionBlockingSegments() {
             }
         }
     });
+    // 实验 v8：L7/L8 新道具遮挡视野（圆形控制台/三联控制台/服务器集群/扇形控制台等都是 props，之前不挡视野）
+    if ((typeof getCurrentLevelId === 'function') && (getCurrentLevelId() === 'level7_lab' || getCurrentLevelId() === 'level8_test')) {
+        if (typeof props !== 'undefined' && Array.isArray(props)) {
+            props.forEach(p => {
+                if (p.noCollision) return;
+                if (p.type === 'heavy_auto_door') return; // 已由重型门分支处理
+                if (p.points && Array.isArray(p.points) && p.points.length >= 3) {
+                    const pts = p.points;
+                    for (let i = 0; i < pts.length; i++) {
+                        const p1 = pts[i];
+                        const p2 = pts[(i + 1) % pts.length];
+                        segments.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, minX: Math.min(p1.x, p2.x), maxX: Math.max(p1.x, p2.x), minY: Math.min(p1.y, p2.y), maxY: Math.max(p1.y, p2.y) });
+                    }
+                } else if (p.x !== undefined && p.w !== undefined && p.h !== undefined) {
+                    const x1 = p.x, y1 = p.y, x2 = p.x + p.w, y2 = p.y + p.h;
+                    segments.push(
+                        { x1: x1, y1: y1, x2: x2, y2: y1, minX: x1, maxX: x2, minY: y1, maxY: y1 },
+                        { x1: x2, y1: y1, x2: x2, y2: y2, minX: x2, maxX: x2, minY: y1, maxY: y2 },
+                        { x1: x2, y1: y2, x2: x1, y2: y2, minX: x1, maxX: x2, minY: y2, maxY: y2 },
+                        { x1: x1, y1: y2, x2: x1, y2: y1, minX: x1, maxX: x1, minY: y1, maxY: y2 }
+                    );
+                }
+            });
+        }
+    }
     // Closed heavy armored doors block vision like solid walls; open doors or glass doors do not block vision
     if (typeof props !== 'undefined' && Array.isArray(props)) {
         props.forEach(p => {
@@ -668,6 +819,12 @@ function getVisionBlockingSegments() {
     cachedVisionSegments = segments;
     cachedVisionFrame = currentFrameCount;
     return segments;
+}
+
+// 2026-11-07：视锥顶点前移到眼睛/镜头处（之前传身体/底座中心，扇形像从脑袋里长出来）。
+// 只改视觉顶点，不改玩法判定（canSee、夜幕、黄色高亮仍用身体中心）。
+function fovEyePoint(x, y, angle, forward) {
+    return { x: x + Math.cos(angle) * forward, y: y + Math.sin(angle) * forward };
 }
 
 function drawTacticalFOV(x, y, angle, fovAngle, maxDist, fillColor, strokeColor) {
@@ -2163,7 +2320,9 @@ function spawnWave() {
         }
     }
 
-    const count = 2 + wave;
+    // L7/L8：每波固定 10 只（不随波次增加），全刷中间房间
+    const isL78Test = (levelId === 'level7_lab' || levelId === 'level8_test');
+    const count = isL78Test ? 10 : 2 + wave; // L7/L8 固定每波 10 只，不随波次增加
     const bounds = getLevelBounds();
     const minSpawnX = bounds.minX + 24;
     const maxSpawnX = bounds.maxX - 24;
@@ -2210,6 +2369,12 @@ function spawnWave() {
                 if (spawnX >= vaultLeftBoundary - 15) {
                     continue; // 拒绝金库内部及门前紧贴区域的刷新
                 }
+            } else if (levelId === 'level7_lab' || levelId === 'level8_test') {
+                // 实验 v8：L7/L8 敌人固定刷中间房间（中心 1600,1200，半径 300 内随机）
+                const a = Math.random() * Math.PI * 2;
+                const r = 60 + Math.random() * 240;
+                spawnX = 1600 + Math.cos(a) * r;
+                spawnY = 1200 + Math.sin(a) * r;
             } else {
                 spawnX = minSpawnX + (maxSpawnX - minSpawnX) * (0.35 + Math.random() * 0.55);
                 spawnY = minSpawnY + Math.random() * (maxSpawnY - minSpawnY);
@@ -2229,6 +2394,12 @@ function spawnWave() {
             } else if (levelId === 'level3_bank') {
                 spawnX = minSpawnX + (maxSpawnX - minSpawnX) * 0.45;
                 spawnY = minSpawnY + (maxSpawnY - minSpawnY) * 0.5;
+            } else if (levelId === 'level7_lab' || levelId === 'level8_test') {
+                // 实验 v8：兜底也放中间房间
+                const a = Math.random() * Math.PI * 2;
+                const r = 100 + Math.random() * 200;
+                spawnX = 1600 + Math.cos(a) * r;
+                spawnY = 1200 + Math.sin(a) * r;
             } else {
                 spawnX = minSpawnX + (maxSpawnX - minSpawnX) * 0.7;
                 spawnY = minSpawnY + (maxSpawnY - minSpawnY) * 0.5;
@@ -2283,6 +2454,8 @@ function spawnWave() {
             patrolSpeed: 1.0 + Math.random() * 0.3, walkCycle: 0, hitTimer: 0, scanAngle: Math.random() * 6, shootCooldown: 0,
             deathAlpha: 1.0
         };
+        // L7 专属敌人覆盖（2026-11-05）：只在 L7 生效，其他关卡原样通过
+        applyLevel7EnemyOverrides(newEnemy);
         ensureEntityInBounds(newEnemy, 16);
         enemies.push(newEnemy);
     }
@@ -2364,6 +2537,19 @@ window.addEventListener('keydown', e => {
         }
     }
 
+    // 实验：L7/L8 步枪快慢机切换（V 键，仅当前武器是步枪时生效）
+    if (e.code === 'KeyV') {
+        const _lvl = getCurrentLevelId();
+        if ((_lvl === 'level7_lab' || _lvl === 'level8_test') && currentWeapon && currentWeapon.id === WEAPONS.RIFLE.id) {
+            window.__l7RifleAutoMode = !window.__l7RifleAutoMode;
+            const isEn = (window.__gameLang === 'en');
+            if (typeof addLog === 'function') {
+                addLog(window.__l7RifleAutoMode
+                    ? (isEn ? "Rifle: FULL AUTO" : "步枪：全自动")
+                    : (isEn ? "Rifle: SEMI AUTO" : "步枪：半自动"));
+            }
+        }
+    }
     if (e.code === 'KeyR' || e.key === 'r') { if(isGameOver) resetGame(); }
     if (e.code === 'KeyE' || e.key === 'e' || e.key === 'E') {
         if (window.__storyBriefingEnabled && window.__levelObjectiveAchieved && !isGameOver && !isPaused) {
@@ -2572,6 +2758,8 @@ function setupCanvasListeners() {
 }
 
 function switchWeapon(wp) {
+    // 实验：L7/L8 换弹中途切武器，取消当前换弹
+    if (typeof __l78CancelReload === 'function') __l78CancelReload();
     currentWeapon = wp;
     window.currentWeapon = currentWeapon;
     if (!wp || wp.id !== WEAPONS.SOUL_SIPHON.id) {
@@ -2978,9 +3166,15 @@ function spawnDropItem(x, y) {
     x = reachable.x;
     y = reachable.y;
 
+    const curLvl = getCurrentLevelId();
+    // 实验 v5：L7/L8 每只敌人必掉一个弹药包，不掉落武器（所有武器开局已解锁）
+    if (curLvl === 'level7_lab' || curLvl === 'level8_test') {
+        dropItems.push({ x, y, type: 'ammo', timer: 700 });
+        return;
+    }
+
     const rand = Math.random();
-    if (rand < 0.7) { 
-        const curLvl = getCurrentLevelId();
+    if (rand < 0.7) {
         if (curLvl === 'level0_test') {
             if (rand < 0.35) {
                 dropItems.push({ x, y, type: 'medkit', timer: 700 });
@@ -3063,6 +3257,7 @@ function closeBlindZone(reason = "COLLAPSED") {
         if (e.pendingDamage > 0) {
             applyDamageToEnemy(e, e.pendingDamage);
             e.pendingDamage = 0;
+            e.pendingDamageInAltar = false;
             if (currentLevelId !== 'level0_test') {
                 e.alert = true; e.alertCooldown = 300;
             }
@@ -3091,7 +3286,7 @@ function triggerHellAltarSeal() {
             life: 70 + Math.random() * 50,
             maxLife: 120,
             color: '#f43f5e',
-            size: 3 + Math.random() * 4,
+            size: 2 + Math.random() * 1,
             isHellRiteParticle: true,
             spawnY: sy
         });
@@ -3224,8 +3419,10 @@ function applyDamageToEnemy(enemy, amount, isSoulSiphon = false) {
             const healHp = Math.round(strength * 0.15);
             const healShield = Math.round(strength * 0.20);
             // 2026-11-01 地狱任务：祭坛区域灵魂汲取击杀计数
+            // 2026-11-07：推迟伤害结算时也算——以造成伤害时的位置（pendingDamageInAltar 标记）为准，
+            // 而非结算时位置（恶魔在盲区内游走，结算时常已走出祭坛）
             const hs = window.__hellState;
-            if (hs && hs.active && currentLevelId === 'level0_test' && isInAltarArea(enemy.x, enemy.y)) {
+            if (hs && hs.active && currentLevelId === 'level0_test' && (isInAltarArea(enemy.x, enemy.y) || enemy.pendingDamageInAltar)) {
                 hs.altarKills++;
                 if (enemy.isCerberus) hs.altarCerberusKills++;
                 if (typeof addLog !== 'undefined') {
@@ -3237,6 +3434,15 @@ function applyDamageToEnemy(enemy, amount, isSoulSiphon = false) {
                 // 检查任务完成
                 if (checkHellQuestComplete()) {
                     onHellQuestComplete();
+                }
+            } else if (hs && hs.active && currentLevelId === 'level0_test') {
+                // 2026-11-07：祭坛外用灵魂汲取击杀不计数，提示玩家（8 秒内只提示一次，免刷屏）
+                if (typeof addLog !== 'undefined' && Date.now() - lastAltarHintTime > 8000) {
+                    lastAltarHintTime = Date.now();
+                    const isEn = (window.__gameLang === 'en');
+                    addLog(isEn
+                        ? 'Soul Siphon kill not counted: sacrifices must be made within the altar area!'
+                        : '灵魂汲取击杀未计数：需在祭坛区域内献祭才计数！', '#fca5a5');
                 }
             }
             triggerSoulSacrificeEffect(enemy.x, enemy.y, healHp, healShield);
@@ -3478,6 +3684,15 @@ function shoot() {
         return;
     }
     
+    // 实验：L7/L8 有限弹药——普通武器每次开火扣 1 发（机枪/UAV 已在上方 return，不会走到这里）
+    if (currentLevelId === 'level7_lab' || currentLevelId === 'level8_test') {
+        if (!__l78AmmoConsume(currentWeapon.id)) {
+            // 换弹中不刷"弹药耗尽"（只在真正无弹时提示）
+            if (!__l78Reloading && typeof addLog === 'function') addLog("弹药耗尽！");
+            return;
+        }
+    }
+
     const activeWeapon = getEffectiveWeapon(currentWeapon);
 
     if (cachedIsPlayerInPool && activeWeapon.type !== 'grenade') {
@@ -3645,38 +3860,50 @@ function shoot() {
 }
 
 function triggerGameOver(success) {
+    if (isGameOver) return; // 防止每帧重复进入触发 Game Over
     const currentLevelId = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
     const isHell = (currentLevelId === 'level0_test');
     const isEn = (window.__gameLang === 'en');
 
-    // 2026-11-01 地狱隐藏关：普通关死亡 → 保存进度并跳转地狱
+    // 2026-11-01 地狱隐藏关：普通关死亡 → 保存进度并先弹战绩窗，确认后再跳转地狱 (Level 0)
     if (!success && !isHell) {
+        if (document.getElementById('pre-hell-popup')) return;
+        isGameOver = true;
+        isPaused = true;
+        const fromLevelIndex = (window.levelManager && window.levelManager.currentIndex) || 1;
+        const fromWave = (typeof wave !== 'undefined') ? wave : 1;
+        const fromKillCount = (typeof killCount !== 'undefined') ? killCount : 0;
+
         window.__hellState = {
-            fromLevelIndex: (window.levelManager && window.levelManager.currentIndex) || 1,
-            fromWave: (typeof wave !== 'undefined') ? wave : 1,
-            fromKillCount: (typeof killCount !== 'undefined') ? killCount : 0,
+            fromLevelIndex,
+            fromWave,
+            fromKillCount,
             wavesSurvived: 0,
             altarKills: 0,
             altarCerberusKills: 0,
             active: false
         };
-        // 跳转到地狱（L0）
-        if (typeof window.__launchGameLevel === 'function') {
-            window.__launchGameLevel(0);
+        if (typeof soundManager !== 'undefined' && soundManager.updateGameState) {
+            soundManager.updateGameState(true, true);
         }
-        // 弹出地狱选择
-        showHellChoicePopup();
+        showPreHellFallPopup({ fromLevelIndex, fromWave, fromKillCount });
         return;
     }
 
-    // 2026-11-01 地狱隐藏关：地狱中死亡 → 战绩弹窗，确认后回主菜单（2026-11-02 改）
+    // 2026-11-01 地狱隐藏关：地狱中死亡 → 战绩弹窗，确认后回主菜单
     if (!success && isHell) {
+        if (document.getElementById('hell-death-popup')) return;
         isGameOver = true;
+        isPaused = true;
+        if (typeof soundManager !== 'undefined' && soundManager.updateGameState) {
+            soundManager.updateGameState(true, true);
+        }
         showHellDeathPopup();
         return;
     }
 
     isGameOver = true;
+    isPaused = true;
     const screen = document.getElementById('game-over-screen');
     const title = document.getElementById('over-title');
     const desc = document.getElementById('over-desc');
@@ -3705,7 +3932,89 @@ function isInAltarArea(x, y) {
     return Math.hypot(x - 1920, y - 500) < 150;
 }
 
-// 显示地狱选择弹窗（2026-11-01：样式对齐游戏 UI：tactical mono + 辉光 + 描边按钮）
+// 显示普通关阵亡战报弹窗：采用游戏原本 UI 默认非等宽字体，显示阵亡、波次、击杀数，??? 倒计时自动跳转 Level 0（不可主动点击）
+function showPreHellFallPopup(stats) {
+    const isEn = (window.__gameLang === 'en');
+    // 如果已经存在弹窗，不重复创建
+    if (document.getElementById('pre-hell-popup')) return;
+
+    const fromWave = (stats && stats.fromWave) || (typeof wave !== 'undefined' ? wave : 1);
+    const fromKills = (stats && typeof stats.fromKillCount === 'number') ? stats.fromKillCount : ((typeof killCount !== 'undefined') ? killCount : 0);
+
+    const overlay = document.createElement('div');
+    overlay.id = 'pre-hell-popup';
+    overlay.className = 'pre-hell-modal-overlay';
+
+    let countdown = 5;
+
+    overlay.innerHTML = `
+        <div class="pre-hell-modal-card">
+            <h1 style="font-size: 24px; margin-bottom: 14px; color: #FF3344; letter-spacing: 3px; font-weight: bold; text-shadow: 0 0 10px rgba(255,51,68,0.7);">
+                ${isEn ? 'MISSION FAILED' : '阵 亡'}
+            </h1>
+            <div style="font-size: 15px; color: #d1d5db; line-height: 2; margin-bottom: 22px; text-align: center;">
+                ${isEn ? 'Wave' : '波次'}：<span style="color: #00FF66; font-weight: bold; text-shadow: 0 0 6px rgba(0,255,102,0.6);">${fromWave}</span><br>
+                ${isEn ? 'Total Kills' : '击杀数'}：<span style="color: #00FF66; font-weight: bold; text-shadow: 0 0 6px rgba(0,255,102,0.6);">${fromKills}</span>
+            </div>
+            <div style="display: flex; gap: 16px; justify-content: center; align-items: center;">
+                <div id="prehell-countdown-btn" style="
+                    background: rgba(255, 51, 68, 0.12); border: 1px dashed rgba(255, 51, 68, 0.65); color: #fca5a5;
+                    padding: 8px 20px; font-weight: bold; font-size: 13px; letter-spacing: 2px;
+                    border-radius: 4px; box-shadow: 0 0 10px rgba(255, 51, 68, 0.2);
+                    pointer-events: none; cursor: not-allowed; user-select: none;
+                ">
+                    ${isEn ? `???: ${countdown}s` : `???: ${countdown}秒`}
+                </div>
+                <button id="prehell-abort-btn" style="
+                    background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
+                    padding: 8px 22px; font-weight: bold; cursor: pointer;
+                    font-size: 13px; letter-spacing: 2px; border-radius: 4px;
+                    box-shadow: 0 0 12px rgba(0, 255, 102, 0.25); transition: all 0.2s;
+                ">${isEn ? '[ MAIN MENU ]' : '[ 返回主菜单 ]'}</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    const countdownBtn = document.getElementById('prehell-countdown-btn');
+    const abortBtn = document.getElementById('prehell-abort-btn');
+
+    const timer = setInterval(() => {
+        countdown--;
+        if (countdown > 0) {
+            if (countdownBtn) {
+                countdownBtn.innerText = isEn ? `???: ${countdown}s` : `???: ${countdown}秒`;
+            }
+        } else {
+            clearInterval(timer);
+            overlay.remove();
+            isGameOver = false;
+            // 倒计时结束，自动跳转 Level 0
+            if (typeof window.__launchGameLevel === 'function') {
+                window.__launchGameLevel(0);
+            }
+            showHellChoicePopup();
+        }
+    }, 1000);
+
+    overlay.__preHellTimer = timer;
+
+    if (abortBtn) {
+        abortBtn.onmouseenter = () => { abortBtn.style.background = '#00FF66'; abortBtn.style.color = '#000'; };
+        abortBtn.onmouseleave = () => { abortBtn.style.background = 'rgba(0, 255, 102, 0.15)'; abortBtn.style.color = '#00FF66'; };
+        abortBtn.onclick = () => {
+            clearInterval(timer);
+            overlay.remove();
+            window.__hellState = null;
+            if (typeof window.__returnToMenu === 'function') {
+                window.__returnToMenu();
+            }
+        };
+    }
+}
+
+// 显示地狱选择弹窗（保留原版文案、字体与颜色，套用通用 UI 黑底绿色外框并缩小紧凑排版）
 function showHellChoicePopup() {
     const isEn = (window.__gameLang === 'en');
     const old = document.getElementById('hell-choice-popup');
@@ -3713,58 +4022,67 @@ function showHellChoicePopup() {
 
     const TACTICAL_FONT = `ui-monospace, "SF Mono", Monaco, Menlo, Consolas, "Cascadia Code", "Roboto Mono", "PingFang SC", "Microsoft YaHei", "Source Han Sans CN", monospace`;
 
-    const popup = document.createElement('div');
-    popup.id = 'hell-choice-popup';
-    popup.style.cssText = `
+    const overlay = document.createElement('div');
+    overlay.id = 'hell-choice-popup';
+    overlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(2, 6, 4, 0.94); z-index: 10000;
-        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        z-index: 10000; display: flex; justify-content: center; align-items: center;
         font-family: ${TACTICAL_FONT};
-        text-shadow: 0 0 10px #FF3344;
     `;
-    popup.innerHTML = `
-        <h1 style="font-size: 42px; margin-bottom: 10px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
-            ${isEn ? 'YOU HAVE DIED' : '你 已 阵 亡'}
-        </h1>
-        <p style="font-size: 16px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
-            ${isEn ? '// SOUL DRAGGED INTO THE ABYSS' : '// 灵魂坠入地狱深渊'}
-        </p>
-        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #FF3344;">
-            ${isEn
-                ? 'Survive <span style="color:#FF3344">3 WAVES</span>, then in the <span style="color:#FF3344">ALTAR AREA</span> use <span style="color:#FF3344">SOUL SIPHON</span> to slay <span style="color:#FF3344">5 ENEMIES</span> (incl. <span style="color:#FF3344">1 CERBERUS</span>)<br>to return with wave progress intact.<br>Leave now, or die in Hell — back to main menu.'
-                : '在地狱坚持 <span style="color:#FF3344">3 波</span>，并在<span style="color:#FF3344">祭坛区域</span>使用<span style="color:#FF3344">灵魂汲取</span>击杀 <span style="color:#FF3344">5 名敌人</span><br>（至少包括 <span style="color:#FF3344">1 只地狱犬</span>），即可返回原关卡并保留波次。<br>若选择离开，或在地狱中死亡，将直接返回主菜单。'}
-        </p>
-        <div style="display: flex; gap: 24px;">
-            <button id="hell-stay-btn" style="
-                background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(255,51,68,0.3); transition: all 0.2s;
-            ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
-            <button id="hell-leave-btn" style="
-                background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(0,255,102,0.3); transition: all 0.2s;
-            ">${isEn ? '[ LEAVE ]' : '[ 离 开 ]'}</button>
+
+    overlay.innerHTML = `
+        <div style="
+            background: #030d07; border: 1.5px solid #00FF66; border-radius: 8px;
+            box-shadow: 0 0 25px rgba(0, 255, 102, 0.22);
+            padding: 24px 30px; max-width: 580px; width: 92%;
+            box-sizing: border-box; text-align: center; font-family: ${TACTICAL_FONT};
+            text-shadow: 0 0 10px #FF3344;
+        ">
+            <h1 style="font-size: 24px; margin-bottom: 8px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
+                ${isEn ? 'YOU HAVE DIED' : '你 已 阵 亡'}
+            </h1>
+            <p style="font-size: 13px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
+                ${isEn ? '// SOUL DRAGGED INTO THE ABYSS' : '// 灵魂坠入地狱深渊'}
+            </p>
+            <p style="font-size: 13px; color: #e5e7eb; line-height: 1.8; margin-bottom: 22px; text-align: center; text-shadow: 0 0 6px #FF3344;">
+                ${isEn
+                    ? 'Survive <span style="color:#FF3344">3 WAVES</span>, then in the <span style="color:#FF3344">ALTAR AREA</span> use <span style="color:#FF3344">SOUL SIPHON</span> to slay <span style="color:#FF3344">5 ENEMIES</span> (incl. <span style="color:#FF3344">1 CERBERUS</span>)<br>to return with wave progress intact.<br>Leave now, or die in Hell — back to main menu.'
+                    : '在地狱坚持 <span style="color:#FF3344">3 波</span>，并在<span style="color:#FF3344">祭坛区域</span>使用<span style="color:#FF3344">灵魂汲取</span>击杀 <span style="color:#FF3344">5 名敌人</span><br>（至少包括 <span style="color:#FF3344">1 只地狱犬</span>），即可返回原关卡并保留波次。<br>若选择离开，或在地狱中死亡，将直接返回主菜单。'}
+            </p>
+            <div style="display: flex; gap: 20px; justify-content: center;">
+                <button id="hell-stay-btn" style="
+                    background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
+                    padding: 8px 24px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(255,51,68,0.3); transition: all 0.2s;
+                ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
+                <button id="hell-leave-btn" style="
+                    background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
+                    padding: 8px 24px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(0,255,102,0.3); transition: all 0.2s;
+                ">${isEn ? '[ LEAVE ]' : '[ 离 开 ]'}</button>
+            </div>
         </div>
     `;
-    document.body.appendChild(popup);
 
-    // hover 效果对齐 .restart-btn
+    document.body.appendChild(overlay);
+
     const stayBtn = document.getElementById('hell-stay-btn');
     const leaveBtn = document.getElementById('hell-leave-btn');
+
     stayBtn.onmouseenter = () => { stayBtn.style.background = '#FF3344'; stayBtn.style.color = '#000'; };
     stayBtn.onmouseleave = () => { stayBtn.style.background = 'rgba(255, 51, 68, 0.15)'; stayBtn.style.color = '#FF3344'; };
     leaveBtn.onmouseenter = () => { leaveBtn.style.background = '#00FF66'; leaveBtn.style.color = '#000'; };
     leaveBtn.onmouseleave = () => { leaveBtn.style.background = 'rgba(0, 255, 102, 0.15)'; leaveBtn.style.color = '#00FF66'; };
 
     stayBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         if (window.__hellState) window.__hellState.active = true;
     };
     leaveBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         window.__hellState = null;
         if (typeof window.__returnToMenu === 'function') {
             window.__returnToMenu();
@@ -3772,7 +4090,7 @@ function showHellChoicePopup() {
     };
 }
 
-// 2026-11-02：地狱血祭完成弹窗（三选一：留在地狱 / 返回原关卡 / 主菜单）
+// 2026-11-02：地狱血祭完成弹窗（保留原版文案、字体与颜色，套用通用 UI 黑底绿色外框并缩小紧凑排版）
 function showHellCompletePopup() {
     const isEn = (window.__gameLang === 'en');
     const old = document.getElementById('hell-complete-popup');
@@ -3784,53 +4102,63 @@ function showHellCompletePopup() {
     const waves = hs.wavesSurvived || 0;
     const kills = (typeof killCount !== 'undefined') ? killCount : 0;
 
-    const popup = document.createElement('div');
-    popup.id = 'hell-complete-popup';
-    popup.style.cssText = `
+    const overlay = document.createElement('div');
+    overlay.id = 'hell-complete-popup';
+    overlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(2, 6, 4, 0.94); z-index: 10000;
-        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        z-index: 10000; display: flex; justify-content: center; align-items: center;
         font-family: ${TACTICAL_FONT};
-        text-shadow: 0 0 10px #22d3ee;
     `;
-    popup.innerHTML = `
-        <h1 style="font-size: 42px; margin-bottom: 10px; color: #22d3ee; letter-spacing: 4px; font-weight: bold;">
-            ${isEn ? 'DEMON BLOOD RITE COMPLETE' : '恶 魔 血 祭 已 完 成'}
-        </h1>
-        <p style="font-size: 16px; color: #a5f3fc; margin-bottom: 12px; letter-spacing: 2px;">
-            ${isEn ? '// THE ALTAR HAS DRUNK ITS FILL' : '// 祭坛已饮饱鲜血'}
-        </p>
-        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #22d3ee;">
-            ${isEn
-                ? `Survived <span style="color:#22d3ee">${waves} WAVES</span> · Altar sacrifices complete.<br>Total Kills: <span style="color:#22d3ee">${kills}</span><br>Choose your path:`
-                : `在地狱坚持 <span style="color:#22d3ee">${waves} 波</span> · 祭坛献祭完成。<br>总击杀数：<span style="color:#22d3ee">${kills}</span><br>选择你的去路：`}
-        </p>
-        <div style="display: flex; gap: 24px;">
-            <button id="hellc-stay-btn" style="
-                background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(34,211,238,0.3); transition: all 0.2s;
-            ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
-            <button id="hellc-return-btn" style="
-                background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(34,211,238,0.3); transition: all 0.2s;
-            ">${isEn ? '[ RETURN TO ORIGIN ]' : '[ 返回原关卡 ]'}</button>
-            <button id="hellc-menu-btn" style="
-                background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(0,255,102,0.3); transition: all 0.2s;
-            ">${isEn ? '[ MAIN MENU ]' : '[ 主菜单 ]'}</button>
+
+    overlay.innerHTML = `
+        <div style="
+            background: #030d07; border: 1.5px solid #00FF66; border-radius: 8px;
+            box-shadow: 0 0 25px rgba(0, 255, 102, 0.22);
+            padding: 24px 30px; max-width: 580px; width: 92%;
+            box-sizing: border-box; text-align: center; font-family: ${TACTICAL_FONT};
+            text-shadow: 0 0 10px #22d3ee;
+        ">
+            <h1 style="font-size: 24px; margin-bottom: 8px; color: #22d3ee; letter-spacing: 4px; font-weight: bold;">
+                ${isEn ? 'DEMON BLOOD RITE COMPLETE' : '恶 魔 血 祭 已 完 成'}
+            </h1>
+            <p style="font-size: 13px; color: #a5f3fc; margin-bottom: 12px; letter-spacing: 2px;">
+                ${isEn ? '// THE ALTAR HAS DRUNK ITS FILL' : '// 祭坛已饮饱鲜血'}
+            </p>
+            <p style="font-size: 13px; color: #e5e7eb; line-height: 1.8; margin-bottom: 22px; text-align: center; text-shadow: 0 0 6px #22d3ee;">
+                ${isEn
+                    ? `Survived <span style="color:#22d3ee">${waves} WAVES</span> · Altar sacrifices complete.<br>Total Kills: <span style="color:#22d3ee">${kills}</span><br>Choose your path:`
+                    : `在地狱坚持 <span style="color:#22d3ee">${waves} 波</span> · 祭坛献祭完成。<br>总击杀数：<span style="color:#22d3ee">${kills}</span><br>选择你的去路：`}
+            </p>
+            <div style="display: flex; gap: 16px; justify-content: center; flex-wrap: wrap;">
+                <button id="hellc-stay-btn" style="
+                    background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
+                    padding: 8px 20px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(34,211,238,0.3); transition: all 0.2s;
+                ">${isEn ? '[ STAY IN HELL ]' : '[ 留在地狱 ]'}</button>
+                <button id="hellc-return-btn" style="
+                    background: rgba(34, 211, 238, 0.15); border: 1px solid #22d3ee; color: #22d3ee;
+                    padding: 8px 20px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(34,211,238,0.3); transition: all 0.2s;
+                ">${isEn ? '[ RETURN TO ORIGIN ]' : '[ 返回原关卡 ]'}</button>
+                <button id="hellc-menu-btn" style="
+                    background: rgba(0, 255, 102, 0.15); border: 1px solid #00FF66; color: #00FF66;
+                    padding: 8px 20px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(0,255,102,0.3); transition: all 0.2s;
+                ">${isEn ? '[ MAIN MENU ]' : '[ 主菜单 ]'}</button>
+            </div>
         </div>
     `;
-    document.body.appendChild(popup);
+
+    document.body.appendChild(overlay);
 
     const stayBtn = document.getElementById('hellc-stay-btn');
     const returnBtn = document.getElementById('hellc-return-btn');
     const menuBtn = document.getElementById('hellc-menu-btn');
+
     stayBtn.onmouseenter = () => { stayBtn.style.background = '#22d3ee'; stayBtn.style.color = '#000'; };
     stayBtn.onmouseleave = () => { stayBtn.style.background = 'rgba(34, 211, 238, 0.15)'; stayBtn.style.color = '#22d3ee'; };
     returnBtn.onmouseenter = () => { returnBtn.style.background = '#22d3ee'; returnBtn.style.color = '#000'; };
@@ -3839,16 +4167,15 @@ function showHellCompletePopup() {
     menuBtn.onmouseleave = () => { menuBtn.style.background = 'rgba(0, 255, 102, 0.15)'; menuBtn.style.color = '#00FF66'; };
 
     stayBtn.onclick = () => {
-        popup.remove();
-        // 留在地狱：继续游玩（任务已完成，不再重复触发）
+        overlay.remove();
         if (window.__hellState) window.__hellState.questDone = true;
     };
     returnBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         returnFromHell();
     };
     menuBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         window.__hellState = null;
         if (typeof window.__returnToMenu === 'function') {
             window.__returnToMenu();
@@ -3856,7 +4183,7 @@ function showHellCompletePopup() {
     };
 }
 
-// 2026-11-02：地狱中死亡 → 战绩弹窗（波次/击杀），确认后回主菜单
+// 2026-11-02：地狱中死亡 → 战绩弹窗（保留原版文案、字体与颜色，套用通用 UI 黑底绿色外框并缩小紧凑排版）
 function showHellDeathPopup() {
     const isEn = (window.__gameLang === 'en');
     const old = document.getElementById('hell-death-popup');
@@ -3870,43 +4197,52 @@ function showHellDeathPopup() {
     const cerbK = hs.altarCerberusKills || 0;
     const kills = (typeof killCount !== 'undefined') ? killCount : 0;
 
-    const popup = document.createElement('div');
-    popup.id = 'hell-death-popup';
-    popup.style.cssText = `
+    const overlay = document.createElement('div');
+    overlay.id = 'hell-death-popup';
+    overlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(2, 6, 4, 0.94); z-index: 10000;
-        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        z-index: 10000; display: flex; justify-content: center; align-items: center;
         font-family: ${TACTICAL_FONT};
-        text-shadow: 0 0 10px #FF3344;
     `;
-    popup.innerHTML = `
-        <h1 style="font-size: 42px; margin-bottom: 10px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
-            ${isEn ? 'YOU DIED IN HELL' : '葬 身 地 狱'}
-        </h1>
-        <p style="font-size: 16px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
-            ${isEn ? '// THE ABYSS CLAIMS ANOTHER SOUL' : '// 深渊又吞噬了一个灵魂'}
-        </p>
-        <p style="font-size: 14px; color: #e5e7eb; line-height: 2; margin-bottom: 30px; text-align: center; max-width: 640px; text-shadow: 0 0 6px #FF3344;">
-            ${isEn
-                ? `Waves survived: <span style="color:#FF3344">${waves}</span><br>Altar sacrifices: <span style="color:#FF3344">${altarK}/5</span> (Cerberus: <span style="color:#FF3344">${cerbK}/1</span>)<br>Total Kills: <span style="color:#FF3344">${kills}</span>`
-                : `坚持波次：<span style="color:#FF3344">${waves}</span><br>祭坛献祭：<span style="color:#FF3344">${altarK}/5</span>（地狱犬：<span style="color:#FF3344">${cerbK}/1</span>）<br>总击杀数：<span style="color:#FF3344">${kills}</span>`}
-        </p>
-        <div style="display: flex; gap: 24px;">
-            <button id="helld-menu-btn" style="
-                background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
-                padding: 12px 30px; font-weight: bold; cursor: pointer;
-                font-family: ${TACTICAL_FONT}; font-size: 14px; letter-spacing: 2px;
-                box-shadow: 0 0 15px rgba(255,51,68,0.3); transition: all 0.2s;
-            ">${isEn ? '[ RETURN TO MENU ]' : '[ 返回主菜单 ]'}</button>
+
+    overlay.innerHTML = `
+        <div style="
+            background: #030d07; border: 1.5px solid #00FF66; border-radius: 8px;
+            box-shadow: 0 0 25px rgba(0, 255, 102, 0.22);
+            padding: 24px 30px; max-width: 500px; width: 92%;
+            box-sizing: border-box; text-align: center; font-family: ${TACTICAL_FONT};
+            text-shadow: 0 0 10px #FF3344;
+        ">
+            <h1 style="font-size: 24px; margin-bottom: 8px; color: #FF3344; letter-spacing: 4px; font-weight: bold;">
+                ${isEn ? 'YOU DIED IN HELL' : '葬 身 地 狱'}
+            </h1>
+            <p style="font-size: 13px; color: #fca5a5; margin-bottom: 12px; letter-spacing: 2px;">
+                ${isEn ? '// THE ABYSS CLAIMS ANOTHER SOUL' : '// 深渊又吞噬了一个灵魂'}
+            </p>
+            <p style="font-size: 13px; color: #e5e7eb; line-height: 1.8; margin-bottom: 22px; text-align: center; text-shadow: 0 0 6px #FF3344;">
+                ${isEn
+                    ? `Waves survived: <span style="color:#FF3344">${waves}</span><br>Altar sacrifices: <span style="color:#FF3344">${altarK}/5</span> (Cerberus: <span style="color:#FF3344">${cerbK}/1</span>)<br>Total Kills: <span style="color:#FF3344">${kills}</span>`
+                    : `坚持波次：<span style="color:#FF3344">${waves}</span><br>祭坛献祭：<span style="color:#FF3344">${altarK}/5</span>（地狱犬：<span style="color:#FF3344">${cerbK}/1</span>）<br>总击杀数：<span style="color:#FF3344">${kills}</span>`}
+            </p>
+            <div style="display: flex; gap: 20px; justify-content: center;">
+                <button id="helld-menu-btn" style="
+                    background: rgba(255, 51, 68, 0.15); border: 1px solid #FF3344; color: #FF3344;
+                    padding: 8px 24px; font-weight: bold; cursor: pointer;
+                    font-family: ${TACTICAL_FONT}; font-size: 13px; letter-spacing: 2px;
+                    box-shadow: 0 0 12px rgba(255,51,68,0.3); transition: all 0.2s;
+                ">${isEn ? '[ RETURN TO MENU ]' : '[ 返回主菜单 ]'}</button>
+            </div>
         </div>
     `;
-    document.body.appendChild(popup);
+
+    document.body.appendChild(overlay);
 
     const menuBtn = document.getElementById('helld-menu-btn');
     menuBtn.onmouseenter = () => { menuBtn.style.background = '#FF3344'; menuBtn.style.color = '#000'; };
     menuBtn.onmouseleave = () => { menuBtn.style.background = 'rgba(255, 51, 68, 0.15)'; menuBtn.style.color = '#FF3344'; };
     menuBtn.onclick = () => {
-        popup.remove();
+        overlay.remove();
         window.__hellState = null;
         isGameOver = true;
         if (typeof window.__returnToMenu === 'function') {
@@ -3930,8 +4266,8 @@ function onHellQuestComplete() {
     }
     triggerHellAltarSeal();
     if (window.__hellState) window.__hellState.questDone = true;
-    // 法阵动画播 1.5 秒后弹选择窗
-    setTimeout(() => showHellCompletePopup(), 1500);
+    // 法阵动画播完（240 帧 ≈ 4 秒）再弹选择窗：updateHellAltarSeals 在法阵移除时弹
+    if (window.__hellState) window.__hellState.hellPopupPending = true;
 }
 
 // 从地狱返回原关卡（保留波次）
@@ -4010,6 +4346,9 @@ function resetGame() {
         if (curLvlReset === 'level0_test') {
             unlockedWeapons = [WEAPONS.TRIPLE_SHOTGUN.id, WEAPONS.RUNE_SCYTHE.id, WEAPONS.LAVA_CIRCLE.id, WEAPONS.SOUL_SIPHON.id];
             currentWeapon = WEAPONS.TRIPLE_SHOTGUN;
+        } else if (curLvlReset === 'level7_lab' || curLvlReset === 'level8_test') {
+            unlockedWeapons = [WEAPONS.RIFLE.id, WEAPONS.PISTOL.id, WEAPONS.SMG.id, WEAPONS.SNIPER.id, WEAPONS.GRENADE.id];
+            currentWeapon = WEAPONS.RIFLE;
         } else {
             unlockedWeapons = [WEAPONS.RIFLE.id];
             currentWeapon = WEAPONS.RIFLE;
@@ -4040,6 +4379,9 @@ function resetGame() {
 }
 
 function update() {
+    if (isGameOver) return; // 游戏结束/死亡战报弹窗激活期间停止更新逻辑
+    // 实验：L7/L8 换弹计时
+    if (typeof __l78TickReload === 'function') __l78TickReload();
     if (window.__viewState && window.__viewState !== 'playing') {
         isPaused = true;
         if (typeof soundManager !== 'undefined') {
@@ -4430,13 +4772,16 @@ function update() {
         item.timer--;
         if (item.timer <= 0) { dropItems.splice(i, 1); continue; }
         const distToPlayer = Math.hypot(player.x - item.x, player.y - item.y);
+        // 实验 v5：弹药包拾取/磁吸半径翻倍（68/92，原 34/46），确保走过去就能捡到
+        const _pickupR = (item.type === 'ammo') ? 68 : 34;
+        const _magnetR = (item.type === 'ammo') ? 92 : 46;
         // Magnetic pull when player is close (within 46px)
-        if (distToPlayer < 46 && distToPlayer > 0) {
+        if (distToPlayer < _magnetR && distToPlayer > 0) {
             const pullSpeed = 2.2;
             item.x += ((player.x - item.x) / distToPlayer) * pullSpeed;
             item.y += ((player.y - item.y) / distToPlayer) * pullSpeed;
         }
-        if (distToPlayer < 34) {
+        if (distToPlayer < _pickupR) {
             if (typeof soundManager !== 'undefined') soundManager.playPickup();
             if (item.type === 'medkit') {
                 player.hp = Math.min(player.maxHp, player.hp + 35);
@@ -4447,6 +4792,12 @@ function update() {
                 blindEnergy = Math.min(MAX_BLIND_ENERGY, blindEnergy + 40);
                 addLog("拾取补给 (+50 防弹衣 / +40 能量)");
                 createExplosion(player.x, player.y, 10, '#00CCFF');
+            } else if (item.type === 'ammo') {
+                // 实验：L7/L8 弹药包——给当前武器总弹药 +30
+                const a = __l78AmmoGet(currentWeapon.id);
+                a.reserve += 30;
+                addLog(`拾取弹药 +30`);
+                createExplosion(player.x, player.y, 12, '#FFCC00');
             } else if (item.type === 'weapon') {
                 const wp = item.weaponData;
                 if (!unlockedWeapons.includes(wp.id)) {
@@ -4577,6 +4928,7 @@ function update() {
                         if (e.pendingDamage > 0) {
                             applyDamageToEnemy(e, e.pendingDamage);
                             e.pendingDamage = 0;
+                            e.pendingDamageInAltar = false;
                             createExplosion(e.x, e.y, 20);
                         }
                         e.alert = true; e.alertCooldown = 300; e.hitTimer = 6;
@@ -4651,6 +5003,11 @@ function update() {
 
                 if (inBlindZone(e.x, e.y) && !isObsSeesPlayer) {
                     e.pendingDamage += effectiveDamage;
+                    // 2026-11-07 地狱任务修复：推迟伤害若由灵魂汲取在祭坛区内造成，记下标记；
+                    // 结算时敌人可能已走出祭坛（恶魔在盲区内仍会游走），按造成伤害时的位置判定才合理
+                    if (b.isSoulSiphon && currentWeapon && currentWeapon.id === WEAPONS.SOUL_SIPHON.id && isInAltarArea(e.x, e.y)) {
+                        e.pendingDamageInAltar = true;
+                    }
                 } else {
                     applyDamageToEnemy(e, effectiveDamage, !!b.isSoulSiphon);
                     e.hitTimer = 6;
@@ -4667,6 +5024,7 @@ function update() {
                     if (e.pendingDamage > 0) {
                         applyDamageToEnemy(e, e.pendingDamage);
                         e.pendingDamage = 0;
+                        e.pendingDamageInAltar = false;
                         createExplosion(e.x, e.y, 20);
                     }
                     if (inBlindZone(player.x, player.y) && !e.isObserver && !e.isJammer) {
@@ -4897,6 +5255,7 @@ function update() {
             if (!blindActive || !inBlindZone(e.x, e.y)) {
                 applyDamageToEnemy(e, e.pendingDamage);
                 e.pendingDamage = 0;
+                e.pendingDamageInAltar = false;
                 e.hitTimer = 8;
                 createExplosion(e.x, e.y, 20, e.isDemon ? '#ff2200' : '#f43f5e');
                 e.alert = true;
@@ -4996,7 +5355,8 @@ function update() {
             if (Math.random() < 0.1) e.confusedAngle = e.angle + (Math.random() - 0.5) * 2.2;
             e.angle += (e.confusedAngle - e.angle) * 0.12;
             // 盲区定住/减速并缓慢迷茫游走
-            let slowSpeed = 0.35;
+            // 2026-11-07：普通敌人盲区内改为极为缓慢（0.35 -> 0.12，约正常巡逻速度 1/10）
+            let slowSpeed = 0.12;
             if (enemyInIce) slowSpeed *= 0.5;
             tryMoveEnemy(e, Math.cos(e.angle) * slowSpeed, Math.sin(e.angle) * slowSpeed, 16);
             return;
@@ -5590,7 +5950,7 @@ function update() {
             label.style.color = "#FF3344";
         } else {
             label.innerText = isEn ? "BLIND ZONE [SPACE]" : "盲区能量 [SPACE]";
-            label.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : "#00FF66";
+            label.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : ((getCurrentLevelId() === 'level7_lab' || getCurrentLevelId() === 'level8_test') ? "#10b981" : "#00FF66");
         }
     }
 
@@ -5599,13 +5959,13 @@ function update() {
     if (waveTitle) {
         if (!window.__storyBriefingEnabled) {
             waveTitle.innerText = isEn ? `WAVE: ${wave}` : `波次: ${wave}`;
-            waveTitle.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : "#00FF66";
+            waveTitle.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : ((getCurrentLevelId() === 'level7_lab' || getCurrentLevelId() === 'level8_test') ? "#10b981" : "#00FF66");
         } else if (window.__endlessMode) {
             waveTitle.innerText = isEn ? `WAVE: ${wave} [ENDLESS]` : `波次: ${wave} [无尽坚守]`;
             waveTitle.style.color = "#FFCC00";
         } else {
             waveTitle.innerText = isEn ? `WAVE: ${wave} / ${targetWave}` : `波次: ${wave} / 目标: ${targetWave}波`;
-            waveTitle.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : "#00FF66";
+            waveTitle.style.color = (getCurrentLevelId() === 'level0_test') ? "#FF3344" : ((getCurrentLevelId() === 'level7_lab' || getCurrentLevelId() === 'level8_test') ? "#10b981" : "#00FF66");
         }
     }
 
@@ -5736,6 +6096,3823 @@ function drawAllPropLabels() {
         drawPropTagLabel(p);
     });
 }
+
+
+// =========================================================
+// CONSOLE DRAW FUNCTIONS (migrated from level7_lab.js/level8_test.js, 2026-11-05)
+// These were previously self-contained in level files. Moved to engine.js
+// so level files only contain data + get*() wrappers.
+// =========================================================
+
+
+// =========================================================
+// drawSectorWorkstation (migrated from level7_lab.js, 2026-11-05)
+// =========================================================
+function drawSectorWorkstation(ctx, cx, cy, angle = 0, scale = 1.0, freezeTime = false) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const time = freezeTime ? 0 : Date.now() * 0.001;
+
+    // --- 1. 扇形控制台主体工作台面 (Fan-shaped Console Desk Surface) ---
+    const R_out = 112;
+    const R_in = 52;
+    const maxTheta = 36 * Math.PI / 180;
+    const startAngle = -Math.PI / 2 - maxTheta;
+    const endAngle = -Math.PI / 2 + maxTheta;
+
+    // 1A. 底座与重型军工装甲包边
+    ctx.beginPath();
+    ctx.arc(0, 0, R_out + 2, startAngle - 0.02, endAngle + 0.02, false);
+    ctx.lineTo(Math.sin(maxTheta) * (R_in - 2), -Math.cos(maxTheta) * (R_in - 2));
+    ctx.arc(0, 0, R_in - 2, endAngle + 0.02, startAngle - 0.02, true);
+    ctx.closePath();
+    ctx.fillStyle = "#02120e";
+    ctx.fill();
+    ctx.strokeStyle = "#064e3b";
+    ctx.lineWidth = 3.5;
+    ctx.stroke();
+
+    // 1B. 碳纤军工翡翠科技台面 (Radial Gradient Surface)
+    ctx.beginPath();
+    ctx.arc(0, 0, R_out, startAngle, endAngle, false);
+    ctx.lineTo(Math.sin(maxTheta) * R_in, -Math.cos(maxTheta) * R_in);
+    ctx.arc(0, 0, R_in, endAngle, startAngle, true);
+    ctx.closePath();
+    const gradDesk = ctx.createRadialGradient(0, 0, R_in, 0, 0, R_out);
+    gradDesk.addColorStop(0, "#08251e");
+    gradDesk.addColorStop(0.6, "#041712");
+    gradDesk.addColorStop(1, "#020d0a");
+    ctx.fillStyle = gradDesk;
+    ctx.fill();
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // 1C. 台面金属嵌缝与导轨线
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.28)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(0, 0, (R_out + R_in) / 2 + 12, startAngle + 0.03, endAngle - 0.03);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, (R_out + R_in) / 2 - 12, startAngle + 0.03, endAngle - 0.03);
+    ctx.stroke();
+
+    // 两侧功能分界径向嵌线
+    [-16 * Math.PI / 180, 16 * Math.PI / 180].forEach(radTheta => {
+        ctx.beginPath();
+        ctx.moveTo(Math.sin(radTheta) * (R_in + 2), -Math.cos(radTheta) * (R_in + 2));
+        ctx.lineTo(Math.sin(radTheta) * (R_out - 4), -Math.cos(radTheta) * (R_out - 4));
+        ctx.strokeStyle = "#064e3b";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    });
+
+    // --- 2. 前部 3 连体全景弧面高科技显示屏 ("前部是三个连在一起的屏幕") ---
+    const R_scr_out = 110;
+    const R_scr_in = 94;
+    const scrBezelOuter = 111.5;
+    const scrBezelInner = 92.5;
+
+    // 2A. 屏幕一体化金属悬臂底座与支架
+    ctx.save();
+    for (let sa = -30; sa <= 30; sa += 15) {
+        const rad = sa * Math.PI / 180;
+        const bx = Math.sin(rad) * 91;
+        const by = -Math.cos(rad) * 91;
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(bx - 3, by - 2, 6, 4);
+        ctx.fillStyle = "#10b981";
+        ctx.fillRect(bx - 1.5, by - 1, 3, 2);
+    }
+    ctx.restore();
+
+    // 屏幕角度定义: Left (-33° to -11°), Center (-11° to +11°), Right (+11° to +33°)
+    const screens = [
+        { id: "L", startDeg: -33, endDeg: -11, label: "SPECTRAL / COMMS" },
+        { id: "C", startDeg: -11, endDeg: 11, label: "TACTICAL RADAR HUD" },
+        { id: "R", startDeg: 11, endDeg: 33, label: "REACTOR / SHIELD" }
+    ];
+
+    screens.forEach(scr => {
+        ctx.save();
+        const a1 = -Math.PI / 2 + scr.startDeg * Math.PI / 180;
+        const a2 = -Math.PI / 2 + scr.endDeg * Math.PI / 180;
+
+        // 边框 (Bezel)
+        ctx.beginPath();
+        ctx.arc(0, 0, scrBezelOuter, a1 + 0.01, a2 - 0.01, false);
+        ctx.arc(0, 0, scrBezelInner, a2 - 0.01, a1 + 0.01, true);
+        ctx.closePath();
+        ctx.fillStyle = "#03100b";
+        ctx.fill();
+        ctx.strokeStyle = "#047857";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        // 屏幕玻璃面
+        ctx.beginPath();
+        ctx.arc(0, 0, R_scr_out, a1 + 0.02, a2 - 0.02, false);
+        ctx.arc(0, 0, R_scr_in, a2 - 0.02, a1 + 0.02, true);
+        ctx.closePath();
+        ctx.fillStyle = "#021611";
+        ctx.fill();
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+
+        // 限制在屏幕内裁切绘制高精度 UI
+        ctx.clip();
+
+        // 屏幕背景细密同心圆弧扫描线 (完美贴合屏幕弧度，杜绝斜切走样)
+        ctx.strokeStyle = "rgba(16, 185, 129, 0.12)";
+        ctx.lineWidth = 0.6;
+        for (let r = R_scr_in + 2; r < R_scr_out - 1; r += 2.5) {
+            ctx.beginPath();
+            ctx.arc(0, 0, r, a1 + 0.02, a2 - 0.02);
+            ctx.stroke();
+        }
+
+        // 屏幕局部中心坐标与倾斜角度
+        const midDeg = (scr.startDeg + scr.endDeg) / 2;
+        const midRad = midDeg * Math.PI / 180;
+        const midR = (R_scr_out + R_scr_in) / 2;
+        const smx = Math.sin(midRad) * midR;
+        const smy = -Math.cos(midRad) * midR;
+
+        // 旋转局部坐标系，与该屏幕弧度切线与法线完全平行 (消除一切歪斜)
+        ctx.save();
+        ctx.translate(smx, smy);
+        ctx.rotate(midRad);
+
+        if (scr.id === "C") {
+            // 中央雷达与准星 (Radar HUD)
+            ctx.strokeStyle = "rgba(52, 211, 153, 0.55)";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.arc(0, 0, 6.5, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(0, 0, 3, 0, Math.PI * 2);
+            ctx.stroke();
+            // 准星十字刻度
+            ctx.beginPath();
+            ctx.moveTo(-8, 0); ctx.lineTo(8, 0);
+            ctx.moveTo(0, -7); ctx.lineTo(0, 7);
+            ctx.stroke();
+
+            // 动态旋转雷达扫描线
+            const sweepA = (time * 2.5) % (Math.PI * 2);
+            ctx.strokeStyle = "#34d399";
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(Math.cos(sweepA) * 7.5, Math.sin(sweepA) * 7.5);
+            ctx.stroke();
+
+            // 目标信号点 (Blips)
+            ctx.fillStyle = "#38bdf8";
+            ctx.beginPath(); ctx.arc(-3.5, -2.5, 1, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(4, 2, 1, 0, Math.PI * 2); ctx.fill();
+        } else if (scr.id === "L") {
+            // 左屏: 频谱波形与遥测条形图 (Telemetric Spectrogram, 角度完全与屏对齐)
+            const bars = 7;
+            const barW = 2;
+            for (let b = 0; b < bars; b++) {
+                const bx = -10 + b * 3.2;
+                const hVal = 3 + Math.abs(Math.sin(time * 3 + b * 0.9)) * 8;
+                ctx.fillStyle = b === 5 ? "#f59e0b" : "#10b981";
+                ctx.fillRect(bx, 4 - hVal, barW, hVal);
+            }
+            // 顶端通信微型波形
+            ctx.strokeStyle = "#38bdf8";
+            ctx.lineWidth = 0.9;
+            ctx.beginPath();
+            ctx.moveTo(-12, -4);
+            ctx.lineTo(-6, -6);
+            ctx.lineTo(0, -3);
+            ctx.lineTo(6, -7);
+            ctx.lineTo(12, -4);
+            ctx.stroke();
+        } else if (scr.id === "R") {
+            // 右屏: 反应堆核心环与防线状态指示 (Reactor Diagnostics, 角度完全与屏对齐)
+            ctx.strokeStyle = "#f59e0b";
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(-5, 0, 4, 0, Math.PI * 1.5);
+            ctx.stroke();
+
+            // 能量阶梯条
+            ctx.fillStyle = "#10b981";
+            ctx.fillRect(2, -5, 8, 2);
+            ctx.fillRect(2, -2, 6, 2);
+            ctx.fillStyle = "#38bdf8";
+            ctx.fillRect(2, 1, 9, 2);
+            ctx.fillStyle = "#ef4444";
+            ctx.fillRect(2, 4, 4, 2);
+        }
+
+        // 玻璃高光反光倾斜斜线 (沿屏幕切线)
+        ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+        ctx.beginPath();
+        ctx.moveTo(-14, -10);
+        ctx.lineTo(-4, -10);
+        ctx.lineTo(6, 10);
+        ctx.lineTo(-4, 10);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore(); // 结束各屏幕旋转 HUD
+        ctx.restore(); // 结束各屏幕主裁剪区
+    });
+
+    // 屏幕间关节铰链连接锁扣 ("前部是三个连在一起的屏幕")
+    [-11 * Math.PI / 180, 11 * Math.PI / 180].forEach(jTheta => {
+        const jx = Math.sin(jTheta) * ((R_scr_out + R_scr_in) / 2);
+        const jy = -Math.cos(jTheta) * ((R_scr_out + R_scr_in) / 2);
+        ctx.save();
+        ctx.translate(jx, jy);
+        ctx.rotate(jTheta);
+        ctx.fillStyle = "#022c22";
+        ctx.fillRect(-2, -9, 4, 18);
+        ctx.strokeStyle = "#34d399";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-2, -9, 4, 18);
+        // 金属铰链螺栓
+        ctx.fillStyle = "#10b981";
+        ctx.beginPath(); ctx.arc(0, -5, 1, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(0, 5, 1, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    // --- 3. 屏幕后方的键盘控制模块 ("屏幕后方是键盘和座椅") ---
+    ctx.save();
+    // 键盘凹槽托盘
+    const kbCenterR = 74;
+    const kbW = 28;
+    const kbH = 14;
+    ctx.translate(0, -kbCenterR);
+
+    ctx.fillStyle = "#021a14";
+    ctx.fillRect(-kbW / 2 - 2, -kbH / 2 - 2, kbW + 4, kbH + 4);
+    ctx.strokeStyle = "#065f46";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-kbW / 2 - 2, -kbH / 2 - 2, kbW + 4, kbH + 4);
+
+    // 机械键盘背光底板
+    ctx.fillStyle = "rgba(16, 185, 129, 0.15)";
+    ctx.fillRect(-kbW / 2, -kbH / 2, kbW, kbH);
+
+    // 4 排机械键帽阵列
+    const keyRows = 4;
+    const keyCols = 8;
+    const kw = 2.4;
+    const kh = 1.9;
+    const gapX = 0.8;
+    const gapY = 0.8;
+    const startKx = -kbW / 2 + 1.2;
+    const startKy = -kbH / 2 + 1;
+
+    for (let r = 0; r < keyRows; r++) {
+        for (let c = 0; c < keyCols; c++) {
+            if (r === 3 && (c >= 2 && c <= 5)) continue; // 空格键留空
+            const kx = startKx + c * (kw + gapX);
+            const ky = startKy + r * (kh + gapY);
+            ctx.fillStyle = "#052e24";
+            ctx.fillRect(kx, ky, kw, kh);
+            ctx.fillStyle = (r === 0 && c === 0) ? "#ef4444" : "#34d399";
+            ctx.fillRect(kx + 0.5, ky + 0.4, kw - 1, kh - 0.8);
+        }
+    }
+    // 特别绘制长条空格键
+    const spaceX = startKx + 2 * (kw + gapX);
+    const spaceY = startKy + 3 * (kh + gapY);
+    const spaceW = 4 * kw + 3 * gapX;
+    ctx.fillStyle = "#064e3b";
+    ctx.fillRect(spaceX, spaceY, spaceW, kh);
+    ctx.fillStyle = "#6ee7b7";
+    ctx.fillRect(spaceX + 1, spaceY + 0.4, spaceW - 2, kh - 0.8);
+
+    // 键盘下方集成高精度触控板/定位轨迹球模块
+    ctx.fillStyle = "#041d16";
+    ctx.fillRect(-6, kbH / 2 + 2, 12, 4);
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 0.7;
+    ctx.strokeRect(-6, kbH / 2 + 2, 12, 4);
+    // 轨迹发光中线
+    ctx.fillStyle = "#38bdf8";
+    ctx.fillRect(-2, kbH / 2 + 3.5, 4, 1);
+    ctx.restore();
+
+    // --- 4. 左右两侧各有几排控制按钮 ("左右两侧各有几排控制按钮") ---
+    // 4A. 左侧操作翼 (Left Wing Controls: 3 Rows of Push Switches, Rockers, Safety Toggles)
+    ctx.save();
+    const lAngle = -26 * Math.PI / 180;
+    ctx.translate(Math.sin(lAngle) * 75, -Math.cos(lAngle) * 75);
+    ctx.rotate(lAngle);
+
+    // 控制板底座
+    ctx.fillStyle = "#021a14";
+    ctx.fillRect(-12, -12, 24, 24);
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-12, -12, 24, 24);
+
+    // 第一排: 4 枚方型带背光指令按钮 (Row 1)
+    const btnColors1 = ["#10b981", "#06b6d4", "#f59e0b", "#ef4444"];
+    for (let i = 0; i < 4; i++) {
+        const bx = -9 + i * 5;
+        const by = -8;
+        ctx.fillStyle = "#03120e";
+        ctx.fillRect(bx, by, 3.8, 3.8);
+        ctx.fillStyle = btnColors1[i];
+        ctx.fillRect(bx + 0.6, by + 0.6, 2.6, 2.6);
+    }
+
+    // 第二排: 4 枚长条型联动翘板开关 (Row 2)
+    for (let i = 0; i < 4; i++) {
+        const bx = -9 + i * 5;
+        const by = -1;
+        ctx.fillStyle = "#03120e";
+        ctx.fillRect(bx, by, 3.8, 4.5);
+        ctx.fillStyle = (i % 2 === 0) ? "#047857" : "#0f766e";
+        ctx.fillRect(bx + 0.5, by + 0.5, 2.8, 3.5);
+        // 状态指示灯
+        ctx.fillStyle = (Math.sin(time * 4 + i) > 0) ? "#34d399" : "#022c22";
+        ctx.beginPath(); ctx.arc(bx + 1.9, by + 1.5, 0.6, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // 第三排: 3 枚带安全护盖的拨动开关 (Row 3: Heavy Guarded Toggle Switches)
+    for (let i = 0; i < 3; i++) {
+        const bx = -7.5 + i * 6.5;
+        const by = 6.5;
+        // 金属护盖座
+        ctx.fillStyle = "#064e3b";
+        ctx.fillRect(bx - 1.5, by - 1.5, 4, 4);
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(bx - 1.5, by - 1.5, 4, 4);
+        // 金属拨杆
+        ctx.strokeStyle = "#f3f4f6";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(bx + 0.5, by + 1.5);
+        ctx.lineTo(bx + 0.5, by - 2);
+        ctx.stroke();
+    }
+    ctx.restore();
+
+    // 4B. 右侧操作翼 (Right Wing Controls: Linear Sliders, Rotary Dials, Key Matrix, Emergency Stop)
+    ctx.save();
+    const rAngle = 26 * Math.PI / 180;
+    ctx.translate(Math.sin(rAngle) * 75, -Math.cos(rAngle) * 75);
+    ctx.rotate(rAngle);
+
+    // 控制板底座
+    ctx.fillStyle = "#021a14";
+    ctx.fillRect(-12, -12, 24, 24);
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-12, -12, 24, 24);
+
+    // 第一排: 双线性电位器推子 (Dual Linear Sliders)
+    [-7, -2].forEach((sx, sidx) => {
+        // 滑轨槽
+        ctx.fillStyle = "#020f0b";
+        ctx.fillRect(sx, -9, 2.2, 11);
+        ctx.strokeStyle = "#064e3b";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(sx, -9, 2.2, 11);
+        // 刻度线
+        ctx.strokeStyle = "rgba(52, 211, 153, 0.4)";
+        ctx.lineWidth = 0.5;
+        for (let ty = -8; ty <= 1; ty += 2) {
+            ctx.beginPath(); ctx.moveTo(sx - 1.5, ty); ctx.lineTo(sx - 0.3, ty); ctx.stroke();
+        }
+        // 滑块手柄
+        const faderY = -7 + (sidx === 0 ? 3 : 5.5);
+        ctx.fillStyle = "#10b981";
+        ctx.fillRect(sx - 1, faderY, 4.2, 2.2);
+        ctx.fillStyle = "#e0f2fe";
+        ctx.fillRect(sx, faderY + 0.7, 2.2, 0.8);
+    });
+
+    // 旋钮组: 2 个高精密旋转编码器旋钮 (Rotary Knurled Dials)
+    [4, 9].forEach((dx, didx) => {
+        const dy = -4;
+        ctx.fillStyle = "#03120e";
+        ctx.beginPath(); ctx.arc(dx, dy, 3.2, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+        // 旋钮刻度指示指针
+        const pointerRad = (time * 1.5 + didx * 2) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(dx, dy);
+        ctx.lineTo(dx + Math.cos(pointerRad) * 2.8, dy + Math.sin(pointerRad) * 2.8);
+        ctx.stroke();
+    });
+
+    // 第二排: 4 枚战术微动矩阵按键 (Tactical Microswitch Matrix)
+    for (let c = 0; c < 2; c++) {
+        for (let r = 0; r < 2; r++) {
+            const bx = -8 + c * 5;
+            const by = 4 + r * 3.8;
+            ctx.fillStyle = (r === 0 ? "#10b981" : "#f59e0b");
+            ctx.fillRect(bx, by, 3.5, 2.6);
+            ctx.strokeStyle = "#022c22";
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(bx, by, 3.5, 2.6);
+        }
+    }
+
+    // 第三排: 大型带黄黑警示环的红色紧急制动主控按钮 (Guarded E-STOP Actuator Button)
+    const eX = 6;
+    const eY = 5.5;
+    // 黄黑相间安全防护座圈
+    ctx.fillStyle = "#f59e0b";
+    ctx.beginPath(); ctx.arc(eX, eY, 4.8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#000000";
+    ctx.beginPath(); ctx.arc(eX, eY, 4.8, 0, Math.PI * 0.5); ctx.lineTo(eX, eY); ctx.fill();
+    ctx.beginPath(); ctx.arc(eX, eY, 4.8, Math.PI, Math.PI * 1.5); ctx.lineTo(eX, eY); ctx.fill();
+    // 红色蘑菇头紧急按钮
+    ctx.fillStyle = "#ef4444";
+    ctx.beginPath(); ctx.arc(eX, eY, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#fee2e2";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+    ctx.restore();
+
+    // --- 5. 屏幕后方中央凹槽处的操作员座椅 ("屏幕后方是键盘和座椅", 座位靠近控制台，底下黑影已删除) ---
+    ctx.save();
+    const seatY = -22; // 贴近内凹扇形弧操作工位，无缝就坐
+    ctx.translate(0, seatY);
+
+    // 5A. 五星万向轮金属底座 (5-Star Swivel Caster Base)
+    ctx.strokeStyle = "#042018";
+    ctx.lineWidth = 2.4;
+    for (let arm = 0; arm < 5; arm++) {
+        const starA = arm * (Math.PI * 2 / 5) - Math.PI / 2;
+        const wx = Math.cos(starA) * 14;
+        const wy = Math.sin(starA) * 11;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(wx, wy);
+        ctx.stroke();
+        // 轮子端头
+        ctx.fillStyle = "#064e3b";
+        ctx.beginPath(); ctx.arc(wx, wy, 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+    // 气压升降液压中柱
+    ctx.fillStyle = "#10b981";
+    ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
+
+    // 5B. 坐垫本体 (Ergonomic Bucket Seat Cushion with Stitching)
+    ctx.fillStyle = "#031712";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-12, -10, 24, 18, 5); else ctx.rect(-12, -10, 24, 18);
+    ctx.fill();
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // 坐垫加厚层与中央双缝线
+    ctx.fillStyle = "#064e3b";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-9, -8, 18, 14, 3); else ctx.rect(-9, -8, 18, 14);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.5)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(0, -7); ctx.lineTo(0, 5);
+    ctx.stroke();
+
+    // 5C. 左右两侧带垫扶手 (Armrests)
+    [-13, 11].forEach(ax => {
+        ctx.fillStyle = "#02120e";
+        ctx.fillRect(ax, -8, 2.6, 12);
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(ax, -8, 2.6, 12);
+        // 扶手软垫表面
+        ctx.fillStyle = "#065f46";
+        ctx.fillRect(ax + 0.4, -6, 1.8, 8);
+    });
+
+    // 5D. 人体工学高靠背与头枕 (High Backrest & Integrated Headrest)
+    ctx.fillStyle = "#021a14";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-11, 3, 22, 10, 4); else ctx.rect(-11, 3, 22, 10);
+    ctx.fill();
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // 靠背腰托隆起部与头枕
+    ctx.fillStyle = "#044e3b";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-7, 6, 14, 5, 2.5); else ctx.rect(-7, 6, 14, 5);
+    ctx.fill();
+    ctx.strokeStyle = "#34d399";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    ctx.restore();
+
+    ctx.restore(); // end drawSectorWorkstation
+}
+window.drawSectorWorkstation = drawSectorWorkstation;
+
+// ===== 动态元素独立绘制 (2026-11-04 动静分离优化)：仅 4 处时间动画 =====
+
+// =========================================================
+// drawSectorWorkstationDynamic (migrated from level7_lab.js, 2026-11-05)
+// =========================================================
+function drawSectorWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
+    const time = Date.now() * 0.001;
+    const R_scr_out = 110, R_scr_in = 94;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    // 1. 中央屏幕雷达扫描线
+    {
+        const midR = (R_scr_out + R_scr_in) / 2;
+        ctx.save();
+        ctx.translate(0, -midR);
+        const sweepA = (time * 2.5) % (Math.PI * 2);
+        ctx.strokeStyle = "#34d399";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(sweepA) * 7.5, Math.sin(sweepA) * 7.5);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // 2. 左侧屏幕频谱柱
+    {
+        const midDeg = -22, midRad = midDeg * Math.PI / 180;
+        const midR = (R_scr_out + R_scr_in) / 2;
+        ctx.save();
+        ctx.translate(Math.sin(midRad) * midR, -Math.cos(midRad) * midR);
+        ctx.rotate(midRad);
+        for (let b = 0; b < 7; b++) {
+            const bx = -10 + b * 3.2;
+            const hVal = 3 + Math.abs(Math.sin(time * 3 + b * 0.9)) * 8;
+            ctx.fillStyle = b === 5 ? "#f59e0b" : "#10b981";
+            ctx.fillRect(bx, 4 - hVal, 2, hVal);
+        }
+        ctx.restore();
+    }
+
+    // 3. 左侧操作翼指示灯
+    {
+        const lAngle = -26 * Math.PI / 180;
+        ctx.save();
+        ctx.translate(Math.sin(lAngle) * 75, -Math.cos(lAngle) * 75);
+        ctx.rotate(lAngle);
+        for (let i = 0; i < 4; i++) {
+            const bx = -9 + i * 5;
+            ctx.fillStyle = (Math.sin(time * 4 + i) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath(); ctx.arc(bx + 1.9, 0.5, 0.6, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    // 4. 右侧操作翼旋钮指针
+    {
+        const rAngle = 26 * Math.PI / 180;
+        ctx.save();
+        ctx.translate(Math.sin(rAngle) * 75, -Math.cos(rAngle) * 75);
+        ctx.rotate(rAngle);
+        [4, 9].forEach((dx, didx) => {
+            const pointerRad = (time * 1.5 + didx * 2) % (Math.PI * 2);
+            ctx.strokeStyle = "#38bdf8";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(dx, -4);
+            ctx.lineTo(dx + Math.cos(pointerRad) * 2.8, -4 + Math.sin(pointerRad) * 2.8);
+            ctx.stroke();
+        });
+        ctx.restore();
+    }
+
+    ctx.restore();
+}
+window.drawSectorWorkstationDynamic = drawSectorWorkstationDynamic;
+
+// =====================================================================
+// 圆形全包围控制台 (从 Level 8 移植，2026-11-04)
+// =====================================================================
+
+// =========================================================
+// drawCircularPodWorkstation (migrated from level7_lab.js, 2026-11-05)
+// =========================================================
+function drawCircularPodWorkstation(ctx, cx, cy, angle = 0, scale = 1.0, freezeTime = 0) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const time = freezeTime ? 0 : Date.now() * 0.001;
+
+    // --- 几何常量 (标准正圆外壳与平直后隔板位置) ---
+    const R_out = 62; // 外壳正圆半径
+    const R_in = 57;  // 外壳内壁正圆半径 (外壳厚度仅 5px，释放充裕内部空间)
+    const y_part = 38; // 平直隔板位于水平 y = 38
+    // 在正圆 x^2 + y^2 = 72^2 上，y = 44 时：x = sqrt(72^2 - 44^2) = sqrt(5184 - 1936) = sqrt(3248) ≈ 56.99
+    const x_part = 49;
+    const door_hw = 16; // 中央进出门洞半宽 19px，净通道宽 38px
+    const theta_r = Math.atan2(y_part, x_part);  // ~0.657 rad (37.66°)
+    const theta_l = Math.atan2(y_part, -x_part); // ~2.484 rad (142.34°)
+
+    // --- 1. 标准圆形全包围舱内地坪与科技微导轨 (Standard Circular Cabin Floor) ---
+    ctx.save();
+    ctx.beginPath();
+    // 顺时针沿原生标准正圆弧自左后点绕过顶部圆弧至右后点
+    ctx.arc(0, 0, R_in, theta_l, Math.PI * 2 + theta_r, false);
+    ctx.lineTo(door_hw, y_part);
+    ctx.lineTo(-door_hw, y_part);
+    ctx.lineTo(-x_part, y_part);
+    ctx.closePath();
+    ctx.fillStyle = "#061c3a";
+    ctx.fill();
+
+    // (已删除：偏心同心圆导轨线)
+    ctx.restore();
+
+    // --- 2. 纤薄轻量化标准正圆重型装甲外壳 (Slim Standard Circular Outer Shell: 5px) ---
+    ctx.save();
+    // 2A. 纤薄外壳本体 (在 R_in 和 R_out 之间形成规整正圆环壁)
+    ctx.beginPath();
+    ctx.arc(0, 0, R_out, theta_l, Math.PI * 2 + theta_r, false);
+    ctx.lineTo(x_part, y_part);
+    ctx.arc(0, 0, R_in, Math.PI * 2 + theta_r, theta_l, true);
+    ctx.lineTo(-x_part, y_part);
+    ctx.closePath();
+    const gradShell = ctx.createRadialGradient(0, 0, R_in, 0, 0, R_out);
+    gradShell.addColorStop(0, "#031c15");
+    gradShell.addColorStop(0.5, "#063e30");
+    gradShell.addColorStop(1, "#02120e");
+    ctx.fillStyle = gradShell;
+    ctx.fill();
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // 2B. 外壳最外沿高亮翡翠科技饰圈 (Precision Outer Ring)
+    ctx.beginPath();
+    ctx.arc(0, 0, R_out + 0.6, theta_l - 0.01, Math.PI * 2 + theta_r + 0.01, false);
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // 2C. 外壳内沿金属导轨强化线
+    ctx.beginPath();
+    ctx.arc(0, 0, R_in, theta_l, Math.PI * 2 + theta_r, false);
+    ctx.strokeStyle = "#059669";
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+
+    // 2D. 纤薄外壳圆周微型钛合金紧固铆钉 (均匀分布于正圆弧上)
+    const totalBolts = 15;
+    for (let i = 0; i < totalBolts; i++) {
+        const bt = theta_l + (Math.PI * 2 + theta_r - theta_l) * (i / (totalBolts - 1));
+        const bx = Math.cos(bt) * (R_out - 2.5);
+        const by = Math.sin(bt) * (R_out - 2.5);
+        ctx.fillStyle = "#021a14";
+        ctx.beginPath(); ctx.arc(bx, by, 1.2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#34d399";
+        ctx.beginPath(); ctx.arc(bx, by, 0.6, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+
+    // --- 3. 左右两侧完全顺应外壳曲线排列的操作按钮控制台台面底衬 ---
+    // 左控制台弧形台板 (从 phi = -67° 至 -136°)
+    const leftDeskS = -Math.PI / 2 - 136 * Math.PI / 180;
+    const leftDeskE = -Math.PI / 2 - 67 * Math.PI / 180;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, 56, leftDeskS, leftDeskE, false);
+    ctx.arc(0, 0, 36, leftDeskE, leftDeskS, true);
+    ctx.closePath();
+    ctx.fillStyle = "#061c3a";
+    ctx.fill();
+    ctx.strokeStyle = "#075985";
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+
+    // 右控制台弧形台板 (从 phi = 67° 至 136°)
+    const rightDeskS = -Math.PI / 2 + 67 * Math.PI / 180;
+    const rightDeskE = -Math.PI / 2 + 136 * Math.PI / 180;
+    ctx.beginPath();
+    ctx.arc(0, 0, 56, rightDeskS, rightDeskE, false);
+    ctx.arc(0, 0, 36, rightDeskE, rightDeskS, true);
+    ctx.closePath();
+    ctx.fillStyle = "#061c3a";
+    ctx.fill();
+    ctx.strokeStyle = "#075985";
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+    ctx.restore();
+
+    // --- 4. 前部三块连在一起的弧面大屏 ("位于座位前方 排列完全顺着圆形外壳的曲线") ---
+    const R_scr_out = 57.0;
+    const R_scr_in = 42.0; // 13px 宽屏高度，气势磅礴
+
+    // 三块屏幕各自的弧度定义 (以北向 -PI/2 为中心对称，完全紧贴外壳曲线排列)
+    const screens = [
+        {
+            name: "LEFT_MONITOR",
+            startDeg: -65,
+            endDeg: -23,
+            midDeg: -44,
+            hudType: "reactor"
+        },
+        {
+            name: "CENTER_MONITOR",
+            startDeg: -20,
+            endDeg: 20,
+            midDeg: 0,
+            hudType: "radar"
+        },
+        {
+            name: "RIGHT_MONITOR",
+            startDeg: 23,
+            endDeg: 65,
+            midDeg: 44,
+            hudType: "defense"
+        }
+    ];
+
+    screens.forEach(scr => {
+        const sRad = -Math.PI / 2 + scr.startDeg * Math.PI / 180;
+        const eRad = -Math.PI / 2 + scr.endDeg * Math.PI / 180;
+        const midRad = scr.midDeg * Math.PI / 180;
+
+        ctx.save();
+        // 4A. 屏幕外壳加固边框 (Screen Heavy Bezel)
+        ctx.beginPath();
+        ctx.arc(0, 0, R_scr_out + 0.8, sRad - 0.015, eRad + 0.015, false);
+        ctx.arc(0, 0, R_scr_in - 0.8, eRad + 0.015, sRad - 0.015, true);
+        ctx.closePath();
+        ctx.fillStyle = "#061c3a";
+        ctx.fill();
+        ctx.strokeStyle = "#00E5FF";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // 4B. 屏幕活跃显示表面 (Active Phosphor Glass Surface)
+        ctx.beginPath();
+        ctx.arc(0, 0, R_scr_out, sRad, eRad, false);
+        ctx.arc(0, 0, R_scr_in, eRad, sRad, true);
+        ctx.closePath();
+        const gradScr = ctx.createRadialGradient(0, 0, R_scr_in, 0, 0, R_scr_out);
+        gradScr.addColorStop(0, "#061c3a");
+        gradScr.addColorStop(0.65, "#0b355c");
+        gradScr.addColorStop(1, "#033d2f");
+        ctx.fillStyle = gradScr;
+        ctx.fill();
+        ctx.strokeStyle = "#00CCFF";
+        ctx.lineWidth = 1.0;
+        ctx.stroke();
+
+        // 4C. 同心同弧度扫描线 (Concentric Scanlines strictly fitting curve)
+        ctx.strokeStyle = "rgba(0, 229, 255, 0.22)";
+        ctx.lineWidth = 0.7;
+        for (let r = R_scr_in + 2; r < R_scr_out - 1.0; r += 2.4) {
+            ctx.beginPath();
+            ctx.arc(0, 0, r, sRad + 0.02, eRad - 0.02, false);
+            ctx.stroke();
+        }
+
+        // 4D. 屏幕内部高精切向 HUD 渲染
+        const midR = (R_scr_out + R_scr_in) / 2;
+        const smx = Math.sin(midRad) * midR;
+        const smy = -Math.cos(midRad) * midR;
+
+        ctx.save();
+        ctx.translate(smx, smy);
+        ctx.rotate(midRad);
+
+        if (scr.hudType === "radar") {
+            // === 正中大屏: 战术全景扫描雷达 (Facing Seat Directly) ===
+            ctx.strokeStyle = "rgba(0, 229, 255, 0.5)";
+            ctx.lineWidth = 0.7;
+            ctx.beginPath(); ctx.arc(0, 0, 4.2, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(0, 0, 2.0, 0, Math.PI * 2); ctx.stroke();
+
+            // 雷达旋转扫描波束
+            const sweepA = (time * 2.5) % (Math.PI * 2);
+            ctx.strokeStyle = "#00CCFF";
+            ctx.lineWidth = 1.0;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(Math.cos(sweepA) * 4.6, Math.sin(sweepA) * 4.6);
+            ctx.stroke();
+
+            // 动态敌我识别目标光点
+            if (Math.sin(time * 3) > 0) {
+                ctx.fillStyle = "#ef4444";
+                ctx.fillRect(-2.8, -2.2, 1.2, 1.2);
+            }
+            ctx.fillStyle = "#00E5FF";
+            ctx.fillRect(2.4, 1.6, 1.0, 1.0);
+
+            // 屏幕顶部科技标示
+            ctx.font = "bold 3.2px monospace";
+            ctx.fillStyle = "#7dd3fc";
+            ctx.textAlign = "center";
+            ctx.fillText("TACTICAL RADAR", 0, -3.6);
+
+            // 屏幕底部状态与锁定标记
+            ctx.font = "bold 2.8px monospace";
+            ctx.fillStyle = "#38bdf8";
+            ctx.fillText("LOCK: ENGAGED", 0, 4.6);
+
+        } else if (scr.hudType === "reactor") {
+            // === 左侧大屏: 反应堆动力流与能量示波波形 ===
+            ctx.font = "bold 3.0px monospace";
+            ctx.fillStyle = "#00CCFF";
+            ctx.textAlign = "center";
+            ctx.fillText("REACTOR TELEM", 0, -3.6);
+
+            // 动态实时正弦能量波形
+            ctx.strokeStyle = "#00E5FF";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            for (let px = -12; px <= 12; px += 1.2) {
+                const py = Math.sin(time * 4.8 + px * 0.45) * 2.0;
+                if (px === -12) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // 4 阶梯动力输出指示条
+            const powerBars = [1, 1, 1, Math.sin(time * 2) > 0 ? 1 : 0];
+            const pColors = ["#00E5FF", "#00CCFF", "#38bdf8", "#f59e0b"];
+            for (let b = 0; b < 4; b++) {
+                ctx.fillStyle = powerBars[b] ? pColors[b] : "#0b355c";
+                ctx.fillRect(-9 + b * 4.6, 3.4, 3.6, 1.4);
+            }
+
+        } else if (scr.hudType === "defense") {
+            // === 右侧大屏: 防护力场频谱与加密通信矩阵 ===
+            ctx.font = "bold 3.0px monospace";
+            ctx.fillStyle = "#38bdf8";
+            ctx.textAlign = "center";
+            ctx.fillText("SHIELD MATRIX", 0, -3.6);
+
+            // 6 段跳动脉冲均衡柱
+            const freqVals = [0.85, 0.45, 0.95, 0.65, 0.8, 0.55];
+            for (let f = 0; f < 6; f++) {
+                const fh = 1.4 + Math.abs(Math.sin(time * 3.8 + f * 1.2)) * 3.4 * freqVals[f];
+                ctx.fillStyle = "#0284c7";
+                ctx.fillRect(-10 + f * 3.4, 2.8 - fh, 2.4, fh);
+            }
+
+            // 底部防御状态
+            ctx.font = "bold 2.8px monospace";
+            ctx.fillStyle = "#00E5FF";
+            ctx.fillText("SHIELD: 100%", 0, 4.6);
+        }
+
+        ctx.restore(); // end local screen content
+        ctx.restore(); // end screen clip/stroke
+    });
+
+    // 4E. 屏幕间一体化钛合金连接锁扣 ("三块连在一起的屏幕")
+    [-21.5 * Math.PI / 180, 21.5 * Math.PI / 180].forEach(jTheta => {
+        const jx = Math.sin(jTheta) * ((R_scr_out + R_scr_in) / 2);
+        const jy = -Math.cos(jTheta) * ((R_scr_out + R_scr_in) / 2);
+        ctx.save();
+        ctx.translate(jx, jy);
+        ctx.rotate(jTheta);
+        ctx.fillStyle = "#0b355c";
+        ctx.fillRect(-2.0, -7, 4.0, 14);
+        ctx.strokeStyle = "#00CCFF";
+        ctx.lineWidth = 1.0;
+        ctx.strokeRect(-2.0, -7, 4.0, 14);
+        // 连接螺栓
+        ctx.fillStyle = "#00E5FF";
+        ctx.beginPath(); ctx.arc(0, -4, 0.9, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(0, 4, 0.9, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    // 4F. 屏幕表面晶体高光斜向弧反光 (Curved Screen Glare Sheen)
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, R_scr_out - 1, -Math.PI / 2 - 0.9, -Math.PI / 2 + 0.9, false);
+    ctx.arc(0, 0, R_scr_out - 4, -Math.PI / 2 + 0.9, -Math.PI / 2 - 0.9, true);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
+    ctx.fill();
+    ctx.restore();
+
+    // --- 5. 左右两侧完全顺应圆弧曲线排列的控制按钮 ("左右两侧的按钮也要顺着他的曲线排列") ---
+    // 5A. 左侧操作翼: 顺应圆形曲率的三排弧形按键组
+    // 外弧排 (Radius 62): 5 枚顺弧排列的带背光方形指令按键
+    const leftBtnsAngles = [-75, -89, -103, -117, -131];
+    const leftBtnColors = ["#00E5FF", "#0284c7", "#f59e0b", "#ef4444", "#38bdf8"];
+    leftBtnsAngles.forEach((deg, idx) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -52);
+    ctx.scale(1.2, 1.2); // 沿法线定位到半径 62
+        // 按键底座与键帽
+        ctx.fillStyle = "#061c3a";
+        ctx.fillRect(-2.4, -2.4, 4.8, 4.8);
+        ctx.strokeStyle = "#075985";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(-2.4, -2.4, 4.8, 4.8);
+        ctx.fillStyle = leftBtnColors[idx];
+        ctx.fillRect(-1.7, -1.7, 3.4, 3.4);
+        ctx.restore();
+    });
+
+    // 中弧排 (Radius 54): 4 枚顺弧排列的翘板开关 (带脉冲指示灯)
+    const leftRockersAngles = [-81, -96, -111, -125];
+    leftRockersAngles.forEach((deg, idx) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -47);
+    ctx.scale(1.2, 1.2);
+        ctx.fillStyle = "#061c3a";
+        ctx.fillRect(-2.2, -2.8, 4.4, 5.6);
+        ctx.strokeStyle = "#064e3b";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(-2.2, -2.8, 4.4, 5.6);
+        ctx.fillStyle = (idx % 2 === 0) ? "#075985" : "#0f766e";
+        ctx.fillRect(-1.6, -2.2, 3.2, 4.4);
+        // 状态微灯
+        ctx.fillStyle = (Math.sin(time * 4 + idx) > 0) ? "#00CCFF" : "#0b355c";
+        ctx.beginPath(); ctx.arc(0, -1.0, 0.6, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    // 内弧排 (Radius 46): 3 枚顺弧排列的带安全护盖重型拨动开关
+    const leftTogglesAngles = [-88, -104, -120];
+    leftTogglesAngles.forEach((deg) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -41);
+    ctx.scale(1.2, 1.2);
+        ctx.fillStyle = "#064e3b";
+        ctx.fillRect(-1.6, -1.6, 3.2, 3.2);
+        ctx.strokeStyle = "#00E5FF";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(-1.6, -1.6, 3.2, 3.2);
+        // 金属拨杆
+        ctx.strokeStyle = "#f3f4f6";
+        ctx.lineWidth = 1.0;
+        ctx.beginPath();
+        ctx.moveTo(0, 1.2); ctx.lineTo(0, -1.8);
+        ctx.stroke();
+        ctx.restore();
+    });
+
+    // 5B. 右侧操作翼: 顺应圆形曲率的三排弧形按键组
+    // 外弧排 (Radius 62): 顺弧双线性推子电位器与双旋转编码器旋钮
+    // 弧形推子滑轨 1 (deg 75 到 89)
+    ctx.save();
+    const fader1S = -Math.PI / 2 + 74 * Math.PI / 180;
+    const fader1E = -Math.PI / 2 + 88 * Math.PI / 180;
+    ctx.beginPath(); ctx.arc(0, 0, 62, fader1S, fader1E, false);
+    ctx.strokeStyle = "#061c3a"; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.strokeStyle = "#064e3b"; ctx.lineWidth = 0.6; ctx.stroke();
+    // 推子滑块 (deg 81)
+    ctx.rotate(81 * Math.PI / 180);
+    ctx.translate(0, -52);
+    ctx.scale(1.2, 1.2);
+    ctx.fillStyle = "#00E5FF"; ctx.fillRect(-1.6, -2.4, 3.2, 4.8);
+    ctx.fillStyle = "#e0f2fe"; ctx.fillRect(-0.8, -1.4, 1.6, 2.8);
+    ctx.restore();
+
+    // 弧形推子滑轨 2 (deg 93 到 107)
+    ctx.save();
+    const fader2S = -Math.PI / 2 + 93 * Math.PI / 180;
+    const fader2E = -Math.PI / 2 + 107 * Math.PI / 180;
+    ctx.beginPath(); ctx.arc(0, 0, 62, fader2S, fader2E, false);
+    ctx.strokeStyle = "#061c3a"; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.strokeStyle = "#064e3b"; ctx.lineWidth = 0.6; ctx.stroke();
+    // 推子滑块 (deg 101)
+    ctx.rotate(101 * Math.PI / 180);
+    ctx.translate(0, -52);
+    ctx.scale(1.2, 1.2);
+    ctx.fillStyle = "#00E5FF"; ctx.fillRect(-1.6, -2.4, 3.2, 4.8);
+    ctx.fillStyle = "#e0f2fe"; ctx.fillRect(-0.8, -1.4, 1.6, 2.8);
+    ctx.restore();
+
+    // 顺弧双高精旋钮 (deg 115 与 127)
+    [115, 127].forEach((deg, idx) => {
+        ctx.save();
+        ctx.rotate(deg * Math.PI / 180);
+        ctx.translate(0, -52);
+    ctx.scale(1.2, 1.2);
+        ctx.fillStyle = "#061c3a";
+        ctx.beginPath(); ctx.arc(0, 0, 2.8, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#00E5FF"; ctx.lineWidth = 0.7; ctx.stroke();
+        // 旋钮指针
+        const pRad = (time * 1.8 + idx * 2.2) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 0.9;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(pRad) * 2.4, Math.sin(pRad) * 2.4); ctx.stroke();
+        ctx.restore();
+    });
+
+    // 中弧排 (Radius 54): 4 枚顺弧排列的战术微动按键
+    const rightMicroAngles = [80, 94, 108, 122];
+    rightMicroAngles.forEach((deg, idx) => {
+        ctx.save();
+        ctx.rotate(deg * Math.PI / 180);
+        ctx.translate(0, -47);
+    ctx.scale(1.2, 1.2);
+        ctx.fillStyle = (idx % 2 === 0 ? "#00E5FF" : "#f59e0b");
+        ctx.fillRect(-2.0, -1.8, 4.0, 3.6);
+        ctx.strokeStyle = "#0b355c"; ctx.lineWidth = 0.5;
+        ctx.strokeRect(-2.0, -1.8, 4.0, 3.6);
+        ctx.restore();
+    });
+
+    // 内弧排 (Radius 46): 大型带黄黑警示圈的红色紧急制动主控按钮 (E-STOP)
+    ctx.save();
+    ctx.rotate(115 * Math.PI / 180);
+    ctx.translate(0, -41);
+    ctx.scale(1.2, 1.2);
+    // 黄黑相间安全防护座圈
+    ctx.fillStyle = "#f59e0b";
+    ctx.beginPath(); ctx.arc(0, 0, 4.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#000000";
+    ctx.beginPath(); ctx.arc(0, 0, 4.4, 0, Math.PI * 0.5); ctx.lineTo(0, 0); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, 4.4, Math.PI, Math.PI * 1.5); ctx.lineTo(0, 0); ctx.fill();
+    // 红色蘑菇头紧急制动按钮
+    ctx.fillStyle = "#ef4444";
+    ctx.beginPath(); ctx.arc(0, 0, 3.0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#fee2e2"; ctx.lineWidth = 0.8; ctx.stroke();
+    ctx.restore();
+
+    // --- 6. 屏幕后方的机械键盘与操作员滑轮座椅 ("后方是键盘和座位", 靠近控制台，面向北方屏幕) ---
+    // 6A. 机械键盘模块
+    ctx.save();
+    const kbY = -22;
+    const kbW = 24;
+    const kbH = 11;
+    ctx.translate(0, kbY);
+    ctx.scale(1.2, 1.2);
+
+    // 键盘底托
+    ctx.fillStyle = "#061c3a";
+    ctx.fillRect(-kbW / 2 - 1.5, -kbH / 2 - 1.5, kbW + 3, kbH + 3);
+    ctx.strokeStyle = "#0c4a6e";
+    ctx.lineWidth = 0.9;
+    ctx.strokeRect(-kbW / 2 - 1.5, -kbH / 2 - 1.5, kbW + 3, kbH + 3);
+
+    // 机械键盘背光基板
+    ctx.fillStyle = "rgba(0, 204, 255, 0.16)";
+    ctx.fillRect(-kbW / 2, -kbH / 2, kbW, kbH);
+
+    // 4 排机械键帽
+    const keyRows = 4;
+    const keyCols = 7;
+    const kw = 2.2;
+    const kh = 1.6;
+    const gapX = 0.8;
+    const gapY = 0.7;
+    const startKx = -kbW / 2 + 1.2;
+    const startKy = -kbH / 2 + 0.9;
+
+    for (let r = 0; r < keyRows; r++) {
+        for (let c = 0; c < keyCols; c++) {
+            if (r === 3 && (c >= 2 && c <= 4)) continue; // 空格留空
+            const kx = startKx + c * (kw + gapX);
+            const ky = startKy + r * (kh + gapY);
+            ctx.fillStyle = "#052e24";
+            ctx.fillRect(kx, ky, kw, kh);
+            ctx.fillStyle = (r === 0 && c === 0) ? "#ef4444" : "#00CCFF";
+            ctx.fillRect(kx + 0.4, ky + 0.3, kw - 0.8, kh - 0.6);
+        }
+    }
+    // 空格键
+    const spaceX = startKx + 2 * (kw + gapX);
+    const spaceY = startKy + 3 * (kh + gapY);
+    const spaceW = 3 * kw + 2 * gapX;
+    ctx.fillStyle = "#064e3b";
+    ctx.fillRect(spaceX, spaceY, spaceW, kh);
+    ctx.fillStyle = "#7dd3fc";
+    ctx.fillRect(spaceX + 0.8, spaceY + 0.3, spaceW - 1.6, kh - 0.6);
+
+    // 触控板
+    ctx.fillStyle = "#041d16";
+    ctx.fillRect(-4.5, kbH / 2 + 1.6, 9, 3.2);
+    ctx.strokeStyle = "#00E5FF";
+    ctx.lineWidth = 0.6;
+    ctx.strokeRect(-4.5, kbH / 2 + 1.6, 9, 3.2);
+    ctx.fillStyle = "#38bdf8";
+    ctx.fillRect(-1.5, kbH / 2 + 2.8, 3, 0.8);
+    ctx.restore();
+
+    // 6B. 操作员滑轮座椅 (就坐于键盘后方中心，面朝前部屏幕)
+    ctx.save();
+    const seatY = 10;
+    ctx.translate(0, seatY);
+    ctx.scale(1.2, 1.2);
+
+    // 五星万向轮金属底座
+    ctx.strokeStyle = "#042018";
+    ctx.lineWidth = 2.2;
+    for (let arm = 0; arm < 5; arm++) {
+        const starA = arm * (Math.PI * 2 / 5) - Math.PI / 2;
+        const wx = Math.cos(starA) * 12;
+        const wy = Math.sin(starA) * 10;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(wx, wy);
+        ctx.stroke();
+        ctx.fillStyle = "#064e3b";
+        ctx.beginPath(); ctx.arc(wx, wy, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+    // 气压升降液压中柱
+    ctx.fillStyle = "#00E5FF";
+    ctx.beginPath(); ctx.arc(0, 0, 2.6, 0, Math.PI * 2); ctx.fill();
+
+    // 坐垫本体
+    ctx.fillStyle = "#031712";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-10, -8, 20, 15, 4); else ctx.rect(-10, -8, 20, 15);
+    ctx.fill();
+    ctx.strokeStyle = "#075985";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // 坐垫加厚层与中央双缝线
+    ctx.fillStyle = "#064e3b";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-8, -6, 16, 11, 2.5); else ctx.rect(-8, -6, 16, 11);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0, 229, 255, 0.5)";
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(0, -5); ctx.lineTo(0, 4);
+    ctx.stroke();
+
+    // 左右两侧扶手
+    [-11, 9].forEach(ax => {
+        ctx.fillStyle = "#061c3a";
+        ctx.fillRect(ax, -6, 2.4, 10);
+        ctx.strokeStyle = "#00E5FF";
+        ctx.lineWidth = 0.7;
+        ctx.strokeRect(ax, -6, 2.4, 10);
+        ctx.fillStyle = "#0c4a6e";
+        ctx.fillRect(ax + 0.3, -4.5, 1.8, 7);
+    });
+
+    // 人体工学高靠背与头枕
+    ctx.fillStyle = "#061c3a";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-9, 4, 18, 9, 3.5); else ctx.rect(-9, 4, 18, 9);
+    ctx.fill();
+    ctx.strokeStyle = "#00E5FF";
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+
+    // 靠背腰托
+    ctx.fillStyle = "#044e3b";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-6, 6.5, 12, 4.5, 2); else ctx.rect(-6, 6.5, 12, 4.5);
+    ctx.fill();
+    ctx.strokeStyle = "#00CCFF";
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+
+    ctx.restore(); // end seat
+
+    // --- 7. 座位后方蓝色玻璃质感平直隔板 ("隔板做的基本没问题 但是要改成蓝色玻璃质感的") ---
+    // 【核心规范】: 隔板本身严格保持平直横线，绝非弧形！全面换装科技通透蓝玻璃质感
+    ctx.save();
+
+    // 7A. 中央门洞通道地坪导向耐磨板 (Blue Tech Walk-in Entrance Threshold)
+    ctx.fillStyle = "#031726";
+    ctx.fillRect(-door_hw, y_part - 2.5, door_hw * 2, 5.0);
+    ctx.strokeStyle = "#0284c7";
+    ctx.lineWidth = 1.0;
+    ctx.strokeRect(-door_hw, y_part - 2.5, door_hw * 2, 5.0);
+
+    // 门洞进入导向箭头 (Blue Entry Chevron Decals: ▲ ▲ ▲)
+    ctx.fillStyle = "#38bdf8";
+    [-8, 0, 8].forEach(arrX => {
+        ctx.beginPath();
+        ctx.moveTo(arrX, y_part - 1.4);
+        ctx.lineTo(arrX - 2.4, y_part + 1.4);
+        ctx.lineTo(arrX + 2.4, y_part + 1.4);
+        ctx.closePath();
+        ctx.fill();
+    });
+
+    // 7B. 左侧平直蓝色玻璃隔板面板 (Left Straight Blue Glass Panel: x from -x_part to -door_hw, y = y_part)
+    const glassThickness = 5.0;
+    const lGlassW = x_part - door_hw; // 57 - 19 = 38px
+
+    // 左侧通透纯正科技蓝玻璃本体渐变
+    const gradBlueL = ctx.createLinearGradient(-x_part, y_part - glassThickness / 2, -door_hw, y_part + glassThickness / 2);
+    gradBlueL.addColorStop(0, "rgba(56, 189, 248, 0.75)");  // 顶部天蓝高光边缘
+    gradBlueL.addColorStop(0.25, "rgba(14, 165, 233, 0.45)"); // 清透蔚蓝主体
+    gradBlueL.addColorStop(0.75, "rgba(30, 64, 175, 0.40)");  // 宝石深蓝核心
+    gradBlueL.addColorStop(1, "rgba(96, 165, 250, 0.70)");   // 底部电光蓝边
+    ctx.fillStyle = gradBlueL;
+    ctx.fillRect(-x_part, y_part - glassThickness / 2, lGlassW, glassThickness);
+
+    // 左隔板顶部平直蓝钛金属固定导轨 (Straight Top Blue Rail)
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-x_part, y_part - glassThickness / 2);
+    ctx.lineTo(-door_hw, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    // 左隔板底部平直钴蓝锁止底梁 (Straight Bottom Cobalt Rail)
+    ctx.strokeStyle = "#1d4ed8";
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    ctx.moveTo(-x_part, y_part + glassThickness / 2);
+    ctx.lineTo(-door_hw, y_part + glassThickness / 2);
+    ctx.stroke();
+
+    // 纯平直 45 度亮白水晶镜面反光斜线 (Crisp Specular Reflection Streaks)
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-48, y_part + glassThickness / 2);
+    ctx.lineTo(-42, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(186, 230, 253, 0.90)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(-33, y_part + glassThickness / 2);
+    ctx.lineTo(-27, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    // 内部平直蓝色激光防撞指示中线 (Internal Blue Refraction Line)
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.85)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-x_part, y_part);
+    ctx.lineTo(-door_hw, y_part);
+    ctx.stroke();
+
+    // 7C. 右侧平直蓝色玻璃隔板面板 (Right Straight Blue Glass Panel: x from door_hw to x_part, y = y_part)
+    const rGlassW = x_part - door_hw; // 38px
+
+    // 右侧通透纯正科技蓝玻璃本体渐变
+    const gradBlueR = ctx.createLinearGradient(door_hw, y_part - glassThickness / 2, x_part, y_part + glassThickness / 2);
+    gradBlueR.addColorStop(0, "rgba(56, 189, 248, 0.70)");
+    gradBlueR.addColorStop(0.25, "rgba(30, 64, 175, 0.40)");
+    gradBlueR.addColorStop(0.75, "rgba(14, 165, 233, 0.45)");
+    gradBlueR.addColorStop(1, "rgba(96, 165, 250, 0.75)");
+    ctx.fillStyle = gradBlueR;
+    ctx.fillRect(door_hw, y_part - glassThickness / 2, rGlassW, glassThickness);
+
+    // 右隔板顶部平直导轨
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(door_hw, y_part - glassThickness / 2);
+    ctx.lineTo(x_part, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    // 右隔板底部平直底梁
+    ctx.strokeStyle = "#1d4ed8";
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    ctx.moveTo(door_hw, y_part + glassThickness / 2);
+    ctx.lineTo(x_part, y_part + glassThickness / 2);
+    ctx.stroke();
+
+    // 右隔板表面平直 45 度反光斜线
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(27, y_part + glassThickness / 2);
+    ctx.lineTo(33, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(186, 230, 253, 0.90)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(42, y_part + glassThickness / 2);
+    ctx.lineTo(48, y_part - glassThickness / 2);
+    ctx.stroke();
+
+    // 内部平直蓝色激光防撞指示中线
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.85)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(door_hw, y_part);
+    ctx.lineTo(x_part, y_part);
+    ctx.stroke();
+
+    // 7D. 四根重型金属圆柱立柱与蓝光安全感应器 (Four Stanchion Posts with Blue LED Rings)
+    // 坐标: 外左端 (-57, 44)、门洞左立柱 (-19, 44)、门洞右立柱 (19, 44)、外右端 (57, 44)
+    const stanchions = [-x_part, -door_hw, door_hw, x_part];
+    stanchions.forEach((sx, idx) => {
+        // 立柱金属基座
+        ctx.fillStyle = "#061c3a";
+        ctx.beginPath(); ctx.arc(sx, y_part, 3.4, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#1e3a8a";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // 不锈钢镀铬圆芯
+        ctx.fillStyle = "#93c5fd";
+        ctx.beginPath(); ctx.arc(sx, y_part, 2.0, 0, Math.PI * 2); ctx.fill();
+
+        // 门洞两侧立柱蓝色安全红外感应光圈 (Blue Optical Trip-Beam Sensor)
+        if (idx === 1 || idx === 2) {
+            ctx.fillStyle = (Math.sin(time * 3.5) > 0) ? "#38bdf8" : "#0284c7";
+            ctx.beginPath(); ctx.arc(sx, y_part, 1.0, 0, Math.PI * 2); ctx.fill();
+        }
+    });
+
+    ctx.restore(); // end blue straight glass partition
+
+    ctx.restore(); // end drawCircularPodWorkstation
+}
+window.drawCircularPodWorkstation = drawCircularPodWorkstation;
+
+// ===== 动静分离优化 (2026-11-05)：圆形舱动态元素每帧重画 =====
+
+// =========================================================
+// drawCircularPodWorkstationDynamic (migrated from level7_lab.js, 2026-11-05)
+// =========================================================
+function drawCircularPodWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
+    const time = Date.now() * 0.001;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    // 屏幕定义（与主函数一致，用于定位动态元素）
+    const screens = [
+        { name: "LEFT_MONITOR", startDeg: -65, endDeg: -23, midDeg: -44, hudType: "reactor" },
+        { name: "CENTER_MONITOR", startDeg: -20, endDeg: 20, midDeg: 0, hudType: "radar" },
+        { name: "RIGHT_MONITOR", startDeg: 23, endDeg: 65, midDeg: 44, hudType: "defense" }
+    ];
+
+    // --- 动态 1-5：三块屏幕的 HUD 动画 ---
+    screens.forEach(scr => {
+        const midRad = scr.midDeg * Math.PI / 180;
+        const R_scr_out = 57, R_scr_in = 42;
+        const midR = (R_scr_out + R_scr_in) / 2;
+        const smx = Math.sin(midRad) * midR;
+        const smy = -Math.cos(midRad) * midR;
+
+        ctx.save();
+        ctx.translate(smx, smy);
+        ctx.rotate(midRad);
+
+        if (scr.hudType === "radar") {
+            // 动态1：雷达旋转扫描波束
+            const sweepA = (time * 2.5) % (Math.PI * 2);
+            ctx.strokeStyle = "#00CCFF";
+            ctx.lineWidth = 1.0;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(Math.cos(sweepA) * 4.6, Math.sin(sweepA) * 4.6);
+            ctx.stroke();
+
+            // 动态2：敌我识别目标光点闪烁
+            if (Math.sin(time * 3) > 0) {
+                ctx.fillStyle = "#ef4444";
+                ctx.fillRect(-2.8, -2.2, 1.2, 1.2);
+            }
+        } else if (scr.hudType === "reactor") {
+            // 动态3：实时正弦能量波形
+            ctx.strokeStyle = "#00E5FF";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            for (let px = -12; px <= 12; px += 1.2) {
+                const py = Math.sin(time * 4.8 + px * 0.45) * 2.0;
+                if (px === -12) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // 动态4：4阶梯动力输出指示条
+            const powerBars = [1, 1, 1, Math.sin(time * 2) > 0 ? 1 : 0];
+            const pColors = ["#00E5FF", "#00CCFF", "#38bdf8", "#f59e0b"];
+            for (let b = 0; b < 4; b++) {
+                ctx.fillStyle = powerBars[b] ? pColors[b] : "#0b355c";
+                ctx.fillRect(-9 + b * 4.6, 3.4, 3.6, 1.4);
+            }
+        } else if (scr.hudType === "defense") {
+            // 动态5：6段跳动脉冲均衡柱
+            const freqVals = [0.85, 0.45, 0.95, 0.65, 0.8, 0.55];
+            for (let f = 0; f < 6; f++) {
+                const fh = 1.4 + Math.abs(Math.sin(time * 3.8 + f * 1.2)) * 3.4 * freqVals[f];
+                ctx.fillStyle = "#0284c7";
+                ctx.fillRect(-10 + f * 3.4, 2.8 - fh, 2.4, fh);
+            }
+        }
+
+        ctx.restore();
+    });
+
+    // --- 动态6：翘板开关状态微灯 ---
+    const leftRockersAngles = [-81, -96, -111, -125];
+    leftRockersAngles.forEach((deg, idx) => {
+        const aRad = deg * Math.PI / 180;
+        ctx.save();
+        ctx.rotate(aRad);
+        ctx.translate(0, -47);
+        ctx.scale(1.2, 1.2);
+        // 状态微灯（只画动态部分，静态底座在缓存里）
+        ctx.fillStyle = (Math.sin(time * 4 + idx) > 0) ? "#00CCFF" : "#0b355c";
+        ctx.beginPath(); ctx.arc(0, -1.0, 0.6, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    });
+
+    // --- 动态7：旋钮指针 ---
+    [115, 127].forEach((deg, idx) => {
+        ctx.save();
+        ctx.rotate(deg * Math.PI / 180);
+        ctx.translate(0, -52);
+        ctx.scale(1.2, 1.2);
+        // 旋钮指针（只画动态部分）
+        const pRad = (time * 1.8 + idx * 2.2) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 0.9;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(pRad) * 2.4, Math.sin(pRad) * 2.4); ctx.stroke();
+        ctx.restore();
+    });
+
+    // --- 动态8：隔断立柱红外感应光圈 ---
+    const y_part = 38;
+    const door_hw = 16;
+    const x_part = 49;
+    const stanchions = [-x_part, -door_hw, door_hw, x_part];
+    stanchions.forEach((sx, idx) => {
+        if (idx === 1 || idx === 2) {
+            ctx.fillStyle = (Math.sin(time * 3.5) > 0) ? "#38bdf8" : "#0284c7";
+            ctx.beginPath(); ctx.arc(sx, y_part, 1.0, 0, Math.PI * 2); ctx.fill();
+        }
+    });
+
+    ctx.restore();
+}
+window.drawCircularPodWorkstationDynamic = drawCircularPodWorkstationDynamic;
+
+
+// =========================================================
+// drawTripleCubicleWorkstation (migrated from level7_lab.js, 2026-11-05)
+// =========================================================
+function drawTripleCubicleWorkstation(ctx, cx, cy, angle = 0, scale = 1.0, freezeTime = 0) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const time = freezeTime ? 0 : Date.now() * 0.001;
+
+    // --- 几何与尺寸常量 (精确 2.2016 倍原正圆控制台，严格控制在 2.2 倍左右) ---
+    // 原正圆外壳直径 124px，2.2016 倍 = 273px (轴间距 91px)
+    const totalW = 273;
+    const halfW = totalW / 2; // 136.5
+    const bayPitch = 91;      // 每个隔间轴间距 91px (3个隔间刚好 273px)
+    const bayOffsets = [-bayPitch, 0, bayPitch]; // 三个隔间中心 x 坐标: -91, 0, 91
+    const partitionX = [-136.5, -45.5, 45.5, 136.5]; // 4 根隔断侧壁 x 坐标
+    const partYTop = -49;                        // 隔断墙顶端 (北部前沿)
+    const partYBottom = 48;                      // 隔断墙底端 (南部进出口)
+    const deskYTop = -29;                        // 桌面北沿
+    const deskYBottom = 5;                       // 桌面南沿 (深度 34px)
+
+    // --- 1. 三隔间整体地坪底衬与科技防静电耐磨地席 ---
+    ctx.save();
+    ctx.fillStyle = "#020f0b";
+    ctx.fillRect(-halfW - 2, partYTop - 2, totalW + 4, (partYBottom - partYTop) + 4);
+    ctx.strokeStyle = "#064e3b";
+    ctx.lineWidth = 1.0;
+    ctx.strokeRect(-halfW - 2, partYTop - 2, totalW + 4, (partYBottom - partYTop) + 4);
+
+    // 三个隔间各自的坐席地坪微导轨与边缘警示线
+    bayOffsets.forEach(bx => {
+        ctx.fillStyle = "#031712";
+        ctx.fillRect(bx - 39.5, deskYBottom + 2, 79, partYBottom - deskYBottom - 4);
+        ctx.strokeStyle = "rgba(16, 185, 129, 0.15)";
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(bx - 39.5, deskYBottom + 2, 79, partYBottom - deskYBottom - 4);
+
+        for (let gy = deskYBottom + 8; gy < partYBottom - 4; gy += 6) {
+            ctx.beginPath();
+            ctx.moveTo(bx - 33, gy);
+            ctx.lineTo(bx + 33, gy);
+            ctx.strokeStyle = "rgba(16, 185, 129, 0.08)";
+            ctx.lineWidth = 0.6;
+            ctx.stroke();
+        }
+    });
+    ctx.restore();
+
+    // --- 2. 三隔间贯通桌面底板与前部主梁框架 ---
+    ctx.save();
+    // 前部主梁 (Bulkhead Beam)
+    ctx.fillStyle = "#01140e";
+    ctx.fillRect(-halfW - 1, partYTop, totalW + 2, 6);
+    ctx.strokeStyle = "#047857";
+    ctx.lineWidth = 1.4;
+    ctx.strokeRect(-halfW - 1, partYTop, totalW + 2, 6);
+
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-halfW, partYTop + 3);
+    ctx.lineTo(halfW, partYTop + 3);
+    ctx.stroke();
+
+    // 三隔间碳纤维军工翡翠科技台面 (Desk Counter Surface)
+    bayOffsets.forEach((bx, bIdx) => {
+        const deskX = bx - 43.5;
+        const deskW = 87;
+        const deskH = deskYBottom - deskYTop;
+
+        const gradDesk = ctx.createLinearGradient(0, deskYTop, 0, deskYBottom);
+        gradDesk.addColorStop(0, "#031d16");
+        gradDesk.addColorStop(0.5, "#062b21");
+        gradDesk.addColorStop(1, "#021611");
+        ctx.fillStyle = gradDesk;
+        ctx.fillRect(deskX, deskYTop, deskW, deskH);
+
+        ctx.strokeStyle = "#047857";
+        ctx.lineWidth = 1.0;
+        ctx.strokeRect(deskX, deskYTop, deskW, deskH);
+
+        // 桌面南侧金属包边与微发光翡翠导光条
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(deskX, deskYBottom - 1.5, deskW, 2.5);
+        ctx.fillStyle = "#10b981";
+        ctx.fillRect(deskX + 2, deskYBottom, deskW - 4, 1.0);
+
+        // 线缆收纳孔
+        [-35, 35].forEach(gx => {
+            ctx.fillStyle = "#010a07";
+            ctx.beginPath();
+            ctx.arc(bx + gx, deskYTop + 4.5, 2.2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#064e3b";
+            ctx.lineWidth = 0.6;
+            ctx.stroke();
+        });
+
+        // 桌面编号
+        ctx.font = "bold 3.5px monospace";
+        ctx.fillStyle = "rgba(52, 211, 153, 0.4)";
+        ctx.textAlign = "left";
+        ctx.fillText(`TAC-BAY 0${bIdx + 1}`, deskX + 4, deskYTop + 6);
+    });
+    ctx.restore();
+
+    // --- 3. 逐个隔间核心内装：每个隔间前部3连屏 + 键盘 + 左右控制按钮 + 座位 ---
+    bayOffsets.forEach((bx, bIdx) => {
+        ctx.save();
+        ctx.translate(bx, 0);
+
+        // 3A. 前部三个连在一起的屏幕 (Three Connected Screens side-by-side, 明显做大至 27.5 x 16.5)
+        const scrW = 27.5;
+        const scrH = 16.5;
+        const scrY = -44.0;
+        const scrConfigs = [
+            { id: "L", sx: -28.0 },
+            { id: "C", sx: 0 },
+            { id: "R", sx: 28.0 }
+        ];
+
+        scrConfigs.forEach((scr, sIdx) => {
+            const scx = scr.sx;
+
+            // 屏幕边框
+            ctx.fillStyle = "#01120d";
+            ctx.fillRect(scx - scrW / 2 - 0.8, scrY - 0.8, scrW + 1.6, scrH + 1.6);
+            ctx.strokeStyle = (bIdx === 1) ? "#00E5FF" : "#10b981";
+            ctx.lineWidth = 1.0;
+            ctx.strokeRect(scx - scrW / 2 - 0.8, scrY - 0.8, scrW + 1.6, scrH + 1.6);
+
+            // 屏幕玻璃面
+            const gradScr = ctx.createLinearGradient(scx - scrW / 2, scrY, scx + scrW / 2, scrY + scrH);
+            if (bIdx === 1) {
+                gradScr.addColorStop(0, "#031d2e");
+                gradScr.addColorStop(0.65, "#072b3b");
+                gradScr.addColorStop(1, "#021622");
+            } else {
+                gradScr.addColorStop(0, "#021a14");
+                gradScr.addColorStop(0.65, "#042c22");
+                gradScr.addColorStop(1, "#02130e");
+            }
+            ctx.fillStyle = gradScr;
+            ctx.fillRect(scx - scrW / 2, scrY, scrW, scrH);
+
+            ctx.strokeStyle = (bIdx === 1) ? "rgba(0, 229, 255, 0.7)" : "rgba(16, 185, 129, 0.7)";
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(scx - scrW / 2, scrY, scrW, scrH);
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(scx - scrW / 2, scrY, scrW, scrH);
+            ctx.clip();
+
+            // 细密扫描线
+            ctx.strokeStyle = (bIdx === 1) ? "rgba(0, 229, 255, 0.12)" : "rgba(16, 185, 129, 0.12)";
+            ctx.lineWidth = 0.5;
+            for (let ly = scrY + 1.5; ly < scrY + scrH; ly += 2.0) {
+                ctx.beginPath();
+                ctx.moveTo(scx - scrW / 2, ly);
+                ctx.lineTo(scx + scrW / 2, ly);
+                ctx.stroke();
+            }
+
+            // 战术 HUD
+            if (bIdx === 0) {
+                // 左隔间: 通信、频谱与扇区雷达
+                if (sIdx === 0) {
+                    for (let b = 0; b < 6; b++) {
+                        const bxBar = scx - 10 + b * 3.4;
+                        const hVal = 2.0 + Math.abs(Math.sin(time * 3.2 + b * 1.1)) * 7.5;
+                        ctx.fillStyle = (b === 4) ? "#f59e0b" : "#10b981";
+                        ctx.fillRect(bxBar, scrY + scrH - 2 - hVal, 2.2, hVal);
+                    }
+                    ctx.font = "bold 2.6px monospace";
+                    ctx.fillStyle = "#34d399";
+                    ctx.textAlign = "center";
+                    ctx.fillText("SPEC-RF", scx, scrY + 3.5);
+                } else if (sIdx === 1) {
+                    ctx.strokeStyle = "rgba(52, 211, 153, 0.6)";
+                    ctx.lineWidth = 0.7;
+                    ctx.beginPath(); ctx.arc(scx, scrY + scrH / 2, 4.5, 0, Math.PI * 2); ctx.stroke();
+                    ctx.beginPath(); ctx.arc(scx, scrY + scrH / 2, 2.2, 0, Math.PI * 2); ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(scx - 5.5, scrY + scrH / 2); ctx.lineTo(scx + 5.5, scrY + scrH / 2);
+                    ctx.moveTo(scx, scrY + scrH / 2 - 5.5); ctx.lineTo(scx, scrY + scrH / 2 + 5.5);
+                    ctx.stroke();
+                    const sw = (time * 2.8) % (Math.PI * 2);
+                    ctx.strokeStyle = "#34d399";
+                    ctx.lineWidth = 1.0;
+                    ctx.beginPath();
+                    ctx.moveTo(scx, scrY + scrH / 2);
+                    ctx.lineTo(scx + Math.cos(sw) * 4.8, scrY + scrH / 2 + Math.sin(sw) * 4.8);
+                    ctx.stroke();
+                    ctx.fillStyle = "#38bdf8";
+                    ctx.fillRect(scx - 2.5, scrY + scrH / 2 - 2, 1.2, 1.2);
+                } else {
+                    ctx.font = "bold 2.6px monospace";
+                    ctx.fillStyle = "#38bdf8";
+                    ctx.textAlign = "center";
+                    ctx.fillText("UPLINK: 99%", scx, scrY + 3.5);
+                    ctx.strokeStyle = "#10b981";
+                    ctx.lineWidth = 0.8;
+                    ctx.beginPath();
+                    for (let wx = -10; wx <= 10; wx += 1.5) {
+                        const wy = Math.sin(time * 4.0 + wx * 0.4) * 2.2;
+                        if (wx === -10) ctx.moveTo(scx + wx, scrY + scrH / 2 + 1 + wy);
+                        else ctx.lineTo(scx + wx, scrY + scrH / 2 + 1 + wy);
+                    }
+                    ctx.stroke();
+                }
+            } else if (bIdx === 1) {
+                // 中隔间: 反应堆核心、主控准星与防御护盾
+                if (sIdx === 0) {
+                    ctx.font = "bold 2.6px monospace";
+                    ctx.fillStyle = "#00E5FF";
+                    ctx.textAlign = "center";
+                    ctx.fillText("REACTOR", scx, scrY + 3.5);
+                    ctx.strokeStyle = "#38bdf8";
+                    ctx.lineWidth = 0.9;
+                    ctx.beginPath();
+                    for (let rx = -10; rx <= 10; rx += 1.5) {
+                        const ry = Math.cos(time * 5.0 + rx * 0.5) * 2.5;
+                        if (rx === -10) ctx.moveTo(scx + rx, scrY + scrH / 2 + 1 + ry);
+                        else ctx.lineTo(scx + rx, scrY + scrH / 2 + 1 + ry);
+                    }
+                    ctx.stroke();
+                    ctx.fillStyle = "#10b981";
+                    ctx.fillRect(scx - 8, scrY + scrH - 3.5, 4, 1.5);
+                    ctx.fillRect(scx - 2, scrY + scrH - 3.5, 4, 1.5);
+                    ctx.fillStyle = "#f59e0b";
+                    ctx.fillRect(scx + 4, scrY + scrH - 3.5, 4, 1.5);
+                } else if (sIdx === 1) {
+                    ctx.strokeStyle = "#00E5FF";
+                    ctx.lineWidth = 0.8;
+                    ctx.strokeRect(scx - 4.5, scrY + scrH / 2 - 4, 9, 8);
+                    ctx.beginPath();
+                    ctx.moveTo(scx - 7, scrY + scrH / 2); ctx.lineTo(scx + 7, scrY + scrH / 2);
+                    ctx.moveTo(scx, scrY + scrH / 2 - 5); ctx.lineTo(scx, scrY + scrH / 2 + 5);
+                    ctx.stroke();
+                    if (Math.sin(time * 4) > 0) {
+                        ctx.fillStyle = "#ef4444";
+                        ctx.fillRect(scx - 1.2, scrY + scrH / 2 - 1.2, 2.4, 2.4);
+                    }
+                    ctx.font = "bold 2.4px monospace";
+                    ctx.fillStyle = "#7dd3fc";
+                    ctx.textAlign = "center";
+                    ctx.fillText("TARGET: LOCK", scx, scrY + scrH - 2);
+                } else {
+                    ctx.font = "bold 2.6px monospace";
+                    ctx.fillStyle = "#38bdf8";
+                    ctx.textAlign = "center";
+                    ctx.fillText("SHIELD: 100%", scx, scrY + 3.5);
+                    const sBars = [1, 1, 1, 1, Math.sin(time * 2.5) > 0 ? 1 : 0];
+                    for (let sb = 0; sb < 5; sb++) {
+                        ctx.fillStyle = sBars[sb] ? "#00E5FF" : "#0c4a6e";
+                        ctx.fillRect(scx - 9 + sb * 3.8, scrY + scrH / 2, 3.0, 3.5);
+                    }
+                }
+            } else {
+                // 右隔间: 无人机、防火墙与供电
+                if (sIdx === 0) {
+                    ctx.strokeStyle = "#10b981";
+                    ctx.lineWidth = 0.7;
+                    ctx.strokeRect(scx - 6, scrY + 3.5, 12, 7);
+                    ctx.fillStyle = "#34d399";
+                    ctx.beginPath(); ctx.arc(scx - 3, scrY + 6, 1, 0, Math.PI * 2); ctx.fill();
+                    ctx.beginPath(); ctx.arc(scx + 3, scrY + 8, 1, 0, Math.PI * 2); ctx.fill();
+                    ctx.font = "bold 2.4px monospace";
+                    ctx.fillStyle = "#6ee7b7";
+                    ctx.textAlign = "center";
+                    ctx.fillText("DRONE: 02", scx, scrY + scrH - 1.5);
+                } else if (sIdx === 1) {
+                    ctx.font = "bold 2.6px monospace";
+                    ctx.fillStyle = "#10b981";
+                    ctx.textAlign = "center";
+                    ctx.fillText("FIREWALL: OK", scx, scrY + 3.5);
+                    for (let cxp = -8; cxp <= 8; cxp += 4) {
+                        for (let cyp = scrY + 5; cyp <= scrY + scrH - 3; cyp += 2.5) {
+                            ctx.fillStyle = (Math.sin(time * 4 + cxp + cyp) > 0) ? "#34d399" : "#064e3b";
+                            ctx.fillRect(scx + cxp, cyp, 1.8, 1.2);
+                        }
+                    }
+                } else {
+                    ctx.font = "bold 2.6px monospace";
+                    ctx.fillStyle = "#f59e0b";
+                    ctx.textAlign = "center";
+                    ctx.fillText("GRID: 480V", scx, scrY + 3.5);
+                    ctx.strokeStyle = "#f59e0b";
+                    ctx.lineWidth = 0.9;
+                    ctx.beginPath();
+                    ctx.arc(scx, scrY + scrH / 2 + 1.5, 3.5, Math.PI * 0.8, Math.PI * 2.2);
+                    ctx.stroke();
+                    const pA = Math.PI * 0.8 + Math.abs(Math.sin(time * 2.2)) * Math.PI * 1.4;
+                    ctx.beginPath();
+                    ctx.moveTo(scx, scrY + scrH / 2 + 1.5);
+                    ctx.lineTo(scx + Math.cos(pA) * 3.2, scrY + scrH / 2 + 1.5 + Math.sin(pA) * 3.2);
+                    ctx.stroke();
+                }
+            }
+
+            // 玻璃斜高光
+            ctx.fillStyle = "rgba(255, 255, 255, 0.10)";
+            ctx.beginPath();
+            ctx.moveTo(scx - scrW / 2 + 2, scrY);
+            ctx.lineTo(scx - scrW / 2 + 7, scrY);
+            ctx.lineTo(scx - scrW / 2 + 1, scrY + scrH);
+            ctx.lineTo(scx - scrW / 2 - 4, scrY + scrH);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.restore();
+        });
+
+        // 铰链连接扣
+        [-14.0, 14.0].forEach(jx => {
+            ctx.fillStyle = "#031d16";
+            ctx.fillRect(jx - 1.5, scrY + 1, 3.0, scrH - 2);
+            ctx.strokeStyle = (bIdx === 1) ? "#00E5FF" : "#10b981";
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(jx - 1.5, scrY + 1, 3.0, scrH - 2);
+            ctx.fillStyle = "#93c5fd";
+            ctx.beginPath(); ctx.arc(jx, scrY + 3.5, 0.7, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(jx, scrY + scrH - 3.5, 0.7, 0, Math.PI * 2); ctx.fill();
+        });
+
+        // 3B. 屏幕后方中央机械键盘 ("屏幕后是键盘")
+        const kbY = -14.0;
+        const kbW = 24.0;
+        const kbH = 11.5;
+
+        ctx.fillStyle = "#021711";
+        ctx.fillRect(-kbW / 2 - 1.2, kbY - kbH / 2 - 1.2, kbW + 2.4, kbH + 2.4);
+        ctx.strokeStyle = "#064e3b";
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(-kbW / 2 - 1.2, kbY - kbH / 2 - 1.2, kbW + 2.4, kbH + 2.4);
+
+        ctx.fillStyle = (bIdx === 1) ? "rgba(0, 229, 255, 0.16)" : "rgba(16, 185, 129, 0.16)";
+        ctx.fillRect(-kbW / 2, kbY - kbH / 2, kbW, kbH);
+
+        const kRows = 4;
+        const kCols = 7;
+        const kw = 2.2;
+        const kh = 1.7;
+        const gx = 0.8;
+        const gy = 0.7;
+        const startKx = -kbW / 2 + 1.2;
+        const startKy = kbY - kbH / 2 + 0.9;
+
+        for (let r = 0; r < kRows; r++) {
+            for (let c = 0; c < kCols; c++) {
+                if (r === 3 && (c >= 2 && c <= 4)) continue;
+                const kx = startKx + c * (kw + gx);
+                const ky = startKy + r * (kh + gy);
+                ctx.fillStyle = "#031c15";
+                ctx.fillRect(kx, ky, kw, kh);
+                ctx.fillStyle = (r === 0 && c === 0) ? "#ef4444" : ((bIdx === 1) ? "#00E5FF" : "#34d399");
+                ctx.fillRect(kx + 0.3, ky + 0.3, kw - 0.6, kh - 0.6);
+            }
+        }
+        const spX = startKx + 2 * (kw + gx);
+        const spY = startKy + 3 * (kh + gy);
+        const spW = 3 * kw + 2 * gx;
+        ctx.fillStyle = "#064e3b";
+        ctx.fillRect(spX, spY, spW, kh);
+        ctx.fillStyle = (bIdx === 1) ? "#7dd3fc" : "#6ee7b7";
+        ctx.fillRect(spX + 0.6, spY + 0.3, spW - 1.2, kh - 0.6);
+
+        ctx.fillStyle = "#02120e";
+        ctx.fillRect(-4.5, kbY + kbH / 2 + 1.5, 9.0, 3.0);
+        ctx.strokeStyle = (bIdx === 1) ? "#00E5FF" : "#10b981";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(-4.5, kbY + kbH / 2 + 1.5, 9.0, 3.0);
+        ctx.fillStyle = "#38bdf8";
+        ctx.fillRect(-1.5, kbY + kbH / 2 + 2.6, 3.0, 0.8);
+
+        // 3C. 键盘左右两侧的多排控制按钮 ("键盘左右两侧有按钮")
+        // 左侧操作面板
+        const lpX = -27.0;
+        const lpY = -13.0;
+        const lpW = 19.0;
+        const lpH = 20.0;
+
+        ctx.fillStyle = "#021711";
+        ctx.fillRect(lpX - lpW / 2, lpY - lpH / 2, lpW, lpH);
+        ctx.strokeStyle = "#064e3b";
+        ctx.lineWidth = 0.9;
+        ctx.strokeRect(lpX - lpW / 2, lpY - lpH / 2, lpW, lpH);
+
+        const lBtnColors = ["#10b981", "#06b6d4", "#f59e0b"];
+        for (let i = 0; i < 3; i++) {
+            const bxBtn = lpX - 6.5 + i * 5.0;
+            const byBtn = lpY - 7.0;
+            ctx.fillStyle = "#01120d";
+            ctx.fillRect(bxBtn, byBtn, 3.6, 3.6);
+            ctx.fillStyle = lBtnColors[i];
+            ctx.fillRect(bxBtn + 0.5, byBtn + 0.5, 2.6, 2.6);
+        }
+
+        for (let i = 0; i < 3; i++) {
+            const rxBtn = lpX - 6.5 + i * 5.0;
+            const ryBtn = lpY - 1.0;
+            ctx.fillStyle = "#01120d";
+            ctx.fillRect(rxBtn, ryBtn, 3.6, 4.2);
+            ctx.strokeStyle = "#047857";
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(rxBtn, ryBtn, 3.6, 4.2);
+            ctx.fillStyle = (i % 2 === 0) ? "#075985" : "#047857";
+            ctx.fillRect(rxBtn + 0.4, ryBtn + 0.4, 2.8, 3.4);
+            ctx.fillStyle = (Math.sin(time * 4.0 + i + bIdx) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath(); ctx.arc(rxBtn + 1.8, ryBtn + 1.2, 0.6, 0, Math.PI * 2); ctx.fill();
+        }
+
+        [-4, 4].forEach(tx => {
+            const tbx = lpX + tx;
+            const tby = lpY + 5.5;
+            ctx.fillStyle = "#064e3b";
+            ctx.fillRect(tbx - 1.5, tby - 1.5, 3.0, 3.0);
+            ctx.strokeStyle = "#10b981";
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(tbx - 1.5, tby - 1.5, 3.0, 3.0);
+            ctx.strokeStyle = "#f3f4f6";
+            ctx.lineWidth = 1.0;
+            ctx.beginPath();
+            ctx.moveTo(tbx, tby + 1.2);
+            ctx.lineTo(tbx, tby - 1.8);
+            ctx.stroke();
+        });
+
+        // 右侧操作面板
+        const rpX = 27.0;
+        const rpY = -13.0;
+        const rpW = 19.0;
+        const rpH = 20.0;
+
+        ctx.fillStyle = "#021711";
+        ctx.fillRect(rpX - rpW / 2, rpY - rpH / 2, rpW, rpH);
+        ctx.strokeStyle = "#064e3b";
+        ctx.lineWidth = 0.9;
+        ctx.strokeRect(rpX - rpW / 2, rpY - rpH / 2, rpW, rpH);
+
+        [-5.5, -1.0].forEach((fx, fIdx) => {
+            const fxPos = rpX + fx;
+            ctx.fillStyle = "#010e09";
+            ctx.fillRect(fxPos - 0.9, rpY - 7.5, 1.8, 9.0);
+            ctx.strokeStyle = "#064e3b";
+            ctx.lineWidth = 0.4;
+            ctx.strokeRect(fxPos - 0.9, rpY - 7.5, 1.8, 9.0);
+            const fyPos = rpY - 6.0 + (fIdx === 0 ? 3.0 : 5.0);
+            ctx.fillStyle = (bIdx === 1) ? "#00E5FF" : "#10b981";
+            ctx.fillRect(fxPos - 1.5, fyPos, 3.0, 1.8);
+            ctx.fillStyle = "#e0f2fe";
+            ctx.fillRect(fxPos - 0.7, fyPos + 0.5, 1.4, 0.8);
+        });
+
+        const dialX = rpX + 5.0;
+        const dialY = rpY - 3.0;
+        ctx.fillStyle = "#01120d";
+        ctx.beginPath(); ctx.arc(dialX, dialY, 2.8, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = (bIdx === 1) ? "#00E5FF" : "#10b981";
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+        const dialA = (time * 1.5 + bIdx) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(dialX, dialY);
+        ctx.lineTo(dialX + Math.cos(dialA) * 2.4, dialY + Math.sin(dialA) * 2.4);
+        ctx.stroke();
+
+        for (let mc = 0; mc < 2; mc++) {
+            for (let mr = 0; mr < 2; mr++) {
+                const mxPos = rpX - 6.0 + mc * 4.0;
+                const myPos = rpY + 3.0 + mr * 3.0;
+                ctx.fillStyle = (mr === 0) ? "#10b981" : "#f59e0b";
+                ctx.fillRect(mxPos, myPos, 2.8, 2.0);
+                ctx.strokeStyle = "#01120d";
+                ctx.lineWidth = 0.4;
+                ctx.strokeRect(mxPos, myPos, 2.8, 2.0);
+            }
+        }
+
+        const estopX = rpX + 4.8;
+        const estopY = rpY + 4.8;
+        ctx.fillStyle = "#f59e0b";
+        ctx.beginPath(); ctx.arc(estopX, estopY, 3.6, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#000000";
+        ctx.beginPath(); ctx.arc(estopX, estopY, 3.6, 0, Math.PI * 0.5); ctx.lineTo(estopX, estopY); ctx.fill();
+        ctx.beginPath(); ctx.arc(estopX, estopY, 3.6, Math.PI, Math.PI * 1.5); ctx.lineTo(estopX, estopY); ctx.fill();
+        ctx.fillStyle = "#ef4444";
+        ctx.beginPath(); ctx.arc(estopX, estopY, 2.4, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#fee2e2";
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+
+        // 3D. 再后方中央的操作员座椅 ("座椅跟其他控制台的座椅大小相同即可")
+        const seatY = 24.0;
+        ctx.save();
+        ctx.translate(0, seatY);
+        ctx.scale(1.2, 1.2); // 放大20%，与圆形舱座椅一致
+
+        // 五星万向轮金属底座 (5-Star Swivel Base, 尺寸与其他控制台座椅严格相同)
+        ctx.strokeStyle = "#042018";
+        ctx.lineWidth = 1.8;
+        for (let arm = 0; arm < 5; arm++) {
+            const starA = arm * (Math.PI * 2 / 5) - Math.PI / 2;
+            const wx = Math.cos(starA) * 11.0;
+            const wy = Math.sin(starA) * 9.5;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(wx, wy);
+            ctx.stroke();
+            // 滚轮
+            ctx.fillStyle = "#064e3b";
+            ctx.beginPath(); ctx.arc(wx, wy, 1.5, 0, Math.PI * 2); ctx.fill();
+        }
+        // 液压升降中柱
+        ctx.fillStyle = (bIdx === 1) ? "#00E5FF" : "#10b981";
+        ctx.beginPath(); ctx.arc(0, 0, 2.6, 0, Math.PI * 2); ctx.fill();
+
+        // 坐垫本体 (与其他控制台座椅尺寸严格一致: 宽 20px, 深 15px)
+        ctx.fillStyle = "#031712";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(-10.0, -8.0, 20.0, 15.0, 4.0); else ctx.rect(-10.0, -8.0, 20.0, 15.0);
+        ctx.fill();
+        ctx.strokeStyle = (bIdx === 1) ? "#0284c7" : "#047857";
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+
+        // 坐垫加厚层与中央双缝线 (与圆形控制台座椅一致: 宽 16px, 深 11px)
+        ctx.fillStyle = "#064e3b";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(-8.0, -6.0, 16.0, 11.0, 2.5); else ctx.rect(-8.0, -6.0, 16.0, 11.0);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(52, 211, 153, 0.5)";
+        ctx.lineWidth = 0.7;
+        ctx.beginPath();
+        ctx.moveTo(0, -5.0); ctx.lineTo(0, 4.0);
+        ctx.stroke();
+
+        // 左右两侧扶手 (外跨间距 22.4px，与圆形控制台座椅严格一致)
+        [-11.0, 9.0].forEach(ax => {
+            ctx.fillStyle = "#061c3a";
+            ctx.fillRect(ax, -6.0, 2.4, 10.0);
+            ctx.strokeStyle = (bIdx === 1) ? "#00E5FF" : "#10b981";
+            ctx.lineWidth = 0.7;
+            ctx.strokeRect(ax, -6.0, 2.4, 10.0);
+            ctx.fillStyle = (bIdx === 1) ? "#0c4a6e" : "#065f46";
+            ctx.fillRect(ax + 0.3, -4.5, 1.8, 7.0);
+        });
+
+        // 人体工学靠背 (与圆形控制台座椅严格一致: 宽 18px, 高 9px)
+        ctx.fillStyle = "#061c3a";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(-9.0, 4.0, 18.0, 9.0, 3.5); else ctx.rect(-9.0, 4.0, 18.0, 9.0);
+        ctx.fill();
+        ctx.strokeStyle = (bIdx === 1) ? "#00E5FF" : "#10b981";
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+
+        // 靠背腰托 (与圆形控制台座椅严格一致: 宽 12px, 高 4.5px)
+        ctx.fillStyle = "#044e3b";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(-6.0, 6.5, 12.0, 4.5, 2.0); else ctx.rect(-6.0, 6.5, 12.0, 4.5);
+        ctx.fill();
+        ctx.strokeStyle = "#34d399";
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+
+        ctx.restore(); // end seat
+
+        ctx.restore(); // end bay
+    });
+
+    // --- 4. 四根纵向重型金属隔断侧壁 ("外形上相当于三个连在一起的方形隔间") ---
+    partitionX.forEach((px, idx) => {
+        const isOuter = (idx === 0 || idx === 3);
+        const pWidth = isOuter ? 5.2 : 4.2;
+        const pLeft = px - pWidth / 2;
+        const pHeight = partYBottom - partYTop;
+
+        ctx.save();
+        const gradPart = ctx.createLinearGradient(pLeft, 0, pLeft + pWidth, 0);
+        gradPart.addColorStop(0, "#01120c");
+        gradPart.addColorStop(0.5, "#063e2f");
+        gradPart.addColorStop(1, "#021610");
+        ctx.fillStyle = gradPart;
+        ctx.fillRect(pLeft, partYTop, pWidth, pHeight);
+
+        ctx.strokeStyle = isOuter ? "#10b981" : "#047857";
+        ctx.lineWidth = isOuter ? 1.4 : 1.0;
+        ctx.strokeRect(pLeft, partYTop, pWidth, pHeight);
+
+        ctx.strokeStyle = isOuter ? "#34d399" : "rgba(52, 211, 153, 0.4)";
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(px, partYTop + 4);
+        ctx.lineTo(px, partYBottom - 4);
+        ctx.stroke();
+
+        [partYTop, partYBottom].forEach(py => {
+            ctx.fillStyle = "#021f17";
+            ctx.beginPath();
+            ctx.arc(px, py, isOuter ? 3.4 : 2.8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = isOuter ? "#10b981" : "#059669";
+            ctx.lineWidth = 1.0;
+            ctx.stroke();
+
+            ctx.fillStyle = (Math.sin(time * 3.0 + idx) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath();
+            ctx.arc(px, py, isOuter ? 1.5 : 1.1, 0, Math.PI * 2);
+            ctx.fill();
+        });
+
+        ctx.restore();
+    });
+
+    ctx.restore(); // end drawTripleCubicleWorkstation
+}
+window.drawTripleCubicleWorkstation = drawTripleCubicleWorkstation;
+
+// ===== 动静分离优化 (2026-11-05)：三联控制台动态元素每帧重画 =====
+
+// =========================================================
+// drawTripleCubicleWorkstationDynamic (migrated from level7_lab.js, 2026-11-05)
+// =========================================================
+function drawTripleCubicleWorkstationDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
+    const time = Date.now() * 0.001;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const bayPitch = 91;
+    const bayOffsets = [-bayPitch, 0, bayPitch];
+    const scrW = 27.5, scrH = 16.5, scrY = -44.0;
+    const scrConfigs = [{ id: "L", sx: -28.0 }, { id: "C", sx: 0 }, { id: "R", sx: 28.0 }];
+
+    // --- 屏幕 HUD 动态 (3隔间 x 3屏) ---
+    bayOffsets.forEach((bx, bIdx) => {
+        ctx.save();
+        ctx.translate(bx, 0);
+
+        scrConfigs.forEach((scr, sIdx) => {
+            const scx = scr.sx;
+
+            // 战术 HUD
+            if (bIdx === 0) {
+                // 左隔间
+                if (sIdx === 0) {
+                    // 动态1：频谱条
+                    for (let b = 0; b < 6; b++) {
+                        const bxBar = scx - 10 + b * 3.4;
+                        const hVal = 2.0 + Math.abs(Math.sin(time * 3.2 + b * 1.1)) * 7.5;
+                        ctx.fillStyle = (b === 4) ? "#f59e0b" : "#10b981";
+                        ctx.fillRect(bxBar, scrY + scrH - 2 - hVal, 2.2, hVal);
+                    }
+                } else if (sIdx === 1) {
+                    // 动态2：雷达扫描
+                    const sw = (time * 2.8) % (Math.PI * 2);
+                    ctx.strokeStyle = "#34d399";
+                    ctx.lineWidth = 1.0;
+                    ctx.beginPath();
+                    ctx.moveTo(scx, scrY + scrH / 2);
+                    ctx.lineTo(scx + Math.cos(sw) * 4.8, scrY + scrH / 2 + Math.sin(sw) * 4.8);
+                    ctx.stroke();
+                } else if (sIdx === 2) {
+                    // 动态3a：上行波形
+                    ctx.strokeStyle = "#10b981";
+                    ctx.lineWidth = 0.8;
+                    ctx.beginPath();
+                    for (let wx = -10; wx <= 10; wx += 1.5) {
+                        const wy = Math.sin(time * 4.0 + wx * 0.4) * 2.2;
+                        if (wx === -10) ctx.moveTo(scx + wx, scrY + scrH / 2 + 1 + wy);
+                        else ctx.lineTo(scx + wx, scrY + scrH / 2 + 1 + wy);
+                    }
+                    ctx.stroke();
+                }
+            } else if (bIdx === 1) {
+                // 中隔间
+                if (sIdx === 0) {
+                    // 动态3b：反应堆波形
+                    ctx.strokeStyle = "#38bdf8";
+                    ctx.lineWidth = 0.9;
+                    ctx.beginPath();
+                    for (let rx = -10; rx <= 10; rx += 1.5) {
+                        const ry = Math.cos(time * 5.0 + rx * 0.5) * 2.5;
+                        if (rx === -10) ctx.moveTo(scx + rx, scrY + scrH / 2 + 1 + ry);
+                        else ctx.lineTo(scx + rx, scrY + scrH / 2 + 1 + ry);
+                    }
+                    ctx.stroke();
+                } else if (sIdx === 1) {
+                    // 动态4：目标锁定闪烁
+                    if (Math.sin(time * 4) > 0) {
+                        ctx.fillStyle = "#ef4444";
+                        ctx.fillRect(scx - 1.2, scrY + scrH / 2 - 1.2, 2.4, 2.4);
+                    }
+                } else if (sIdx === 2) {
+                    // 动态5：护盾指示条
+                    const sBars = [1, 1, 1, 1, Math.sin(time * 2.5) > 0 ? 1 : 0];
+                    for (let sb = 0; sb < 5; sb++) {
+                        ctx.fillStyle = sBars[sb] ? "#00E5FF" : "#0c4a6e";
+                        ctx.fillRect(scx - 9 + sb * 3.8, scrY + scrH / 2, 3.0, 3.5);
+                    }
+                }
+            } else if (bIdx === 2) {
+                // 右隔间
+                if (sIdx === 0) {
+                    // 动态6：防火墙矩阵闪烁
+                    for (let cxp = -8; cxp <= 8; cxp += 4) {
+                        for (let cyp = scrY + 5; cyp <= scrY + scrH - 3; cyp += 2.5) {
+                            ctx.fillStyle = (Math.sin(time * 4 + cxp + cyp) > 0) ? "#34d399" : "#064e3b";
+                            ctx.fillRect(scx + cxp, cyp, 1.8, 1.2);
+                        }
+                    }
+                } else if (sIdx === 1) {
+                    // 动态7：电网仪表指针
+                    const pA = Math.PI * 0.8 + Math.abs(Math.sin(time * 2.2)) * Math.PI * 1.4;
+                    ctx.strokeStyle = "#f59e0b";
+                    ctx.lineWidth = 1.0;
+                    ctx.beginPath();
+                    ctx.moveTo(scx, scrY + scrH / 2 + 1.5);
+                    ctx.lineTo(scx + Math.cos(pA) * 3.2, scrY + scrH / 2 + 1.5 + Math.sin(pA) * 3.2);
+                    ctx.stroke();
+                }
+                // sIdx===2 右隔间右屏：静态，无动态
+            }
+        });
+
+        // --- 按钮指示灯 (动态8) ---
+        const lpX = -27.0, lpY = -13.0;
+        for (let i = 0; i < 3; i++) {
+            const rxBtn = lpX - 6.5 + i * 5.0;
+            const ryBtn = lpY - 1.0;
+            ctx.fillStyle = (Math.sin(time * 4.0 + i + bIdx) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath(); ctx.arc(rxBtn + 1.8, ryBtn + 1.2, 0.6, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // --- 仪表指针 (动态9) ---
+        const rpX = 27.0, rpY = -13.0;
+        const dialX = rpX + 5.0, dialY = rpY - 3.0;
+        const dialA = (time * 1.5 + bIdx) % (Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(dialX, dialY);
+        ctx.lineTo(dialX + Math.cos(dialA) * 2.4, dialY + Math.sin(dialA) * 2.4);
+        ctx.stroke();
+
+        ctx.restore();
+    });
+
+    // --- 隔断立柱传感器 (动态10) ---
+    const partitionX = [-136.5, -45.5, 45.5, 136.5];
+    const partYTop = -49, partYBottom = 48;
+    partitionX.forEach((px, idx) => {
+        const isOuter = (idx === 0 || idx === 3);
+        [partYTop, partYBottom].forEach(py => {
+            ctx.fillStyle = (Math.sin(time * 3.0 + idx) > 0) ? "#34d399" : "#022c22";
+            ctx.beginPath();
+            ctx.arc(px, py, isOuter ? 1.5 : 1.1, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    });
+
+    ctx.restore();
+}
+window.drawTripleCubicleWorkstationDynamic = drawTripleCubicleWorkstationDynamic;
+
+
+// =========================================================
+// drawPodium (migrated from level7_lab.js, 2026-11-05)
+// =========================================================
+function drawPodium(ctx, cx, cy, angle = 0, scale = 1.0) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const time = Date.now() * 0.001;
+
+    // --- 几何与尺寸常量 ---
+    // 角色碰撞半径为 18 (直径 36px)
+    // 讲台内侧净宽设定为 40px (x: -20 到 +20)，左右留有 2px 舒适裕量，比角色略大刚好能站上去
+    const deskHalfW = 28;     // 桌面总半宽 28px (总宽 56px)
+    const wingThick = 8;      // 两侧护翼厚度 8px (inner x: -20 与 20)
+    const deskYTop = -24;     // 主体长方形桌面顶端 (北沿)
+    const deskYBot = -6;      // 主体长方形桌面底端 (深度 18px)
+    const wingYBot = 18;      // 两侧护翼底端 (从桌面延伸至南侧 y=18，总长 42px)
+    const baseRadius = 20;    // 黑色半圆形底座半径 20px (刚好铺满两侧护翼内侧间距 40px)
+    const baseYCenter = 2;    // 半圆形底座圆心 y 坐标 (底部外弧延伸至 2 + 20 = 22px)
+
+    // --- 1. 底层环境遮蔽微阴影 (Soft Ambient Occlusion Drop Shadow) ---
+    ctx.save();
+    ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+    ctx.beginPath();
+    ctx.moveTo(-deskHalfW + 2, deskYTop + 3);
+    ctx.lineTo(deskHalfW + 2, deskYTop + 3);
+    ctx.lineTo(deskHalfW + 2, wingYBot + 3);
+    ctx.lineTo(deskHalfW - wingThick + 2, wingYBot + 3);
+    ctx.arc(2, baseYCenter + 3, baseRadius, 0, Math.PI, false);
+    ctx.lineTo(-deskHalfW + 2, wingYBot + 3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // --- 2. 黑色半圆形底座支撑 ("下有黑色半圆形底座支撑") ---
+    // 承托内侧站立平台，与主体及护翼下方自然咬合
+    ctx.save();
+    ctx.beginPath();
+    // 矩形连接部 (深入桌底与护翼底面)
+    ctx.moveTo(-baseRadius, deskYBot - 4);
+    ctx.lineTo(baseRadius, deskYBot - 4);
+    ctx.lineTo(baseRadius, baseYCenter);
+    // 南向突出的标准半圆弧 (从 0 到 Math.PI，弧线向下鼓出)
+    ctx.arc(0, baseYCenter, baseRadius, 0, Math.PI, false);
+    ctx.lineTo(-baseRadius, deskYBot - 4);
+    ctx.closePath();
+
+    // 2A. 底座黑色主质感填充 (深邃沉稳哑光黑)
+    const gradBase = ctx.createRadialGradient(0, baseYCenter, 3, 0, baseYCenter, baseRadius);
+    gradBase.addColorStop(0, "#161c1a");
+    gradBase.addColorStop(0.65, "#0a0f0d");
+    gradBase.addColorStop(1, "#030605");
+    ctx.fillStyle = gradBase;
+    ctx.fill();
+
+    // 2B. 底座防滑橡胶纹理与同心踏板导轨
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.16)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius - 4, 0, Math.PI, false);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius - 9, 0, Math.PI, false);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius - 14, 0, Math.PI, false);
+    ctx.stroke();
+
+    // 防滑径向放射微嵌槽
+    for (let deg = 20; deg <= 160; deg += 20) {
+        const rad = deg * Math.PI / 180;
+        const x1 = Math.cos(rad) * (baseRadius - 15);
+        const y1 = baseYCenter + Math.sin(rad) * (baseRadius - 15);
+        const x2 = Math.cos(rad) * (baseRadius - 3);
+        const y2 = baseYCenter + Math.sin(rad) * (baseRadius - 3);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = "rgba(52, 211, 153, 0.12)";
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+    }
+
+    // 2C. 底座边缘重型合金包边与紧固铆钉
+    ctx.strokeStyle = "#042018";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius, 0, Math.PI, false);
+    ctx.stroke();
+
+    // 紧固铆钉 (均匀分布在半圆弧外沿)
+    [25, 55, 90, 125, 155].forEach(deg => {
+        const rad = deg * Math.PI / 180;
+        const rx = Math.cos(rad) * (baseRadius - 2.2);
+        const ry = baseYCenter + Math.sin(rad) * (baseRadius - 2.2);
+        ctx.fillStyle = "#02120e";
+        ctx.beginPath(); ctx.arc(rx, ry, 1.2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#10b981";
+        ctx.beginPath(); ctx.arc(rx, ry, 0.6, 0, Math.PI * 2); ctx.fill();
+    });
+
+    // 2D. 底座半圆外轮廓与 Level 8 外墙相同的蓝绿色线勾勒
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(0, baseYCenter, baseRadius, 0, Math.PI, false);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // --- 3. 讲台主体长方形与后方两侧护翼 ("主体和护翼部分为深色木质质感") ---
+    // 构造一体化封闭 U 型木质台体路径：
+    // 北侧：长方形主体桌面顶沿 (-deskHalfW, deskYTop) -> (deskHalfW, deskYTop)
+    // 东侧：右护翼外沿 (deskHalfW, deskYTop) -> (deskHalfW, wingYBot)
+    // 南侧：右护翼底沿 (deskHalfW, wingYBot) -> (deskHalfW - wingThick, wingYBot)
+    // 内侧：右护翼内沿 (deskHalfW - wingThick, wingYBot) -> (deskHalfW - wingThick, deskYBot)
+    // 内北：桌面后沿 (deskHalfW - wingThick, deskYBot) -> (-deskHalfW + wingThick, deskYBot)
+    // 内侧：左护翼内沿 (-deskHalfW + wingThick, deskYBot) -> (-deskHalfW + wingThick, wingYBot)
+    // 南侧：左护翼底沿 (-deskHalfW + wingThick, wingYBot) -> (-deskHalfW, wingYBot)
+    // 西侧：左护翼外沿 (-deskHalfW, wingYBot) -> (-deskHalfW, deskYTop)
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(-deskHalfW, deskYTop);
+    ctx.lineTo(deskHalfW, deskYTop);
+    ctx.lineTo(deskHalfW, wingYBot);
+    ctx.lineTo(deskHalfW - wingThick, wingYBot);
+    ctx.lineTo(deskHalfW - wingThick, deskYBot);
+    ctx.lineTo(-deskHalfW + wingThick, deskYBot);
+    ctx.lineTo(-deskHalfW + wingThick, wingYBot);
+    ctx.lineTo(-deskHalfW, wingYBot);
+    ctx.closePath();
+
+    // 3A. 深色红木/黑胡桃木底色线性渐变 (Dark Mahogany/Walnut Wood Base Gradient)
+    const woodGrad = ctx.createLinearGradient(0, deskYTop, 0, wingYBot);
+    woodGrad.addColorStop(0, "#481b11");   // 顶面光线受光部（深红胡桃木）
+    woodGrad.addColorStop(0.35, "#32120a"); // 核心木质色
+    woodGrad.addColorStop(0.75, "#200a05"); // 背光暗调
+    woodGrad.addColorStop(1, "#110402");   // 深色阴影收边
+    ctx.fillStyle = woodGrad;
+    ctx.fill();
+
+    // 3B. 限制在木质区域内精细绘制真实木纹 (Procedural Wood Grain Texture)
+    ctx.save();
+    ctx.clip();
+
+    // 1) 桌面横向自然木纹 (Longitudinal Wavy Wood Grain Across Desk)
+    const woodGrainsY = [-21, -17, -13, -9];
+    woodGrainsY.forEach((wy, idx) => {
+        ctx.beginPath();
+        ctx.moveTo(-deskHalfW, wy + (idx % 2 === 0 ? 0.8 : -0.6));
+        ctx.bezierCurveTo(
+            -10, wy + (idx % 2 === 0 ? -1.2 : 1.4),
+            8, wy + (idx % 2 === 0 ? 1.5 : -1.0),
+            deskHalfW, wy + (idx % 2 === 0 ? -0.5 : 0.8)
+        );
+        ctx.strokeStyle = idx % 2 === 0 ? "rgba(92, 34, 18, 0.45)" : "rgba(18, 5, 2, 0.55)";
+        ctx.lineWidth = 1.0;
+        ctx.stroke();
+
+        // 次级细密微纤维木纹
+        ctx.beginPath();
+        ctx.moveTo(-deskHalfW, wy + 1.6);
+        ctx.bezierCurveTo(
+            -8, wy + 0.8,
+            12, wy + 2.2,
+            deskHalfW, wy + 1.2
+        );
+        ctx.strokeStyle = "rgba(124, 45, 22, 0.25)";
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+    });
+
+    // 2) 两侧护翼竖向纵向延伸木纹 (Vertical Wood Grains Along Left and Right Wings)
+    [-25, -23, -21].forEach(wx => {
+        ctx.beginPath();
+        ctx.moveTo(wx, deskYTop);
+        ctx.bezierCurveTo(wx + 0.6, 0, wx - 0.4, 8, wx, wingYBot);
+        ctx.strokeStyle = "rgba(92, 34, 18, 0.4)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+    });
+    [21, 23, 25].forEach(wx => {
+        ctx.beginPath();
+        ctx.moveTo(wx, deskYTop);
+        ctx.bezierCurveTo(wx - 0.6, 0, wx + 0.5, 8, wx, wingYBot);
+        ctx.strokeStyle = "rgba(92, 34, 18, 0.4)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+    });
+
+    // 3) 木质漆面高光斜向反光 (Polished Lacquer Satin Sheen)
+    ctx.fillStyle = "rgba(255, 255, 255, 0.07)";
+    ctx.beginPath();
+    ctx.moveTo(-deskHalfW, deskYTop);
+    ctx.lineTo(-deskHalfW + 24, deskYTop);
+    ctx.lineTo(-deskHalfW + 10, deskYBot);
+    ctx.lineTo(-deskHalfW, deskYBot);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore(); // end clip for wood grain
+
+    // 3C. 桌面内凹式防滑置物沉槽 (Recessed Inner Desktop Slant Trim)
+    ctx.fillStyle = "#1b0804";
+    ctx.fillRect(-deskHalfW + wingThick + 2, deskYTop + 2.5, (deskHalfW - wingThick) * 2 - 4, deskYBot - deskYTop - 5);
+    ctx.strokeStyle = "#38150c";
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(-deskHalfW + wingThick + 2, deskYTop + 2.5, (deskHalfW - wingThick) * 2 - 4, deskYBot - deskYTop - 5);
+
+    // 3D. 护翼内侧包边金属卡件与加固嵌角
+    [[-deskHalfW + wingThick, wingYBot], [deskHalfW - wingThick, wingYBot]].forEach(([cxPos, cyPos], idx) => {
+        ctx.fillStyle = "#064e3b";
+        ctx.fillRect(idx === 0 ? cxPos - 6 : cxPos, cyPos - 4, 6, 4);
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(idx === 0 ? cxPos - 6 : cxPos, cyPos - 4, 6, 4);
+    });
+
+    // --- 4. 讲台整体轮廓与 Level 8 外墙相同的蓝绿色线勾勒 ("有和level 8外墙相同的蓝绿色线勾勒") ---
+    // 外轮廓主线 (与 Level 8 外墙 #10b981 完全相同，线条宽度 1.8)
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    // 内沿翡翠科技发光副线 (与 Level 8 外墙 rgba(52, 211, 153, 0.35) 完美契合)
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.4)";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    ctx.restore();
+
+    // --- 5. 朝后的麦克风 ("摆放有朝后的麦克风") ---
+    // 位于长方形桌面左侧，固定底座紧贴桌面，悬臂弯曲伸向后方站立者
+    ctx.save();
+    const micBaseX = -13;
+    const micBaseY = -16;
+    const micTipX = -9;
+    const micTipY = -4; // 向后（南向）伸向讲台站位中心
+
+    // 5A. 麦克风重型金属减震底座 (Circular Shockmount Flange)
+    ctx.fillStyle = "#0c151e";
+    ctx.beginPath();
+    ctx.arc(micBaseX, micBaseY, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#64748b";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+    // 钛合金紧固螺丝
+    ctx.fillStyle = "#cbd5e1";
+    ctx.beginPath(); ctx.arc(micBaseX, micBaseY, 0.8, 0, Math.PI * 2); ctx.fill();
+    // 麦克风底座绿色通电指示微灯
+    ctx.fillStyle = "#10b981";
+    ctx.beginPath(); ctx.arc(micBaseX + 1.8, micBaseY - 1.2, 0.6, 0, Math.PI * 2); ctx.fill();
+
+    // 5B. 朝后的金属鹅颈弯管 (Corrugated Flexible Gooseneck Stalk bending backward)
+    ctx.strokeStyle = "#334155";
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.moveTo(micBaseX, micBaseY);
+    ctx.bezierCurveTo(micBaseX + 0.5, micBaseY + 6, micTipX - 1.5, micTipY - 5, micTipX, micTipY);
+    ctx.stroke();
+
+    // 弯管金属高光与分段螺纹
+    ctx.strokeStyle = "#94a3b8";
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(micBaseX, micBaseY);
+    ctx.bezierCurveTo(micBaseX + 0.5, micBaseY + 6, micTipX - 1.5, micTipY - 5, micTipX, micTipY);
+    ctx.stroke();
+
+    // 5C. 麦克风拾音咪头与防风防喷罩 (Microphone Capsule & Cardioid Windscreen)
+    // 咪头本体 (黑色防喷海绵罩，朝后正对发言者)
+    ctx.fillStyle = "#0f172a";
+    ctx.beginPath();
+    ctx.arc(micTipX, micTipY, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#475569";
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+
+    // 金属防风滤网中环
+    ctx.strokeStyle = "#cbd5e1";
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.arc(micTipX, micTipY, 1.8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 拾音就绪状态光环 (Pulsing Emerald Green/Cyan Glow)
+    const micGlowA = 0.6 + Math.sin(time * 4) * 0.35;
+    ctx.strokeStyle = `rgba(52, 211, 153, ${micGlowA})`;
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.arc(micTipX, micTipY, 2.8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // --- 6. 平板电脑 / 终端 ("一平板电脑（终端）... 电脑屏幕则为蓝色（参考level7其他蓝色屏幕的颜色）") ---
+    // 位于长方形桌面右侧，屏幕面向后方站立者，采用 Level 7 战术蓝色屏幕调色板
+    ctx.save();
+    const tabW = 16;
+    const tabH = 12;
+    const tabX = 3;
+    const tabY = -21;
+
+    // 6A. 平板电脑人体工学倾角金属支架 (Ergonomic Stand Bracket)
+    ctx.fillStyle = "#061019";
+    ctx.fillRect(tabX - 1, tabY - 1, tabW + 2, tabH + 2);
+    ctx.strokeStyle = "#0c4a6e";
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(tabX - 1, tabY - 1, tabW + 2, tabH + 2);
+
+    // 6B. 平板电脑屏幕本体 (Active Phosphor Blue Glass Display)
+    // 参考 Level 7 战术屏幕蓝颜色配置：#061c3a -> #0b355c，外框 #00CCFF / #00E5FF
+    const gradTabScr = ctx.createLinearGradient(tabX, tabY, tabX + tabW, tabY + tabH);
+    gradTabScr.addColorStop(0, "#061c3a");
+    gradTabScr.addColorStop(0.65, "#0b355c");
+    gradTabScr.addColorStop(1, "#032845");
+    ctx.fillStyle = gradTabScr;
+    ctx.fillRect(tabX, tabY, tabW, tabH);
+
+    // 蓝光边框外发光
+    ctx.strokeStyle = "#00CCFF";
+    ctx.lineWidth = 1.0;
+    ctx.strokeRect(tabX, tabY, tabW, tabH);
+
+    // 6C. 平板屏幕内部高精 UI (Level 7 战术演讲终端)
+    ctx.save();
+    ctx.beginPath();
+    if (ctx.rect) ctx.rect(tabX, tabY, tabW, tabH);
+    else {
+        ctx.moveTo(tabX, tabY);
+        ctx.lineTo(tabX + tabW, tabY);
+        ctx.lineTo(tabX + tabW, tabY + tabH);
+        ctx.lineTo(tabX, tabY + tabH);
+        ctx.closePath();
+    }
+    ctx.clip();
+
+    // 水平微细扫描线
+    ctx.strokeStyle = "rgba(0, 229, 255, 0.18)";
+    ctx.lineWidth = 0.5;
+    for (let sy = tabY + 1.8; sy < tabY + tabH; sy += 1.8) {
+        ctx.beginPath();
+        ctx.moveTo(tabX, sy);
+        ctx.lineTo(tabX + tabW, sy);
+        ctx.stroke();
+    }
+
+    // 顶端微型标题与状态灯
+    ctx.fillStyle = "#00E5FF";
+    ctx.font = "bold 2.4px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("CMD HUD", tabX + 1.2, tabY + 3.0);
+
+    // 绿/蓝电池与信号状态微点
+    ctx.fillStyle = "#00FF66";
+    ctx.beginPath(); ctx.arc(tabX + tabW - 2.0, tabY + 2.2, 0.6, 0, Math.PI * 2); ctx.fill();
+
+    // 中央实时语音示波波形 (Audio Voice Telemetry Waveform)
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    for (let wx = 0; wx <= tabW - 2.5; wx += 1.0) {
+        const wy = tabY + 6.2 + Math.sin(time * 5.5 + wx * 0.8) * 1.5;
+        if (wx === 0) ctx.moveTo(tabX + 1.2 + wx, wy);
+        else ctx.lineTo(tabX + 1.2 + wx, wy);
+    }
+    ctx.stroke();
+
+    // 底部 4 阶梯声级/力场指示条 (Level 7 屏幕样式)
+    const voiceBars = [1, 1, Math.sin(time * 3) > 0 ? 1 : 0, Math.sin(time * 4.5) > 0 ? 1 : 0];
+    const barColors = ["#00E5FF", "#00CCFF", "#38bdf8", "#34d399"];
+    for (let b = 0; b < 4; b++) {
+        ctx.fillStyle = voiceBars[b] ? barColors[b] : "#08243d";
+        ctx.fillRect(tabX + 1.5 + b * 3.2, tabY + tabH - 2.6, 2.4, 1.3);
+    }
+
+    // 屏幕玻璃表面 45° 晶体反光高光 (Curved Glare Sheen)
+    ctx.fillStyle = "rgba(255, 255, 255, 0.20)";
+    ctx.beginPath();
+    ctx.moveTo(tabX + 2, tabY);
+    ctx.lineTo(tabX + 6, tabY);
+    ctx.lineTo(tabX, tabY + 6);
+    ctx.lineTo(tabX, tabY + 2);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore(); // end tablet clip
+    ctx.restore(); // end tablet
+
+    // --- 7. 站立提示地坪光效 (Stand-On Detection Ambient Effect) ---
+    // 讲台内侧净空 (x: -20~20, y: -6~18) 完美容纳角色，站上时呈现战术通联微光
+    ctx.save();
+    ctx.strokeStyle = "rgba(16, 185, 129, 0.35)";
+    ctx.setLineDash([2, 3]);
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.arc(0, 7, 18, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    ctx.restore(); // end drawPodium
+}
+window.drawPodium = drawPodium;
+
+// =========================================================
+// 会议桌系统 (从 Level 8 移植，2026-11-05)
+// =========================================================
+// =========================================================================
+function drawConferenceTableSystem(ctx, cx, cy, radius = 155, freezeTime = 0) {
+    const time = freezeTime ? 0 : Date.now() * 0.001;
+    const numSeats = 12;
+    const seatRadius = 202; // 座位中心距桌心距离
+    const itemRadius = 118; // 桌上物品摆放距桌心距离
+
+    // 辅助圆角矩形绘制函数
+    const drawRoundRect = (x, y, w, h, r) => {
+        if (typeof ctx.roundRect === 'function') {
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, r);
+        } else {
+            const rad = Math.min(Math.abs(w) / 2, Math.abs(h) / 2, r || 0);
+            ctx.beginPath();
+            ctx.moveTo(x + rad, y);
+            ctx.arcTo(x + w, y, x + w, y + h, rad);
+            ctx.arcTo(x + w, y + h, x, y + h, rad);
+            ctx.arcTo(x, y + h, x, y, rad);
+            ctx.arcTo(x, y, x + w, y, rad);
+            ctx.closePath();
+        }
+    };
+
+    // =========================================================================
+    // 1. 环绕大圆会议桌的 12 个高管战术人体工学转椅 (位置与桌上物品一一对应)
+    // 尺寸放大至与其他控制台椅子相当 (宽 24px 坐垫 + 28.8px 扶手间距)，面向会议桌中心
+    // 包含五星脚轮底座、深色皮革加厚软垫与双人体工学扶手靠背
+    // =========================================================================
+    for (let k = 0; k < numSeats; k++) {
+        // 角度偏移 15° (半个席位)，确保正北 (12点) 与正南 (6点) 留出宽达 105px 的主通行干道，角色自由行走畅通无阻
+        const theta = (k + 0.5) * (2 * Math.PI / numSeats) - Math.PI / 2;
+        const sx = cx + Math.cos(theta) * seatRadius;
+        const sy = cy + Math.sin(theta) * seatRadius;
+
+        ctx.save();
+        ctx.translate(sx, sy);
+        // 朝向桌心 (theta + Math.PI/2 使局部 +y 指向桌心，-y 朝向背部)
+        ctx.rotate(theta + Math.PI / 2);
+
+        // 1A. 座椅地坪柔和环境微阴影 (与放大后的座椅尺寸相匹配)
+        ctx.fillStyle = "rgba(0, 0, 0, 0.44)";
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 17, 15, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 1B. 重型五星滚轮合金底座 (Five-Star Heavy Swivel Base，与其它控制台座椅规格统一)
+        const hubY = -1;
+        ctx.fillStyle = "#0c1412";
+        ctx.beginPath();
+        ctx.arc(0, hubY, 3.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#475569";
+        ctx.lineWidth = 1.0;
+        ctx.stroke();
+
+        // 5 个星芒滚轮臂 (臂长 14.5px)
+        for (let a = 0; a < 5; a++) {
+            const spokeAng = a * (2 * Math.PI / 5) - Math.PI / 2;
+            const spkX = Math.cos(spokeAng) * 14.5;
+            const spkY = hubY + Math.sin(spokeAng) * 14.5;
+
+            ctx.strokeStyle = "#1e293b";
+            ctx.lineWidth = 2.6;
+            ctx.beginPath();
+            ctx.moveTo(0, hubY);
+            ctx.lineTo(spkX, spkY);
+            ctx.stroke();
+
+            ctx.strokeStyle = "#64748b";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(0, hubY);
+            ctx.lineTo(spkX, spkY);
+            ctx.stroke();
+
+            // 双轮静音尼龙脚轮
+            ctx.fillStyle = "#090d0c";
+            ctx.fillRect(spkX - 1.5, spkY - 1.5, 3.0, 3.0);
+        }
+
+        // 中心液压升降立柱镀铬顶盖
+        ctx.fillStyle = "#cbd5e1";
+        ctx.beginPath();
+        ctx.arc(0, hubY, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 1C. 高级炭黑真皮加厚座垫 (Executive Leather Seat Cushion)
+        // 尺寸放大到宽 24px, 深 17px (与其他工作台 24-26px 完全一致)
+        const seatGrad = ctx.createLinearGradient(-12, -7.5, 12, 9.5);
+        seatGrad.addColorStop(0, "#1c2421");
+        seatGrad.addColorStop(0.5, "#141b18");
+        seatGrad.addColorStop(1, "#0a0f0d");
+
+        drawRoundRect(-12, -7.5, 24, 17, 4.0);
+        ctx.fillStyle = seatGrad;
+        ctx.fill();
+
+        // 边缘战术翡翠缝线包边 (Piping Seam)
+        ctx.strokeStyle = "rgba(16, 185, 129, 0.45)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+
+        // 内部加厚坐垫与纵向微凹缝线
+        drawRoundRect(-9.5, -5.5, 19, 13, 3.0);
+        ctx.fillStyle = "#161e1b";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(5, 150, 105, 0.28)";
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.45)";
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(0, -5.5);
+        ctx.lineTo(0, 7.5);
+        ctx.stroke();
+
+        // 1D. 左右人体工学宽扶手 (Dual Ergonomic Armrests, 外跨度 28.8px)
+        // 左扶手
+        drawRoundRect(-14.4, -7.5, 2.8, 13, 1.4);
+        ctx.fillStyle = "#1e2926";
+        ctx.fill();
+        ctx.strokeStyle = "#334155";
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+
+        // 右扶手
+        drawRoundRect(11.6, -7.5, 2.8, 13, 1.4);
+        ctx.fillStyle = "#1e2926";
+        ctx.fill();
+        ctx.strokeStyle = "#334155";
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+
+        // 1E. 人体工学加宽靠背与腰托 (Sculpted High-Back Backrest，宽 22px，面向桌心)
+        drawRoundRect(-11, -14.5, 22, 7.0, 3.0);
+        ctx.fillStyle = "#151d1a";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(16, 185, 129, 0.5)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+
+        // 后方金属背部支撑龙骨
+        ctx.fillStyle = "#334155";
+        ctx.fillRect(-2.5, -15.5, 5.0, 3.5);
+
+        // 柔软腰靠枕
+        drawRoundRect(-8, -11.5, 16, 3.0, 1.4);
+        ctx.fillStyle = "#202d28";
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    // =========================================================================
+    // 2. 大圆会议桌本体 (深色木制质感，类似已做好的讲台道具的红木/黑胡桃木纹理)
+    // 保持原本正圆形状 (radius = 155px)
+    // =========================================================================
+    ctx.save();
+
+    // 2A. 会议桌底层大型环境遮蔽阴影
+    ctx.fillStyle = "rgba(0, 0, 0, 0.52)";
+    ctx.beginPath();
+    ctx.arc(cx + 4, cy + 6, radius + 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 2B. 会议桌深色实木外倒角防撞重包边 (Solid Wood Chamfer Rim)
+    ctx.fillStyle = "#120503";
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 外轮廓翡翠装甲装饰环 (与 Level 8 外墙及讲台轮廓 #10b981 统一风格)
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    // 倒角分界暗缝
+    ctx.strokeStyle = "#080201";
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius - 2.5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 2C. 会议桌面主体：奢华深色红木/黑胡桃木底色与天然木纹 (Dark Mahogany / Walnut Grain)
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius - 3.5, 0, Math.PI * 2);
+    ctx.clip(); // 限制木纹在实木桌面范围内
+
+    // 模拟从左上角 45° 投射的全局柔和环境光深邃木质渐变
+    const woodGrad = ctx.createRadialGradient(cx - 45, cy - 45, 15, cx, cy, radius);
+    woodGrad.addColorStop(0, "#4a1c12");   // 受光面：深红胡桃木
+    woodGrad.addColorStop(0.35, "#34130a"); // 核心质感色：奢华黑胡桃木
+    woodGrad.addColorStop(0.70, "#220b06"); // 暗调区：深邃红木暗影
+    woodGrad.addColorStop(1, "#110402");   // 边缘深邃沉稳黑檀收边
+    ctx.fillStyle = woodGrad;
+    ctx.fill();
+
+    // 1) 真实同心微波木材年轮 (Concentric Wavy Tree Rings)
+    const ringRadii = [48, 62, 76, 90, 104, 118, 132, 144];
+    ringRadii.forEach((r, idx) => {
+        ctx.beginPath();
+        for (let a = 0; a <= Math.PI * 2 + 0.1; a += 0.1) {
+            const waveR = r + Math.sin(a * 7) * 1.3 + Math.cos(a * 13) * 0.7;
+            const px = cx + Math.cos(a) * waveR;
+            const py = cy + Math.sin(a) * waveR;
+            if (a === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.strokeStyle = (idx % 2 === 0) ? "rgba(92, 34, 18, 0.42)" : "rgba(18, 5, 2, 0.52)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+    });
+
+    // 2) 放射状木质射线微纹 (Radial Medullary Rays)
+    for (let rDeg = 0; rDeg < 360; rDeg += 15) {
+        const rad = rDeg * Math.PI / 180;
+        const x1 = cx + Math.cos(rad) * 46;
+        const y1 = cy + Math.sin(rad) * 46;
+        const x2 = cx + Math.cos(rad) * (radius - 5);
+        const y2 = cy + Math.sin(rad) * (radius - 5);
+        ctx.strokeStyle = "rgba(92, 34, 18, 0.18)";
+        ctx.lineWidth = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+    }
+
+    // 3) 桌面高光漆面斜向漫反射 (Polished Lacquer Satin Sheen)
+    const sheenGrad = ctx.createLinearGradient(cx - 150, cy - 150, cx + 150, cy + 150);
+    sheenGrad.addColorStop(0, "rgba(255, 255, 255, 0.08)");
+    sheenGrad.addColorStop(0.35, "rgba(255, 255, 255, 0.03)");
+    sheenGrad.addColorStop(0.7, "transparent");
+    sheenGrad.addColorStop(1, "rgba(255, 255, 255, 0.02)");
+    ctx.fillStyle = sheenGrad;
+    ctx.fill();
+
+    // 4) 桌面席位分区同心黄铜/翡翠嵌条 (Inlaid Trim Rings)
+    ctx.strokeStyle = "rgba(16, 185, 129, 0.4)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 92, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(16, 185, 129, 0.3)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 148, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore(); // 结束木纹裁剪
+
+    // =========================================================================
+    // 3. 会议桌中央高科技全向音频与全息战术核心 (Boardroom Central Hub)
+    // =========================================================================
+    const hubGrad = ctx.createRadialGradient(cx, cy, 5, cx, cy, 44);
+    hubGrad.addColorStop(0, "#081410");
+    hubGrad.addColorStop(0.7, "#030a08");
+    hubGrad.addColorStop(1, "#010504");
+    ctx.fillStyle = hubGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 44, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#0d4a3c";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // 环形 360° 全向会议麦克风透声微网格 (Acoustic Mesh Grille)
+    ctx.fillStyle = "#020705";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 38, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.35)";
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 38, 0, Math.PI * 2);
+    ctx.stroke();
+
+    for (let mg = 0; mg < 24; mg++) {
+        const ma = mg * (Math.PI * 2 / 24);
+        const mx = cx + Math.cos(ma) * 33;
+        const my = cy + Math.sin(ma) * 33;
+        ctx.fillStyle = "rgba(16, 185, 129, 0.65)";
+        ctx.beginPath(); ctx.arc(mx, my, 0.7, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // 中央全息投影透镜与微型战术状态光环 (Central Holo Projector Lens)
+    ctx.fillStyle = "#010806";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 18, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 全息十字微准星
+    ctx.strokeStyle = "rgba(0, 229, 255, 0.75)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy); ctx.lineTo(cx + 7, cy);
+    ctx.moveTo(cx, cy - 7); ctx.lineTo(cx, cy + 7);
+    ctx.stroke();
+
+    // 4 枚十字方位微型状态 LED
+    for (let cLed = 0; cLed < 4; cLed++) {
+        const ca = cLed * (Math.PI / 2);
+        const clx = cx + Math.cos(ca) * 23;
+        const cly = cy + Math.sin(ca) * 23;
+        ctx.fillStyle = "#00FF66";
+        ctx.beginPath(); ctx.arc(clx, cly, 0.8, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // =========================================================================
+    // 4. 会议桌上排满一圈的 12 席高精度战术终端、TOP SECRET 机密文件夹与金属签字笔
+    // 与四周 12 个座位一一对应，严密顺应圆桌曲率排列
+    // 关键朝向规范：
+    // - 局部坐标系中，+y 朝向会议桌中心，-y 朝向就坐席位
+    // - 笔：笔帽与笔尖朝向桌子中心 (+y)，笔尾朝向座位 (-y)
+    // - 文件夹：文件顶部/回形针/TOP SECRET 印章朝向桌子中心 (+y)，公文正文向下流向座位 (-y)
+    // - 平板：顶部边框/摄像头/状态栏朝向桌子中心 (+y)，底部触控条朝向座位 (-y)
+    // =========================================================================
+    for (let k = 0; k < numSeats; k++) {
+        const theta = (k + 0.5) * (2 * Math.PI / numSeats) - Math.PI / 2;
+        const wx = cx + Math.cos(theta) * itemRadius;
+        const wy = cy + Math.sin(theta) * itemRadius;
+
+        ctx.save();
+        ctx.translate(wx, wy);
+        // 朝向桌心 (+y 指向会议桌中心，-y 指向就座人员)
+        ctx.rotate(theta + Math.PI / 2);
+
+        // 4A. 绝密文件夹 / 战术简报公文 (位于座位左侧 x: -18.5 到 -4.5)
+        // 规范朝向：文件顶部（回形针、TOP SECRET 戳记）朝向桌心 (+y)，纸张底部朝向座位 (-y)
+        const docX = -18.5;
+        const docY = -7.5;
+        const docW = 14.0;
+        const docH = 15.5;
+
+        // 文件夹底层暗影
+        ctx.fillStyle = "rgba(0, 0, 0, 0.38)";
+        ctx.fillRect(docX + 0.8, docY + 0.8, docW, docH);
+
+        // 文件夹真皮封套 (深蓝黑 #0c131d 搭配金色护角)
+        ctx.fillStyle = "#0c131d";
+        ctx.fillRect(docX, docY, docW, docH);
+        ctx.strokeStyle = "#1e293b";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(docX, docY, docW, docH);
+
+        // 4 角黄铜/金属防磨包角
+        ctx.fillStyle = "#d97706";
+        ctx.fillRect(docX, docY, 1.4, 1.4);
+        ctx.fillRect(docX + docW - 1.4, docY, 1.4, 1.4);
+        ctx.fillRect(docX, docY + docH - 1.4, 1.4, 1.4);
+        ctx.fillRect(docX + docW - 1.4, docY + docH - 1.4, 1.4, 1.4);
+
+        // 左侧皮革书脊压痕线
+        ctx.strokeStyle = "#05090f";
+        ctx.lineWidth = 1.0;
+        ctx.beginPath();
+        ctx.moveTo(docX + 1.8, docY);
+        ctx.lineTo(docX + 1.8, docY + docH);
+        ctx.stroke();
+
+        // 内部雪白机密公文纸张 (内页摊开效果)
+        const pX = docX + 2.5;
+        const pY = docY + 1.2;
+        const pW = docW - 3.5;
+        const pH = docH - 2.4;
+        ctx.fillStyle = "#f1f5f9";
+        ctx.fillRect(pX, pY, pW, pH);
+
+        // 顶部金属票夹 / 镀金回形针 (朝向桌心 +y，即 pY + pH 顶部)
+        ctx.fillStyle = "#f59e0b";
+        ctx.fillRect(pX + 1.2, pY + pH - 1.6, 2.2, 1.8);
+        ctx.strokeStyle = "#b45309";
+        ctx.lineWidth = 0.4;
+        ctx.strokeRect(pX + 1.2, pY + pH - 1.6, 2.2, 1.8);
+
+        // 绝密公文右上角红色 TOP SECRET 戳记 (朝向桌心 +y，右上角)
+        ctx.fillStyle = "rgba(239, 68, 68, 0.25)";
+        ctx.fillRect(pX + pW - 4.4, pY + pH - 3.2, 3.6, 2.0);
+        ctx.strokeStyle = "#ef4444";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(pX + pW - 4.4, pY + pH - 3.2, 3.6, 2.0);
+
+        // 纸张上 4 排深灰微型横向打印正文线条 (从 +y 朝向 -y 排列)
+        ctx.strokeStyle = "#94a3b8";
+        ctx.lineWidth = 0.5;
+        for (let rw = 0; rw < 4; rw++) {
+            const ry = pY + pH - 4.8 - rw * 1.8;
+            ctx.beginPath();
+            ctx.moveTo(pX + 1.2, ry);
+            ctx.lineTo(pX + pW - 1.2, ry);
+            ctx.stroke();
+        }
+
+        // 4B. 金属行政签字笔 / 战术手写笔 (摆放在文件夹与平板电脑之间)
+        // 关键规范：笔帽与笔尖朝向桌子中心 (+y)，笔尾朝向座位 (-y)
+        const penX = -2.8;
+        const penW = 1.8;
+        const penTailY = -5.8;  // 笔尾朝向座位 (-y)
+        const penNibY = 6.2;    // 笔尖朝向桌心 (+y)
+        const penBodyH = 12.0;
+
+        // 笔下细微投影
+        ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+        ctx.fillRect(penX + 0.6, penTailY + 0.6, penW, penBodyH);
+
+        // 1) 笔尾 (Pen End Cap / Tail，朝向座位 -y)
+        ctx.fillStyle = "#475569";
+        drawRoundRect(penX - 0.1, penTailY, penW + 0.2, 1.6, 0.7);
+        ctx.fill();
+
+        // 2) 钛黑金属笔杆主体 (Pen Barrel)
+        const penGrad = ctx.createLinearGradient(penX, 0, penX + penW, 0);
+        penGrad.addColorStop(0, "#0f172a");
+        penGrad.addColorStop(0.5, "#334155");
+        penGrad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = penGrad;
+        ctx.fillRect(penX, penTailY + 1.6, penW, 6.5);
+
+        // 3) 中段高亮镀铬饰环 (Chrome Accent Ring)
+        ctx.fillStyle = "#cbd5e1";
+        ctx.fillRect(penX - 0.15, penTailY + 8.1, penW + 0.3, 0.9);
+
+        // 4) 笔帽 (Pen Cap，朝向桌心 +y)
+        ctx.fillStyle = "#090d16";
+        ctx.fillRect(penX - 0.1, penTailY + 9.0, penW + 0.2, 2.5);
+
+        // 笔夹 (Pocket Clip，附着在笔帽上，朝向右侧)
+        ctx.strokeStyle = "#cbd5e1";
+        ctx.lineWidth = 0.55;
+        ctx.beginPath();
+        ctx.moveTo(penX + penW + 0.2, penTailY + 8.5);
+        ctx.lineTo(penX + penW + 0.2, penTailY + 11.2);
+        ctx.stroke();
+
+        // 5) 黄金色锥形笔尖 (Golden Nib，精准朝向桌心 +y 尖锐聚拢)
+        ctx.fillStyle = "#fbbf24";
+        ctx.beginPath();
+        ctx.moveTo(penX, penTailY + 11.5);
+        ctx.lineTo(penX + penW, penTailY + 11.5);
+        ctx.lineTo(penX + penW / 2, penNibY);
+        ctx.closePath();
+        ctx.fill();
+
+        // 铱金笔尖微亮点
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(penX + penW / 2, penNibY - 0.2, 0.3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 4C. 平板电脑 / 战术终端 (位于座位右侧 x: 1.5 到 18.0)
+        // 规范朝向：顶部边框与状态栏朝向桌心 (+y)，底部触控条朝向座位 (-y)
+        const tabX = 1.5;
+        const tabY = -6.0;
+        const tabW = 16.5;
+        const tabH = 12.5;
+
+        // 终端微阴影
+        ctx.fillStyle = "rgba(0, 0, 0, 0.38)";
+        ctx.fillRect(tabX + 0.8, tabY + 0.8, tabW, tabH);
+
+        // 钛灰哑光外壳
+        drawRoundRect(tabX, tabY, tabW, tabH, 1.6);
+        ctx.fillStyle = "#0b131c";
+        ctx.fill();
+        ctx.strokeStyle = "#1e293b";
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+
+        // 顶部边框微型前置摄像头与光线传感器 (朝向桌心 +y 边缘)
+        ctx.fillStyle = "#04080c";
+        ctx.beginPath();
+        ctx.arc(tabX + tabW / 2, tabY + tabH - 0.7, 0.55, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 战术蓝光液晶显示屏
+        const scrX = tabX + 1.2;
+        const scrY = tabY + 1.2;
+        const scrW = tabW - 2.4;
+        const scrH = tabH - 2.4;
+
+        const scrGrad = ctx.createLinearGradient(scrX, scrY + scrH, scrX + scrW, scrY);
+        scrGrad.addColorStop(0, "#032845");
+        scrGrad.addColorStop(0.5, "#0b355c");
+        scrGrad.addColorStop(1, "#061c3a");
+        ctx.fillStyle = scrGrad;
+        ctx.fillRect(scrX, scrY, scrW, scrH);
+
+        ctx.strokeStyle = "#00CCFF";
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(scrX, scrY, scrW, scrH);
+
+        // 屏幕高精 UI 与动态频谱波形
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(scrX, scrY, scrW, scrH);
+        ctx.clip();
+
+        // 水平细微扫描线
+        ctx.strokeStyle = "rgba(0, 229, 255, 0.18)";
+        ctx.lineWidth = 0.4;
+        for (let l = scrY + 1.2; l < scrY + scrH; l += 1.6) {
+            ctx.beginPath();
+            ctx.moveTo(scrX, l);
+            ctx.lineTo(scrX + scrW, l);
+            ctx.stroke();
+        }
+
+
+        // 顶部微型战术状态文字条 (朝向桌心 +y)
+        ctx.fillStyle = "rgba(0, 229, 255, 0.75)";
+        ctx.fillRect(scrX + 1.0, scrY + scrH - 1.4, 4.0, 0.6);
+
+        // 底部触控指示条 (朝向座位 -y)
+        ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+        ctx.fillRect(scrX + scrW / 2 - 2.0, scrY + 0.6, 4.0, 0.5);
+
+        // 45° 玻璃反光
+        ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+        ctx.beginPath();
+        ctx.moveTo(scrX, scrY);
+        ctx.lineTo(scrX + 4.5, scrY);
+        ctx.lineTo(scrX + 1.5, scrY + scrH);
+        ctx.lineTo(scrX, scrY + scrH);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore();
+
+        // 平板右上角绿/蓝微型指示灯点 (朝向桌心 +y 侧)
+        ctx.fillStyle = (k % 3 === 0) ? "#00FF66" : "#00E5FF";
+        ctx.beginPath();
+        ctx.arc(scrX + scrW - 1.2, scrY + scrH - 1.2, 0.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    // =========================================================================
+    // 5. 大圆会议桌悬挂发光灯环 (圆环形灯环保持原本形状与颜色，做出一颗一颗微型灯珠和发光点亮效果)
+    // 半径严格保持原本 143px，配色保持天空蓝/极光青蓝 (rgba(56, 189, 248, 0.95) 与 #00E5FF)
+    // =========================================================================
+    const ringRadius = 143;
+    const numBeads = 64; // 64 颗高精度独立 LED 灯珠
+
+    // 5A. 灯环在木质桌面上的宏大发光光晕与泛光投影
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.24)";
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 5B. 原原本本的圆环灯槽基座导轨 (宽 8px 的金属灯环凹槽)
+    ctx.strokeStyle = "#041620";
+    ctx.lineWidth = 7.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 双侧导轨金属边缘线
+    ctx.strokeStyle = "#0284c7";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius - 3.8, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius + 3.8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 导轨中央高亮青蓝光纤发光管
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.65)";
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 5C. 一颗一颗清晰可辨的 LED 灯珠与点亮效果 ("做出一颗一颗灯珠和点亮的效果")
+    for (let b = 0; b < numBeads; b++) {
+        const bAngle = b * (Math.PI * 2 / numBeads);
+        const bx = cx + Math.cos(bAngle) * ringRadius;
+        const by = cy + Math.sin(bAngle) * ringRadius;
+
+
+        // 1) 微型灯珠固定金属底座
+        ctx.fillStyle = "#010e17";
+        ctx.beginPath();
+        ctx.arc(bx, by, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#0369a1";
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+
+
+        // 3) 原版经典青蓝发光灯体核心 (Electric Cyan Phosphor Lens)
+        ctx.fillStyle = "#00E5FF";
+        ctx.beginPath();
+        ctx.arc(bx, by, 1.35, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 4) 极其明亮的一颗颗点亮发光极小亮点 (Specular Lit Phosphor Core)
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(bx, by, 0.65, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.restore();
+}
+window.drawConferenceTableSystem = drawConferenceTableSystem;
+// =========================================================
+// 会议桌动态层 (动静分离，2026-11-05)：全息光环呼吸 + 平板波形 + 灯珠光晕
+// 只画随时间变化的元素；静态部分已预渲染进缓存
+// =========================================================
+function drawConferenceTableSystemDynamic(ctx, cx, cy, radius = 155) {
+    const time = Date.now() * 0.001;
+    const numSeats = 12;
+    const itemRadius = 118;
+
+    // 动态1：中央全息透镜光环呼吸 + 内圈辉光
+    const holoPulse = Math.sin(time * 3.0) * 0.2 + 0.8;
+    ctx.strokeStyle = `rgba(0, 229, 255, ${0.75 * holoPulse})`;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 18, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = `rgba(0, 229, 255, ${0.15 * holoPulse})`;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 动态2：12 块平板的实时波形曲线
+    for (let k = 0; k < numSeats; k++) {
+        const theta = (k + 0.5) * (2 * Math.PI / numSeats) - Math.PI / 2;
+        const wx = cx + Math.cos(theta) * itemRadius;
+        const wy = cy + Math.sin(theta) * itemRadius;
+
+        ctx.save();
+        ctx.translate(wx, wy);
+        ctx.rotate(theta + Math.PI / 2);
+
+        const tabX = 1.5;
+        const tabY = -6.0;
+        const tabW = 16.5;
+        const tabH = 12.5;
+        const scrX = tabX + 1.2;
+        const scrY = tabY + 1.2;
+        const scrW = tabW - 2.4;
+        const scrH = tabH - 2.4;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(scrX, scrY, scrW, scrH);
+        ctx.clip();
+
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 0.65;
+        ctx.beginPath();
+        for (let bx = 0; bx < scrW - 1; bx += 1.2) {
+            const by = scrY + scrH / 2 + Math.sin(time * 5.0 + bx * 0.9 + k * 1.5) * 1.4;
+            if (bx === 0) ctx.moveTo(scrX + 0.5 + bx, by);
+            else ctx.lineTo(scrX + 0.5 + bx, by);
+        }
+        ctx.stroke();
+
+        ctx.restore();
+        ctx.restore();
+    }
+
+    // 动态3：64 颗 LED 灯珠发光光晕（顺时针巡回微波动效）
+    const ringRadius = 143;
+    const numBeads = 64;
+    for (let b = 0; b < numBeads; b++) {
+        const bAngle = b * (Math.PI * 2 / numBeads);
+        const bx = cx + Math.cos(bAngle) * ringRadius;
+        const by = cy + Math.sin(bAngle) * ringRadius;
+        const beadPulse = Math.sin(time * 3.2 + b * 0.35) * 0.18 + 0.82;
+
+        ctx.fillStyle = `rgba(56, 189, 248, ${0.48 * beadPulse})`;
+        ctx.beginPath();
+        ctx.arc(bx, by, 3.8, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+window.drawConferenceTableSystemDynamic = drawConferenceTableSystemDynamic;
+
+// =========================================================
+// 服务器集群 (从 Level 7/8 移植并动静分离，2026-11-05)
+// =========================================================
+function drawServerCluster(ctx, cx, cy, angle = 0, scale = 1.0, freezeTime = 0) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    if (angle !== 0) ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const time = freezeTime ? 0 : Date.now() * 0.001;
+    const numCabinets = 5;
+    const cabW = 66; // 单机柜宽 66px (约为角色模型 26px 的 2.54 倍，显著宽厚)
+    const cabH = 96; // 单机柜深 96px
+    const totalW = numCabinets * cabW; // 330px 总宽 (放大 2.36 倍)
+    const halfW = totalW / 2;
+    const halfH = cabH / 2;
+
+    // --- 0. 地坪散热与重型机房减震基座 (Floor Heavy Vibration-Damping Base) ---
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillRect(-halfW - 4, -halfH + 4, totalW + 8, cabH + 4);
+
+    // 强化机房钢质底座槽钢 (Heavy Steel Base Frame)
+    ctx.fillStyle = "#010e0b";
+    ctx.fillRect(-halfW - 2, -halfH, totalW + 4, cabH);
+    ctx.strokeStyle = "#043327";
+    ctx.lineWidth = 1.8;
+    ctx.strokeRect(-halfW - 2, -halfH, totalW + 4, cabH);
+
+    // 底部机柜固定膨胀地脚螺栓
+    for (let c = 0; c < numCabinets; c++) {
+        const bx = -halfW + c * cabW;
+        ctx.fillStyle = "#021a14";
+        ctx.fillRect(bx + 4, halfH - 3, 6, 2.5);
+        ctx.fillRect(bx + cabW - 10, halfH - 3, 6, 2.5);
+        ctx.fillStyle = "#10b981";
+        ctx.beginPath(); ctx.arc(bx + 7, halfH - 1.8, 0.9, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(bx + cabW - 7, halfH - 1.8, 0.9, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // 机柜专业职能分类定义与多彩主题配置
+    const cabinetConfigs = [
+        { id: "SRV-01", name: "CRYPTO", primaryColor: "#c084fc", accentColor: "#00E5FF", beacon: "#d946ef" },
+        { id: "SRV-02", name: "NEURAL", primaryColor: "#00FF66", accentColor: "#a3e635", beacon: "#10b981" },
+        { id: "SRV-03", name: "MAINFRAME", primaryColor: "#fbbf24", accentColor: "#ef4444", beacon: "#f59e0b" },
+        { id: "SRV-04", name: "RADAR-FX", primaryColor: "#00E5FF", accentColor: "#3b82f6", beacon: "#38bdf8" },
+        { id: "SRV-05", name: "SIM-CORE", primaryColor: "#f43f5e", accentColor: "#fb923c", beacon: "#ef4444" }
+    ];
+
+    // --- 1. 逐个绘制 5 个大型独立机柜 ---
+    for (let c = 0; c < numCabinets; c++) {
+        const cabX = -halfW + c * cabW;
+        const cfg = cabinetConfigs[c];
+
+        // 1A. 单机柜外壳装甲框 (Heavy Armored Exterior Frame with Chamfers)
+        const gradCasing = ctx.createLinearGradient(cabX, -halfH, cabX + cabW, -halfH + cabH);
+        gradCasing.addColorStop(0, "#06241d");
+        gradCasing.addColorStop(0.35, "#093328");
+        gradCasing.addColorStop(0.7, "#041b16");
+        gradCasing.addColorStop(1, "#02120e");
+        ctx.fillStyle = gradCasing;
+        ctx.fillRect(cabX, -halfH, cabW, cabH);
+
+        // 外框装甲精细倒角描边
+        ctx.strokeStyle = "#0d4a3c";
+        ctx.lineWidth = 1.4;
+        ctx.strokeRect(cabX + 0.7, -halfH + 0.7, cabW - 1.4, cabH - 1.4);
+
+        // 顶部门楣金属横梁与机柜专业铭牌 (Header Nameplate)
+        ctx.fillStyle = "#031712";
+        ctx.fillRect(cabX + 2, -halfH + 2, cabW - 4, 11);
+        ctx.strokeStyle = "#064e3b";
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(cabX + 2, -halfH + 2, cabW - 4, 11);
+
+        // 顶棚激光蚀刻机柜编号与职能
+        ctx.font = "bold 5.2px monospace";
+        ctx.fillStyle = cfg.primaryColor;
+        ctx.textAlign = "center";
+        ctx.fillText(cfg.id, cabX + cabW / 2 - 10, -halfH + 9.5);
+
+        ctx.font = "bold 4.4px monospace";
+        ctx.fillStyle = "#a7f3d0";
+        ctx.textAlign = "left";
+        ctx.fillText(cfg.name, cabX + cabW / 2 + 1, -halfH + 9.5);
+
+
+        // 1B. 内部深暗机架舱室 (Dark Recessed Equipment Bay)
+        const bayX = cabX + 5.0;
+        const bayY = -halfH + 15.0;
+        const bayW = cabW - 10.0; // 56px
+        const bayH = cabH - 22.0; // 74px
+
+        ctx.fillStyle = "#010a08";
+        ctx.fillRect(bayX, bayY, bayW, bayH);
+        ctx.strokeStyle = "#053d30";
+        ctx.lineWidth = 1.0;
+        ctx.strokeRect(bayX, bayY, bayW, bayH);
+
+        // 左右 19 英寸机架立柱与 EIA 方孔导轨 (Vertical EIA-310 Heavy Mounting Rails)
+        ctx.fillStyle = "#04241c";
+        ctx.fillRect(bayX, bayY, 3.2, bayH);
+        ctx.fillRect(bayX + bayW - 3.2, bayY, 3.2, bayH);
+
+        ctx.fillStyle = "#010806";
+        for (let ry = bayY + 2.5; ry < bayY + bayH - 2; ry += 3.8) {
+            ctx.fillRect(bayX + 0.8, ry, 1.6, 1.6);
+            ctx.fillRect(bayX + bayW - 2.4, ry, 1.6, 1.6);
+        }
+
+        // 1C. 纵向排列的多层服务器抽屉 (7 层 1U/2U 刀片服务器机箱)
+        const numServers = 7;
+        const srvH = 8.6;
+        const srvGap = 1.6;
+        const startSrvY = bayY + 1.6;
+
+        for (let s = 0; s < numServers; s++) {
+            const sy = startSrvY + s * (srvH + srvGap);
+            const sx = bayX + 3.8;
+            const sw = bayW - 7.6; // ~48.4px
+
+            // 服务器外壳金属底板渐变
+            const srvGrad = ctx.createLinearGradient(sx, sy, sx + sw, sy + srvH);
+            srvGrad.addColorStop(0, "#0a261f");
+            srvGrad.addColorStop(0.35, "#103a30");
+            srvGrad.addColorStop(0.7, "#0d2e26");
+            srvGrad.addColorStop(1, "#071c17");
+            ctx.fillStyle = srvGrad;
+            ctx.fillRect(sx, sy, sw, srvH);
+
+            // 服务器上下边缘微细装甲倒角线条
+            ctx.strokeStyle = "rgba(52, 211, 153, 0.4)";
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(sx, sy, sw, srvH);
+
+            // 左右双侧机架抽拉拉手 (Rack Handles)
+            ctx.fillStyle = "#031712";
+            ctx.fillRect(sx + 0.4, sy + 1.2, 1.4, srvH - 2.4);
+            ctx.fillRect(sx + sw - 1.8, sy + 1.2, 1.4, srvH - 2.4);
+            ctx.fillStyle = "#059669";
+            ctx.fillRect(sx + 0.6, sy + 2.0, 0.8, srvH - 4.0);
+            ctx.fillRect(sx + sw - 1.4, sy + 2.0, 0.8, srvH - 4.0);
+
+            // --- 左侧：热插拔 NVMe/SSD 硬盘仓 (Hot-Swap Drive Caddies with Status LEDs) ---
+            const driveW = 3.6;
+            const driveGap = 1.0;
+            const numDrives = 3;
+            const driveStartX = sx + 2.6;
+
+            for (let d = 0; d < numDrives; d++) {
+                const dx = driveStartX + d * (driveW + driveGap);
+                ctx.fillStyle = "#02120e";
+                ctx.fillRect(dx, sy + 1.2, driveW, srvH - 2.4);
+                ctx.strokeStyle = "#064e3b";
+                ctx.lineWidth = 0.4;
+                ctx.strokeRect(dx, sy + 1.2, driveW, srvH - 2.4);
+
+                // 硬盘插拔手柄扣
+                ctx.fillStyle = "#06382b";
+                ctx.fillRect(dx + 0.6, sy + srvH - 3.2, driveW - 1.2, 1.4);
+
+            }
+
+            // --- 中间：高精度六角形蜂窝状散热网格 (Honeycomb Cooling Mesh) ---
+            const meshX = driveStartX + numDrives * (driveW + driveGap) + 1.4;
+            const meshW = 16.5; // 16.5px 宽进风网格
+            const meshY = sy + 1.0;
+            const meshH = srvH - 2.0;
+
+            // 风道暗部与微弱科技气流内光
+            ctx.fillStyle = "rgba(4, 38, 29, 0.85)";
+            ctx.fillRect(meshX, meshY, meshW, meshH);
+
+            // 雕刻正六边形蜂窝微阵列 (True Hexagonal Lattice)
+            ctx.strokeStyle = "rgba(52, 211, 153, 0.65)";
+            ctx.lineWidth = 0.4;
+            for (let hx = meshX + 1.1; hx < meshX + meshW - 0.6; hx += 2.2) {
+                for (let hy = meshY + 1.0; hy < meshY + meshH - 0.4; hy += 1.8) {
+                    const stagger = (Math.round((hx - meshX) / 2.2) % 2 === 1) ? 0.9 : 0;
+                    const chy = hy + stagger;
+                    if (chy >= meshY + meshH - 0.3) continue;
+
+                    ctx.beginPath();
+                    for (let a = 0; a < 6; a++) {
+                        const ang = (Math.PI / 3) * a;
+                        const px = hx + 0.85 * Math.cos(ang);
+                        const py = chy + 0.85 * Math.sin(ang);
+                        if (a === 0) ctx.moveTo(px, py);
+                        else ctx.lineTo(px, py);
+                    }
+                    ctx.closePath();
+                    ctx.stroke();
+                }
+            }
+
+            // --- 右侧：多彩丰富绚丽的 LED 指示灯矩阵与微型 LCD 仪表窗 ---
+            const rightAreaX = meshX + meshW + 1.6;
+            const rightAreaW = (sx + sw - 2.4) - rightAreaX;
+
+            // 特殊 Master 节点绘制微型高科技 LCD 状态视窗 (Mini Telemetry LCD)
+            const hasLcd = (s === 1 && (c === 1 || c === 2 || c === 3));
+            if (hasLcd) {
+                ctx.fillStyle = "#02120e";
+                ctx.fillRect(rightAreaX, sy + 1.2, rightAreaW - 0.6, srvH - 2.4);
+                ctx.strokeStyle = cfg.primaryColor;
+                ctx.lineWidth = 0.5;
+                ctx.strokeRect(rightAreaX, sy + 1.2, rightAreaW - 0.6, srvH - 2.4);
+            }
+        }
+
+        // 1D. 四角重型钛合金装甲加固角铁与六角沉头螺栓 (Heavy Corner Brackets & Hex Bolts)
+        const cornerSize = 4.2;
+        const cornerOffsets = [
+            [cabX + 2, -halfH + 2],
+            [cabX + cabW - 2 - cornerSize, -halfH + 2],
+            [cabX + 2, halfH - 2 - cornerSize],
+            [cabX + cabW - 2 - cornerSize, halfH - 2 - cornerSize]
+        ];
+        cornerOffsets.forEach(([bx, by]) => {
+            ctx.fillStyle = "#010e0b";
+            ctx.fillRect(bx, by, cornerSize, cornerSize);
+            ctx.strokeStyle = "#0d4a3c";
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(bx, by, cornerSize, cornerSize);
+
+            // 六角螺栓
+            ctx.fillStyle = "#10b981";
+            ctx.beginPath(); ctx.arc(bx + cornerSize / 2, by + cornerSize / 2, 0.9, 0, Math.PI * 2); ctx.fill();
+        });
+
+        // 机柜正面防静电钢化玻璃/金属孔网门边框锁扣与拉手 (Door Frame & Heavy Lock Handle)
+        ctx.fillStyle = "#04382c";
+        ctx.fillRect(cabX + cabW - 3.2, -halfH + 32, 2.0, 24);
+        ctx.fillStyle = "#a7f3d0";
+        ctx.fillRect(cabX + cabW - 2.6, -halfH + 38, 1.2, 10);
+
+        // 机柜之间模块化防爆重缝拼装线 (Inter-cabinet Heavy Seams)
+        if (c < numCabinets - 1) {
+            ctx.strokeStyle = "#010a08";
+            ctx.lineWidth = 2.0;
+            ctx.beginPath();
+            ctx.moveTo(cabX + cabW, -halfH);
+            ctx.lineTo(cabX + cabW, halfH);
+            ctx.stroke();
+
+            ctx.strokeStyle = "#064e3b";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(cabX + cabW, -halfH + 2);
+            ctx.lineTo(cabX + cabW, halfH - 2);
+            ctx.stroke();
+        }
+    }
+
+    // --- 2. 横贯 5 机柜后部的重型发光光纤主干桥架 (Top Multi-Color Optical Trunk Duct) ---
+    const racewayH = 5.0;
+    ctx.fillStyle = "#010b09";
+    ctx.fillRect(-halfW, -halfH - racewayH, totalW, racewayH);
+    ctx.strokeStyle = "#064e3b";
+    ctx.lineWidth = 1.0;
+    ctx.strokeRect(-halfW, -halfH - racewayH, totalW, racewayH);
+
+    // 内部四路多彩发光光纤光缆 (Emerald Green, Electric Cyan, Neon Purple, Safety Amber)
+    const fibers = [
+        { color: "#00FF66", yPct: 0.2 },
+        { color: "#00E5FF", yPct: 0.45 },
+        { color: "#c084fc", yPct: 0.7 },
+        { color: "#fbbf24", yPct: 0.9 }
+    ];
+    fibers.forEach(fib => {
+        ctx.strokeStyle = fib.color;
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(-halfW + 4, -halfH - racewayH * fib.yPct);
+        ctx.lineTo(halfW - 4, -halfH - racewayH * fib.yPct);
+        ctx.stroke();
+    });
+
+    // 桥架外壳高光金属倒角反射线
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.45)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(-halfW, -halfH);
+    ctx.lineTo(halfW, -halfH);
+    ctx.stroke();
+
+    ctx.restore();
+}
+window.drawServerCluster = drawServerCluster;
+
+// =========================================================
+// 服务器集群动态层 (动静分离，2026-11-05)：信标灯 + 硬盘 LED + LCD 波形 + VU 柱 + LED 阵列
+// 只画随时间变化的元素；静态部分已预渲染进缓存
+// =========================================================
+function drawServerClusterDynamic(ctx, cx, cy, angle = 0, scale = 1.0) {
+    const time = Date.now() * 0.001;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    if (angle !== 0) ctx.rotate(angle);
+    if (scale !== 1.0) ctx.scale(scale, scale);
+
+    const numCabinets = 5;
+    const cabW = 66;
+    const cabH = 96;
+    const halfW = numCabinets * cabW / 2;
+    const halfH = cabH / 2;
+
+    // 机柜专业职能分类定义与多彩主题配置（与静态函数一致）
+    const cabinetConfigs = [
+        { id: "SRV-01", name: "CRYPTO", primaryColor: "#c084fc", accentColor: "#00E5FF", beacon: "#d946ef" },
+        { id: "SRV-02", name: "NEURAL", primaryColor: "#00FF66", accentColor: "#a3e635", beacon: "#10b981" },
+        { id: "SRV-03", name: "MAINFRAME", primaryColor: "#fbbf24", accentColor: "#ef4444", beacon: "#f59e0b" },
+        { id: "SRV-04", name: "RADAR-FX", primaryColor: "#00E5FF", accentColor: "#3b82f6", beacon: "#38bdf8" },
+        { id: "SRV-05", name: "SIM-CORE", primaryColor: "#f43f5e", accentColor: "#fb923c", beacon: "#ef4444" }
+    ];
+
+    for (let c = 0; c < numCabinets; c++) {
+        const cabX = -halfW + c * cabW;
+        const cfg = cabinetConfigs[c];
+
+        // 动态1：机柜门楣顶部双色状态信标灯塔
+        const bPulse = Math.sin(time * 3.5 + c * 1.6) > -0.1;
+        ctx.fillStyle = bPulse ? cfg.beacon : "#042018";
+        ctx.beginPath(); ctx.arc(cabX + 6.5, -halfH + 7.5, 1.4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = (bPulse ? "#ffffff" : "#02120e");
+        ctx.beginPath(); ctx.arc(cabX + 6.5, -halfH + 7.5, 0.7, 0, Math.PI * 2); ctx.fill();
+
+        ctx.fillStyle = (Math.sin(time * 5.2 + c * 2.1) > 0.2) ? cfg.accentColor : "#052e24";
+        ctx.beginPath(); ctx.arc(cabX + cabW - 6.5, -halfH + 7.5, 1.4, 0, Math.PI * 2); ctx.fill();
+
+        // 服务器抽屉行定位（与静态函数一致）
+        const bayX = cabX + 5.0;
+        const bayY = -halfH + 15.0;
+        const bayW = cabW - 10.0;
+        const numServers = 7;
+        const srvH = 8.6;
+        const srvGap = 1.6;
+        const startSrvY = bayY + 1.6;
+
+        for (let s = 0; s < numServers; s++) {
+            const sy = startSrvY + s * (srvH + srvGap);
+            const sx = bayX + 3.8;
+            const sw = bayW - 7.6;
+
+            // 动态2：硬盘读写指示灯
+            const driveW = 3.6;
+            const driveGap = 1.0;
+            const numDrives = 3;
+            const driveStartX = sx + 2.6;
+            for (let d = 0; d < numDrives; d++) {
+                const dx = driveStartX + d * (driveW + driveGap);
+                const dActive = (Math.sin(time * 23 + c * 13 + s * 7 + d * 5) + Math.cos(time * 41 + d * 11)) > 0.4;
+                let dColor = "#00FF66";
+                if (c === 0) dColor = dActive ? "#00E5FF" : "#0284c7";
+                else if (c === 2) dColor = dActive ? "#fbbf24" : "#b45309";
+                else if (c === 4) dColor = dActive ? "#f43f5e" : "#881337";
+                else dColor = dActive ? "#10b981" : "#064e3b";
+
+                ctx.fillStyle = dColor;
+                ctx.fillRect(dx + 1.1, sy + 2.0, 1.4, 1.2);
+            }
+
+            // 右侧区域定位
+            const meshX = driveStartX + numDrives * (driveW + driveGap) + 1.4;
+            const meshW = 16.5;
+            const rightAreaX = meshX + meshW + 1.6;
+            const rightAreaW = (sx + sw - 2.4) - rightAreaX;
+
+            const hasLcd = (s === 1 && (c === 1 || c === 2 || c === 3));
+            if (hasLcd) {
+                // 动态3：LCD 内部微型频谱波形
+                ctx.strokeStyle = cfg.accentColor;
+                ctx.lineWidth = 0.6;
+                ctx.beginPath();
+                for (let lx = 0; lx < rightAreaW - 2; lx += 1.5) {
+                    const ly = sy + srvH / 2 + Math.sin(time * 8 + lx * 0.8 + c) * 1.5;
+                    if (lx === 0) ctx.moveTo(rightAreaX + 1 + lx, ly);
+                    else ctx.lineTo(rightAreaX + 1 + lx, ly);
+                }
+                ctx.stroke();
+            } else {
+                // 动态4：3 阶垂直 VU 柱
+                const vuX = rightAreaX + 0.8;
+                const vuColors = ["#ef4444", "#fbbf24", "#00FF66"];
+                for (let v = 0; v < 3; v++) {
+                    const vy = sy + 1.4 + v * 2.0;
+                    const vActive = Math.sin(time * 6 + c * 3 + s * 2 + (2 - v)) > -0.2;
+                    ctx.fillStyle = vActive ? vuColors[v] : "#041a13";
+                    ctx.fillRect(vuX, vy, 1.8, 1.4);
+                }
+
+                // 动态5：4 枚主控指示灯
+const ledColorsPool = [
+                // 根据机柜特色与服务器层级分配绚烂多彩的颜色组合
+                [
+                    { on: "#c084fc", off: "#2e1065", glow: "rgba(192, 132, 252, 0.5)" }, // 紫色
+                    { on: "#00E5FF", off: "#083344", glow: "rgba(0, 229, 255, 0.5)" },   // 冰蓝
+                    { on: "#38bdf8", off: "#0c4a6e", glow: "rgba(56, 189, 248, 0.4)" },  // 天蓝
+                    { on: "#ffffff", off: "#1e293b", glow: "rgba(255, 255, 255, 0.5)" }   // 纯白
+                ],
+                [
+                    { on: "#00FF66", off: "#022c22", glow: "rgba(0, 255, 102, 0.5)" },   // 翡翠绿
+                    { on: "#a3e635", off: "#1a2e05", glow: "rgba(163, 230, 53, 0.5)" },   // 荧光黄绿
+                    { on: "#00E5FF", off: "#083344", glow: "rgba(0, 229, 255, 0.5)" },   // 冰蓝
+                    { on: "#fbbf24", off: "#451a03", glow: "rgba(251, 191, 36, 0.5)" }   // 琥珀金
+                ],
+                [
+                    { on: "#fbbf24", off: "#451a03", glow: "rgba(251, 191, 36, 0.5)" },   // 琥珀金
+                    { on: "#ef4444", off: "#450a0a", glow: "rgba(239, 68, 68, 0.5)" },   // 警戒红
+                    { on: "#00FF66", off: "#022c22", glow: "rgba(0, 255, 102, 0.5)" },   // 翡翠绿
+                    { on: "#3b82f6", off: "#172554", glow: "rgba(59, 130, 246, 0.5)" }   // 皇家蓝
+                ],
+                [
+                    { on: "#38bdf8", off: "#082f49", glow: "rgba(56, 189, 248, 0.5)" },  // 天蓝
+                    { on: "#3b82f6", off: "#172554", glow: "rgba(59, 130, 246, 0.5)" },  // 宝蓝
+                    { on: "#d946ef", off: "#4a044e", glow: "rgba(217, 70, 239, 0.5)" },  // 霓虹品红
+                    { on: "#00FF66", off: "#022c22", glow: "rgba(0, 255, 102, 0.5)" }   // 翡翠绿
+                ],
+                [
+                    { on: "#ef4444", off: "#450a0a", glow: "rgba(239, 68, 68, 0.5)" },   // 警戒红
+                    { on: "#f97316", off: "#431407", glow: "rgba(249, 115, 22, 0.5)" },  // 烈焰橙
+                    { on: "#fbbf24", off: "#451a03", glow: "rgba(251, 191, 36, 0.5)" },  // 琥珀金
+                    { on: "#ffffff", off: "#1e293b", glow: "rgba(255, 255, 255, 0.5)" }   // 闪光白
+                ]
+                ][c];
+                const ledStartX = vuX + 3.4;
+                const ledSpacingX = 2.4;
+
+                for (let l = 0; l < 4; l++) {
+                    const lx = ledStartX + l * ledSpacingX;
+                    const ly = sy + srvH / 2;
+                    const lDef = ledColorsPool[l];
+
+                    let lit = false;
+                    if (l === 0) {
+                        lit = (Math.sin(time * 3 + c + s) > -0.6);
+                    } else if (l === 1) {
+                        lit = (Math.sin(time * 19 + c * 11 + s * 17 + l * 7) + Math.cos(time * 37 + s * 23)) > 0.3;
+                    } else if (l === 2) {
+                        lit = (Math.sin(time * 9.5 + c * 5 + s * 13 + l * 3) > 0.0);
+                    } else {
+                        lit = (Math.sin(time * 14 + s * 19 + c * 7) > 0.4);
+                    }
+
+                    if (lit) {
+                        ctx.fillStyle = lDef.glow;
+                        ctx.beginPath(); ctx.arc(lx, ly, 1.8, 0, Math.PI * 2); ctx.fill();
+                        ctx.fillStyle = lDef.on;
+                        ctx.beginPath(); ctx.arc(lx, ly, 0.9, 0, Math.PI * 2); ctx.fill();
+                        ctx.fillStyle = "#ffffff";
+                        ctx.beginPath(); ctx.arc(lx, ly, 0.4, 0, Math.PI * 2); ctx.fill();
+                    } else {
+                        ctx.fillStyle = lDef.off;
+                        ctx.beginPath(); ctx.arc(lx, ly, 0.7, 0, Math.PI * 2); ctx.fill();
+                    }
+                }
+            }
+        }
+    }
+
+    ctx.restore();
+}
+window.drawServerClusterDynamic = drawServerClusterDynamic;
+
+// 生成讲台道具对象 (比角色略大，刚好能站上去，严格遵循关卡隔离)
 
 function drawProps() {
     props.forEach(p => {
@@ -13477,7 +17654,7 @@ function drawProps() {
             const hh = p.h / 2;
 
             // 1. Water wake & Ripple shadow (since it floats in swimming pool)
-            ctx.fillStyle = 'rgba(0, 229, 255, 0.2)';
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.2)';
             ctx.beginPath();
             ctx.arc(-hw * 0.2, 0, hh * 1.5, 0, Math.PI * 2);
             ctx.fill();
@@ -18202,7 +22379,72 @@ function drawSecurityGates() {
 }
 
 // 统一精细武器矢量绘制函数 (1步枪-AR15, 2手枪-GLOCK, 3狙击枪-R700, 4冲锋枪-SMG, 5手雷-M67)
-function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
+// 实验优化：武器图标 SVG 矢量（2026-11-06）
+// 每个 SVG 用 viewBox 0 0 44 30，枪口朝左，与原来 fillRect 绘制方向一致。
+// CURRENT 会被替换成传入的 color 参数。
+// 武器真实照片剪影（用户提供，去白底透明 PNG，440px 宽）
+// 1=XM8步枪 2=MK23手枪 4=SCAR-H射手步枪 5=XM25榴弹发射器
+// 枪口朝左（用户确认）
+const WEAPON_PHOTO = {
+    3: 'data:image/png;base64,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',
+    1: 'data:image/png;base64,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',
+    2: 'data:image/png;base64,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',
+    4: 'data:image/png;base64,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',
+    5: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAbgAAADICAYAAACan/TGAAAjNUlEQVR42u2de5ykZXXnv6eqepjhjpfhfhMlIovgongBxWggBhBHZU0Ejbpm181u9OPlY6LJblASNTFm1TWYza6RGIwaBKICElEBQVG8K4iAQlCWqwgzCMNMd1Wd/eM5z/Q771T3VHfX5X2rft/Ppz7VXV3dXfXU857fc85znnMMMXbcvWFm3SkfgycCzYq9LAMc2BF4bQVfXz+vfS1wanxt2/sY4jl3AHfG784A+/T5+5lOjNX/NbP/rCtcjPMiEOM17C0za7v7YcCBSzQk/dICXgWsib+fP/tPh/G7HDgcOADoAo0RD0MLeH7ci8niK8BDBdE728wuzfNewyMkcBPuubn7c4BLw1MQ1aRT49e+VM/TSwut5dqJXou1T5nZy929aWYdTSshgZtQcQsD8Fzgc8DOwNwYvKe6GmFRr4VBjgzcaWYHaFjEKFBIaDzi1gJaZrbJ3d8Z4tYm7XcIMYkLFwuBe0RDIiRwk+w2p72HtrvPAHsynn0vIcaB5rmQwE2o52akRI83AXuFuB3KcBJLhBBCAidGIm45oeRg4M+LP5K4CSGEBK7OZBE7hrTx3ibtT+gzEEIICdxECNwJIWyu8RdCiOGhDd/Rs1FDIIQQEjiNuRBCCBlbjbkQQggZ2/Ghg65CCCGBmyi67r4j8OT4XkcDhBBCAldv3N2iHc6uwDM19kIIIYGbNDooRCmEEBK4CR3vVRoGIYSQwE0MUYdyDvhlfkijIoQQEri6Y6RWOOuBS+KxroZFCCGGh0pFjULdUoLJbHhy6mIshBASuMnA3Z9E2ntrA48teHVCCCEkcLUTtZaZtd395cAnejylqVESU4i2RYQm22RonBvwH+L7OZRYIoSOyQgJXM2VzcysQwpDHlvw2BSWFNNK3nv+eFwjMxoSIYHTilWISWJWQyAkcBpjISYRRTGEjK8QQgghgdNqVQhdE0JI4EZ4JadEE2VOCjHPnIZASOAmYJXq7nuQDnhL5ISuicTauNc1ISRwNR/XFwB7kVKkNdZC1wS8HMDM2hoSIYGrNyqoLMTWdKIAghASOCHEZC36zMwlckICJ4SYFIy077aLuz86RE71WIUETggxMQK3N3C5u681M4UrhQROCDEx9qYLPBn4krvvD5hETkjghBCTYnM2A0cAp0czYLXtEhK4GpErp18K3EXqJKCMSiESRmr+K2ETErjaXsVmD5IqNygEI0TCScUPWsCV8ZgWf2IoaAU1zCs5ZYmpYoMQ8+LmwAbgf5nZ19y9ESXthFjIjjYWcMa64Uh0JXDju6B31DCImgvSoCI9XVK4/lIzO9PdW6poIhYQNYt55yFg3e09t9dCSQI3BApnfLrAF4BXxNcKCYtaTWXm0/sHGWbfqOiGWMxjC1HrxPdHAC8B9i3Y0c3Ax4A5M/sBqUJOsyxyErjh0YhzPj8kbahrn0HUyXMz4PvAhcBZYWyaA/i7XeDGuDZkf0RZ3GbMbM7ddwP+E/Ai4LgFnv4H8TtXAe8xs391dzOzLQsneRQjELpYSDSYz64U/RnDTummFf/oxh7gYeAfgIdKjy+HTmH1/R0NsVjAc5tz9xOB64G/CnHzcBLKt7xgeg5wqbu/tVwhRwI3PNoRG/5b4O2x+m0WLnYZ6+17EM3STdmoo2U3M7sduDnGfzMpKzjfuszv0y10y8aoScqe/Gvg6jBm2n+bHvGy0q3l7jOF+4aZdd39LOCzwH4xxzpx3bd63KzgOHSB97r7MyM60EAGY6Qf8FOAPwJOKwndsD4DK/xtr9FnnUNhD0SI4oH4vg381xg/naEaLtnTup5UdeQlwPkr/JvnAWeb2VXZ4BVDSaLe4tXDvmz12PYWM+6+GrgCeEZpDvbtUMTzP2xmr8+hTgncaD78Zv6A3f1gYB1wJrDbCMSiuMoZhedVnOBL+Z2czNACfgmcYGbfK43lX8QiYQ6Y0ewausD9GDgiVsRPA36n9Bm/NOZwrwVUft6/AD8j7ZG03X0V2o8ed3RksCvpPo55xOe+a+GhU0jNby3mw9NjPs3GtW3LeF8G3A4cToTVhyZwhfpyxTMMDnSWsnKboDp1zeJKxt2fBXyoIECDmKTFrLe9me+e/DCwU03G6XrgVWb2XXefick/E6L2PuCNEriRedGXmNkpGg6xHRvdCE8/HylxYGfgd5mv4nQscFBh8bRmkYXVcoXbgAeBtWa22d2tNaQ3XAw/dFbiPUxQGKNdel/XAEcPcdLtHiuZOVK5sAMKk2DNEBY3a4DXxAQ14MvADQXBpeSpHUSqR3gQsImUzDAHXG1mm9x9h4IHauWQhxgq2cgc7O5XFMa+bHxmt+MROLAD6WD3OWjfeVzka+7RwBkMfstiD+DIZSyiuqU5t9Is3SyQjwd+BAxe4LK4ufuaUPGnAEfFjzcCZy8mXqUeUfkC2Zl67SP1a0SWc8E/bGYPLzD2u8V4ZePz7RizGeCeHA4ws7khvafPDTDssbm8OHD3h2WrRmYQAZ4Ut0EgT3DCHbke35cFrGi/mwMQtPKcbYdWnBgC1xyowOVworvvDHwzVudlV/RwM/v9ELJOD8PWKf3Nj5LOQkx7YkEW+Dvd/coenhHAyczviZRDw3lyddz9M6SMuGEZRpYg3lZ6fmeBxUCO0zPgC0MsviL2Ac5fUZ3Fy6D/ZqOPx0bFFts2aMFoxkbyq4HD2DpVOLuPJ7v7Y4EHStUMcqz27cDzw9CtAZ6lObkVh8RtJbx8ArxfoXEWYlERbw3pD+8fYtUmnX2ZKawI9wf2M7NflFeL7n488Gda+W13JbxQFlq/nk1dD5w3ZHSFEP0yrJDfLNvGXIsG+gx3zwa5U7h/XUEYm0s02tO0OmlU9HMXQoiJF7jGdh5/S9wWYpU+GiGEECvRn2EJ3Pay9LqLeHcKQQkhhFgOTsrWH4rAeWRS7hnf2xI9PJ1zEkIIsRxhmyGdubwgHmsPzFuK8285qeSl8bD2z4QQQoyKDoWiGsMKB6pKuBBCiFGzpqhrwxI4hRqFEEKMinx06nLgkeju7cMQOImbEEKIUZLPS98YpQgbMKAkk6gm3fB0uE3NPIUQQoyDrbbHVixwkVzSzS6iu+9KSjSRyAkhhBgFrdCcf4zvOysWuEKb8YOAvyNVst+X1JZh0qr/CyGEqC7bFKBftsBFWNLcfQ/Sxt7BPf6ZEEIIMUyyM/VT4L7QJodlZlHGYe5GtLZ5T4jbLNs2sRNCCCGGSdac66KIfyP3Gl2uB9eItjjvJxVIzge8hRBCiHGwQ+5Jmmltx1Nrsm2osUFqbXMU8Ea2rvwvhBBCjBoH/t7MPLL5ty9w5e7aJfF7IfMbetpvE0IIMS4MeLj8YKsgWFv1bzOzjrsfB+zN1hmROVPl9+JreW9CCCHG5bkZ8CBwd+GxeYHL6f4lD+1dwB/3qZxCCCHEOASuAdxmZj8onMtOApcfcPcnATvFL6wB3hDPmVtAxJoSNyGEEBWgVU4wAWjFptxpwD+z7bGB3GNHCCGEqCrd0LKtRK7h7muB94e45XNs2cWThyaEEKKq5ETIc+N+q5yQFrAHsF+vHwohhBA14P5eDzaAw0ihSBVHFkIIUUd2WUjgXkoKRarElhBCiDrRADYB34rvvfzDjRojIYQQNcNJ22obgWvjsW5Z4FoaJyGEEDXFSEfberp3j2h8hBBC1JjuQgJ3YuFrIYQQYiJoAE8ouHlCCCFEnfDFBE7Zk0IIIerKqoUcNIUlhRBC1Nlzuwto96pF2ZDICSGEqCG5TNdnzewRorZyWeC+V1JDIYQQom6eHL08uKvja+3FCSGEqAs5JLmXuzd7CV0DeKzGSQghRM3IzQHWAWvMbJt9uAbwZebbfgshhBB1Ym6hH7SAq0LcJHBCCCHqhrFAsmQD2AysJ2WkzAHtuAkhhBBVx1mg5GTDzH4OnEWKZ86EV9cq/KIQQghRRbqkQstPK3hzW2i5u5nZ+939FmDXELU1wNmkE+LtBYSuhcKaQgghxoOFPq0BjgGuoVSdq2Vm7u4NM/vcVj6f+3HAGaidjhBCiGqzuVclEysIWpP5ZJMusBrYndTx+1Gl33HgDcAeKANTCCHEeOiG1/Z1M3tWRCR9G4FbKu7+PuDNpOQUeXlCCCFGTRaznwNPISVMkkWusYiAmbs33L3l7jOF22p3bwGfLXhzQgghxKjJEccDgSND2Lbo2oICZ2ZuZl0za5vZXOG2Ceia2dXAZ0iZl3MaZyGEEGPk2eUHlhta9NizexlwIXAKMBtiN+kenQ7FCyFEdQXOKH+xDIWzghd4IXDqFA1kHQ/C9/NZN3WNCCFqRk50vB84DPgFRBRyRX81HS/ohjf3DuBVTH5/uRlgreaUEEJUhpxN+Soz+0d3b5lZe8WhtmJaZiSfTCo5oWZH4GTqFaZsAa8mHf1Y6H01SIclFX4VQtSNNikC9WEz+wN3nzGzuYEYswhXNs1MNSzr7Oe7/y3wX2Ky6OiHEKJuHtxNwFGkGsuDMWLhwbV7nSSfUJo1nQALsYqUJHR/1jpdL0KIGpEjUfsDe5jZXe5uA12lF0+QT4E7PEmeWzv2Uu8pTBYhhKiTwM2R6lKe4u4fAVoNjYsoeHfnMV+ZRl6cEKJONELoXh7OVkcCJ4qsRkcFhBCDY5QL5Rx5OtjdVwOuUJTISUINYAfgi8CzwpOT2AlRf4Epikx3hKIzE/e55VqxoP+w6MTff4GZfVGZcoJomWRmttHdbwuBU4hSiHoLW7cgKplRR+3mCkJXFKFhLp4b+X9K4ESZTRoCIWovbhYispGUHZ0f+zxwB8MtlJ9T9r8M/BvwCtL2x6nAk0N82j3Ed5CcDnxeIUqRrgj3ppl13P1Y4GrmD38LIepDFpeNwDnAh4Bb43p2M+uM0cYYcATwp6Q+o90heJX5/X8DeL4ETpQF7njgysJEEULUy3N7CDjZzK7qdZ2P8LrulhbKnbwdEl7dOeHFDcvWHCWBE8XVFcB+wDXAvvLihKiVuHXCczvFzK5295l4bL7D9ZjPKrt7I15H191PAM4GnjAEkXPgCTJeojjxzcxuB25HzWyFqJvAtYCXZXGL/p3d6O3pVSjEEa+n6+6rzOyLwOtJ+/4+QHvTDfv1Ygmc6OXJybMXoj50wvv5P2b2hSxuFV9Qz7r7Dmb2BeDNpFDloPYHs1AeJYETRRqxyjunNFGEENX34P6m4MHUgdnYE/wIcHN4oIN87eslcKLnxNMQCFEb760JXAHcED06O3V44bGYboS3+bHC+1nxn477AyRwopdrfytps1r7cEJUn03AO0LYare9ENsiqwf4J7OuvVACJ4p0Y2V1FSnVuCmBE6LSC9ImsIGU+bzlGq6TzQlP7hvx/SArnLgETmyzmnL3VcBdDDazSQgxHBoD9oBGRpy9NeArpAorjQGKtEngRHGyOdAys1ngfFK4o6uREaL6nlCNX3suKXYJ8zU0B4Ha5YhtJ0WsqD5Jiu03kMiJIQQLlngTEzwXYnF9XiyqV6pLOVHlkxI4UfbiukDTzG4B/jfzBVG7pMrg7fh6lG03xPhEqDuAWyfmTr7lZIil3DTXJtj7jAon3yYluA3KI51VNwGxkBfXBP4I2Ad4EalXXK8FUZv5yuWi2kJV/L4fWgwuK688Pzb3IVz55zug4gOTvKj2qIW7wd2vAF4bC6HlOmCN+P2Pa9KI3hYx9Yfz+Hov4LnAIaTN7FfEJFpLTTe3p0DMvOD9LNdQPAz8ciUr8/jfXweuKwjWncClfQocMc8uRvVRe33WBvwCOCj6OVoVSnItw97kz/Qg4FrgMSyvPmU7FmbXmNmxEjjRl8iVHs/HB54EHAY8HjgrJqOMz3gMXWeR8d8A/JD5/dR/IB0D2Z4wfYfUz2tFIcIIe690Ll4DPBN1mu8lcPcC+0f5q1oKXBa5qFN5FKmX3C4xD/v9vItz43Qz+6RClGJ7oQMruP0N0oZwOx67Pm64+1rgjfTu4CuG6601mW9evBn4Gqlg9jfjdp+Z3Tbm1XmzYJCzIPdDszDfxLYebgd4FHAy8C9xjXZqam+6UUfz++5+FvCBgldmfVwLLVJi3O+Z2SfdvSmBE9sVucLqqFP07MJw7UAq7XUzSgQYJd3C6vb/AZcBXwCuNrO7FvG6l1JMO1d+X5FXEB7ckr24mF8ddz8QOBCFJxcz7GsLoldnezMX+3EfdPdfAW8Fntjnr/8AOM3Mfpr7WypEKVa6Os9itxcpnLW6YEjFcMihmE3Am4Bzzezh0ufSKiw4fBBhwjHMrdyE97mkWotqwrstec/ptWb2UXdvTYLHW7Arq4DXAGcsYFdya5yvAB8ws/uLYyAPTgzS6FbRg1vsOEOjhkJcLK77OjP7ScFDy++XCQvrzSo6sH3nZ6LeTBK3XHTi7+LWl9dfnPsSODEomqRwZaUWgn2s+PMK0EvCV0XyftuVpK7NG6Nrc7suFeSXSQOdhZs+xTZrRw5Av9djtxypkMCJQay0msADwOXAbxQM8bjFzYBbSGnpvQzkMQVRrvoKOL/2zcCrQ9xaVW9sOSDmdKVNr31hBUkzEjgxoHlom939tpIxHqcYdEn17V5sZtctEM54ArAr8xv1HeB0UofhqqWjd+I1nmNmP6tD1+ZBzKu4P6PgwWoPTkjgxFh4pELeThP4lZldVzhEakXvLu9flURvPfDfqOZRhzZwXoRtpilct68uLbEctBoSgyDHvT9WkXmVX88lIW5mZl0z68StG9l5DXdvFu5ngNtINfGqdJ6oG4vRO4CvmplP2dmwzbrEhDw4MW46VKPzQH4Nt8U5rlW9xKq8Ie0pN7nrXlnnqD0le27Fz8RQ4QAhD06MixCFJvAjUmfecXo/eT9tNjwxqGllh+IQh2g/xt2fGE1pJ/raLaR7702q0gEq0SUkcGKMQjdXESPUCJH7Zsmj69djqFpGZRa43YAXRGbZtFy7LWCNri4hgRNV4HvjXvzH/Y1Jr5bm6YR4zFb0WnXg9e6+M6mH1jRUi2lPgAcuJHCi7g5c3F9UEppRk721r5jZBqDRTx3FnJkYJcceT/XqHuZOAI8DXsl8puikszs65C0kcKIi7FKR17HHEp/fDCF8OrAf8xVOqraIcOBtRILYBHtxWbxz78E2qm8qJHBiTOQw0mWkyiFNxpNRmY3gd5boSeaKLG+rsLeQvbgDgPdEEsakX8MbdWn1F7mYkpC1BE6MQVUiDGhmD5Cq3I/rYsv/9/P9ClyUvOoAJwLPoBqlxha7ZjvAm9z9GXGeb6JClWGoO9ER4dlTaKtyeSpnvipPu3TzwtyeA14APDXqNyrbVAInhmScGsCqCryUHZdgTLOn+ad9em/Z6IzD0ysWn73M3fdhGck0NVgw5UXGMVNoqyzeuxU+71bpln/WIp0TfEkIH2i/cgs66C0GKW6tWEF+ktSocJy1A/sNjzbjNa8L720z83Upy6JWvG62Kvs1BgPYJe13ftjM1oW3052wKdUklX/bfYo8NwPuJZ0nPSEe/yWpma0VnvNCYGfg58CXYh7cEH3UurJGEjgxHMMLcH+NVpJ57+JW4D7gMX38zq/iuWuBndg2IaUTwj5McW/G/3mRu59uZp/IDUInRNjawDpgT+abek6DuLWB483sRnffM+bWI2b2UGkxuVtESn5lZptyNGIlndclcEJs/yIFuItqZiFuq8ipCkvDzH7o7scBhwOHACcVPKJGrJJvCOP7vRDE3wE+CDx2getq2B5sg7T/cq6732xm354gkcvzqTGBnun2FonrY07eU4yOlObthtLPuvLcFl5xC7FyazTfZn53UmHgHRl9CC+LytFm9t0wFN0+XntjOQYizs3tXRD3BqnlzgnAkxl+2538fr8DPIeU4ON1XslnkXb3vwT+cMo8uM3AIWZ2RySL5A7tXr7WCmInr00enBghq+q2eMqeHPMVQxZbEHYLnt/dwN2l5303VtV/CLxryAY6Z1UeDbzVzN4ZXRHqXJQ5j//JU7QQz/3+LgLuyvvZi8xXiVqfF4cQw6B2qcrRRqddaKtTvrXj1i2IokW7neKtBXTM7N3An9A7aWXQ13EbeIe7H2FmcxOSKv7QFF43mxRqlMCJagpEPix9P3Bx9nYm/T2HMBZvbdiSVfpu0t7dMPeSrODJXeTue5OSZ2p3fedQsbsfDRzB9HXxVt1NCZyots23NpA3yH1KB8HDYBvwToZfTzGHVg8E/jL+fx29uByOnGE8e7jjtMUOnDPN140ETtSF3TQEW1bjVwMPs/j+3iBokfbeXunuZ0aosm7NQrOYvWgKDb1RzU4WEjghSgbp2yWDNerXMHbDmPu2mdldwIeZP6A9TFqk/bi3uvvTarwf92tTds3kA9735M4WMiUSOFFdgfv8GOdYLmFUJS4csQe0E/A/3X011KrrgEeSzqoxLpBGTT4zeqOZ3ZrWRko0kcCJKrPzGA3FDcBPIslirCvhOM9lpO7ilzNfgWTYXtwccBzwhjj4XXkvLhJMOsD+wG/Fw9NUOHiNOgJI4ESFKZwnu4EUphxFWK7oPRpwt5mtj5VwFUI9zViRfyLGYhTjkUOV73L3f0eqzl8XsZi2Fjl5jp6bw9qyJBI4UWmds0eADaULeFS0KrYSzh7bJaQkgpkRjEmxCv258bVX3EPI9ui58fqnLWX+LpkOCZyoDzuM6f+2qlTpoXA+8BekhrA+Ii8un407Cvjj8CKrfM1n8X3qiD3/qrBaJkMCJ2rgwcX9x0bsweX/c07pdVRF6DrAX7B1T7dRXONzwFnuvq6qDVLDs2xHUsxJ8fA07L/lvnd3A5cWHhMSOFFx7h/h/8otam4CPhqFn9tVMmSFvclbR+ihZDHtAv+9yvtw4XXPkVrkVG6BMuTPyMzslyNeEErghFim2EBq2nh3rFCHfdHmzfl3F7pBV814W7Q5+esRG7I8/kcDp4YXV7VjFNkW/QbpiENnSgQuz4GfuXtTWZQSOFH15Wjsf5nZnaSOzMM+uNolJVN8H/jnSDdvV3BocpLHF4EHRzAuvYzpme6+B9VLOMmvZU/SXtS0eDHZi78gQtgtdQqQwImqL0tTlX1jPpNy2LSBM8xsc4WFvxte3E+AHzPaZp65S/aRwOuyMa2g+D+nJHjTwq6yGhI4UR/ySvSf4vthpXy3Yx5fYGY3RAX/Km/SZ+H/qxiTUa7Wc6jyxVGjslMhLy43aT1mygQu78X+W8HLFhI4URehG6ZRDANxHylLsA6p5d0w5BfH626N0Khlj/EY4HlV2avMtRfdfV9gF6ang4DH5z8LfCbPD5kMCZyox8UL8MAQDVb23s42sxvCa6y0gYgzcbnj9iUxNp0xfC6/XSGPoRGi/zjgIOZLrk0Lq4E1MhkSOFEfstE+n5RoMgxPJXsfnwsvoC6VL7ohxJ8OQz5KLyoLx9MqJHD5NZ1IRTpBjGoexP2XgPviCIdClBI4USOGlSmYq3L8CLieelVgz2firgXuYPTZlACPVGH/LYeV3X1X4MWM9hB8VaIc95rZJqpTO1UCJ8QSBG4YJbuymH3WzGbrNJcLfeIeIJXuKr6fUXqRXo3hsC4pi/DwKbNLeWFzVYW8aQmcEP0Y8Qi5bCCd+xq0Ec9hvQvGJBADcF7cgPNGbNiyUd3D3Xdn/Ofhsg06KT7D9jRdJnH7liyGBE7UUudsFrhlwCvULGY/AH4cB7vrJnD59X6VFKYcVe+6nEl5KHBUBdqzWIRrjxjhGFRigRPidiewXl28JXCivuw2BHEw4HOxd1G7eVwIUz4EfIHRt4fxcXtLUS90Lt77qfFwa0quiTyHf6Yu3hI4Ud9VKsyHEQc13wzYxPzZodqufGPlfj6jzwDN4bGx6nzcHwTsPmUeTH6vF8ccUA1KCZyo6UV8E4M7C5cPJ//UzL4b3lBdG2PmRI8rSb3iRnnou0r25zhSksm0FFguXh8/zIW4ZS4kcKKe7DTACziL2QVR73KmroNSOPQ9S6psMvaw4agFPu6PL3l00/C+W6T9ty+X5rWQwIm6rFAjgeAnpISQQZTSyntVP46Vb909nnEe+q7C/DDgGVMmcMVFziMyExI4UVMPJd3Zg8Agmjnm2n2PAJ+fkJVvPvT9TVLB3VF2GBinsuXyXIcDBzJ/cH+aPNdPRRRCLXIkcKLGxmzQbXMMWDVBi4CGma0nVWWB6Si4m23PacCOTFeR4SxmG7T/JoETtbfh5sBHGWydwUla8eZQ3SUFAZ+Whc9Tmb7syRZpr/WyCYlCSODE1LNGK9UFVwDZwP09cCtpH25iPZpCYexHA8cyfXuPRgqz3zyBizUJnJgqsqH+LikVvqELekGhmwNun4K32gyv/iTS+bdpOh6QFzOXAQ9q/00CJ+pttLtxfwupN9ygBG7SjEIzPJtPxXsbhQc3Li8xdzX/9yN8r1Xy3gCur/H5TQmcEFuUyL0VBi2f9VrphT2sDgVj9XRjJX8RqUrLMEN2eXHwypLRHcVcMNL+0wzwAqYzPAkTUIVHAidEXMRhvM9f4bwzUifsNcCpkV4/EbULzawb3RfuBK6J9zrsQ99rx/NWzYGdgX0YXrf3KvMwSiyRwIkJWbKaddy9aWZfBy6NeddZwZw14Lcj/OmTNVTmpEPfo2B2jB7Mm0PkukzX/lsDuMHMrotrQkIngROT4MVFeOosVtbBuhmG4nnu/hYza7v7TBW6Uw+AfOg7988bpnfaJYUJR/4e4z53757GzNprZQ5GQ0tDIEbkmnQjY+xad38P8PbwIJZzYDun0b8vVsHvDQVdzn5OZ0jvd6mNRJukA9+z7v6WeKw94Gs0n0PsxN9dP+5FT7yWbuFzm2TBy4u6K6bgvQoxdS6cuXvD3Xdx9295Ys7du750uvG77u5nuvujK/Zem8v8vd93907cBkWnMFaZ69398PyZjHBcGnF/8QKvdTZe66DHYNx047bB3fcrLMjEMBfWGgIxYsPfCG/uUaSsymcWvJXmMuZkrmF4N3Av8HFg4xJW1Bcu4fn90jazje6+a5/PX0UK2a0jnQ0bROKFF8bGCt7qj4APAp8ws03RdNRH+PlbeLc7k2pQ/iapu/g6YI8eHn1xn9Wo77ZKJ+b3RWZ2ak270EvghFiCyDVIyQZ/QjrwS8G4+yKGotdjyz028FCI60r2BctsJPV4O6nP5zdI/dBYobgVS6EVheAG4J+AfwWuiwPljFrctjMndgH2BU4kJZ+8Mt7DoT3eY6fwHq0mtiyH498GvBeYMbNZWQMJnJhMkTPYsld1KPA+UtmmRw3j3/UQsG4YndUVuQ6yyC4ntJm9nOLv3g18DfiAmX21NPZN5s/djfPz3+KRmVl7gec9P7zbQ0LsHrfAn5wreXhV8vS8sBB7lpl9Sx6cBE5MkTcXX+8TnlzZi8nitBtw+hK8oi6wJykMVv6bqxlcR4J2DyHtLlGslhqe7ZR+F9IB8WuB9wPfMLN7CuPcykJYxdJQ/QhehHyPBl4aY/xs4OCC97uYp98Yo73L82IDcKCZbaiS9yyBE2L4xq0xrDNB7r5bD7F8LP3td+Xn/zrwRLbtW7YjcMCAV/qLGepeXt4tpE4EHzKzn5Y8Nep81qqYrFN+H9ENfUfgKODI8O5+c5HPxAvebha8UdjAvL/86Vig2UIeq5DAiQn25vqYr/2GnrJwdYYZCnL3nYDjFxHKVcBrtuMttoDnL/F6vBz4LHATcHneVyuIQnfSPIS8EMrCVHzPpeftDDwnvPT/GOLyvAU+g05B8GA4oc2cYHKamV2gA94SOCEGbRhXIpaEYAxTKA9l67NguW/Y74ahzp7jncCFZnZTD0/Hp2lfp/C5ZtHzhYTD3Q8JgVtHKhH2dODX2Da8OejQZvYa15O6l98b3qjCkxI4IWrjVazsQlziij68XSuIrwzmIp9Jj/CmkfZ015H28V4WC4rHb0eo+vm8ix0SOiGsf25m/yOKHSg8KYETYqqM8kJGs1Hw6LYksCgDb9nj22CB8GaI3gnxnCNJSSxPJSUqrYRvkjonbKCiST4SOCGEmCwvDyIsvMgxhf1JYcxfD9F7InAc2yYbUXjsJuCq+Pp64CNm9pAyJ0fP/wd8axPTIsiKngAAAABJRU5ErkJggg==',
+};
+const __weaponPhotoCache = {};
+function getWeaponPhoto(weaponId) {
+    if (!__weaponPhotoCache[weaponId]) {
+        const img = new Image();
+        img.src = WEAPON_PHOTO[weaponId];
+        __weaponPhotoCache[weaponId] = img;
+    }
+    return __weaponPhotoCache[weaponId];
+}
+
+const WEAPON_SVG = {
+    // 1 步枪 XM8：照参考图画——可伸缩枪托 + 大型瞄准具 + 透明弹匣（可见子弹）+ 4 散热孔护木 + 枪口制退器
+    1: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M1 12h2v-1h2v1h1v8H5v-1H3v-1H1z M6 13h10v-1h2v1h1v4h-1v1h-2v-1H6z M19 12h2v-2h4v2h1v5h-1v1h-2v-1h-4z M26 13h9v-1h2v1h1v3h-1v1h-2v-1h-9z M38 14h3v1h-3z M39 13h2v3h-2z M21 9h6v2h-6z M22 7h4v2h-4z M16 17h4l1 6-1 1h-3l-1-1z M17 18h2l1 4h-2z M27 16h6v1h-6z M28 18h1v1h-1z M30 18h1v1h-1z M32 18h1v1h-1z"/></svg>',
+    // 2 手枪：短枪身 + 握把
+    2: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M6 11h22v4H14l-2 8H8l2-8H6z M28 12h3v2h-3z"/></svg>',
+    // 3 冲锋枪：中等长度 + 长弹匣
+    3: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M1 13h24v-2h5v2h4v3h-4v2h-5v-2H10l-1 6H5l1-6H3v-3z M14 18h4v6h-4z"/></svg>',
+    // 4 狙击枪：超长枪管 + 瞄准镜
+    4: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M0 14h30v-1h4v1h4v2h-4v1h-4v-1H8l-2 4H3l2-4H2v-2z M18 10h8v3h-8z M20 8h4v2h-4z"/></svg>',
+    // 5 手榴弹：圆形弹体 + 拉环
+    5: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M22 8a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M22 5h4v3h-4z M26 4a3 3 0 1 1 3 3"/></svg>',
+    // 6 机枪：长枪身 + 弹箱 + 两脚架
+    6: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M1 13h26v-2h6v2h4v3h-4v2h-6v-2H8l-2 5H3l2-5H2v-3z M14 18h8v6h-8z M10 24h3v3h-3z M24 24h3v3h-3z"/></svg>',
+    // 7 UAV：四旋翼 X 形 + 机身
+    7: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M20 12h4v6h-4z M6 4h8v3H9l6 5h-3L6 7z M30 4h8v3h-5l-6 5h-3l6-5h-5z M6 23h8v3H9l6-5h-3l-6 5H6z M30 23h8v3h-5l-6-5h-3l6 5h-5z M4 5a4 4 0 1 0 0.1 0z M36 5a4 4 0 1 0 0.1 0z M4 22a4 4 0 1 0 0.1 0z M36 22a4 4 0 1 0 0.1 0z"/></svg>',
+    // 8 三管猎枪：粗三管 + 宽枪身
+    8: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M1 11h24v2h-24z M1 14h24v2H1z M1 17h24v2H1z M25 12h8v6h-8z M33 13h6v4h-6z M14 19h4v5h-4z"/></svg>',
+    // 9 符文光镰：弯曲镰刀 + 长柄
+    9: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M4 4C14 4 24 8 28 16c-6-4-14-6-20-4 4 2 8 6 10 10-4-2-10-8-14-22z M28 14l12 12-2 2-12-12z"/></svg>',
+    // 10 熔岩阵：同心圆环 + 内核
+    10: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M22 4a11 11 0 1 0 0 22 11 11 0 0 0 0-22z M22 9a6 6 0 1 0 0 12 6 6 0 0 0 0-12z M22 13a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>',
+    // 11 灵魂汲取：细长法杖 + 顶端宝珠
+    11: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 30"><path fill="CURRENT" d="M21 8h2v18h-2z M22 3a5 5 0 1 0 0 10 5 5 0 0 0 0-10z M22 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M15 26h14v2H15z"/></svg>',
+};
+// SVG 图片缓存：key = weaponId + color + isSelected
+const __weaponSvgCache = {};
+function getWeaponSvgImage(weaponId, color, isSelected) {
+    const key = weaponId + '|' + color + '|' + (isSelected ? 1 : 0);
+    if (__weaponSvgCache[key]) return __weaponSvgCache[key];
+    const svg = WEAPON_SVG[weaponId];
+    if (!svg) return null;
+    // 选中时描边加粗：给 path 加 stroke
+    let svgText = svg.replace('CURRENT', color);
+    if (isSelected) {
+        svgText = svgText.replace('<path ', '<path stroke="' + color + '" stroke-width="1.2" ');
+    }
+    const img = new Image();
+    img.src = 'data:image/svg+xml;utf8,' + encodeURIComponent(svgText);
+    __weaponSvgCache[key] = img;
+    return img;
+}
+
+function drawWeaponSilhouetteOriginal(ctx, weaponId, x, y, w, h, color, isSelected) {
     ctx.save();
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
@@ -18245,8 +22487,8 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
         // 弯曲 STANAG 弹匣
         ctx.beginPath();
         ctx.moveTo(cx - 4, cy + 3);
-        ctx.lineTo(cx - 8, cy + 12);
-        ctx.lineTo(cx - 3, cy + 12);
+        ctx.lineTo(cx - 8, cy + 11);
+        ctx.lineTo(cx - 3, cy + 11);
         ctx.lineTo(cx + 1, cy + 3);
         ctx.closePath();
         ctx.fill();
@@ -18365,9 +22607,9 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
         // 垂直手柄
         ctx.fillRect(cx - 2, cy - 1, 6, 8);
 
-        // 超长直型弹匣
-        ctx.fillRect(cx - 1, cy + 7, 4, 11);
-        ctx.fillRect(cx - 1.5, cy + 17, 5, 1.5);
+        // 直型弹匣 (缩短以适配掉落卡片)
+        ctx.fillRect(cx - 1, cy + 7, 4, 3);
+        ctx.fillRect(cx - 1.5, cy + 9.5, 5, 1.5);
 
         // 扳机护圈
         ctx.beginPath();
@@ -18523,7 +22765,7 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
         ctx.strokeStyle = color; ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(cx - 12, cy); ctx.lineTo(cx + 12, cy);
-        ctx.moveTo(cx, cy - 12); ctx.lineTo(cx, cy + 12);
+        ctx.moveTo(cx, cy - 11); ctx.lineTo(cx, cy + 11);
         ctx.stroke();
         [[-8,-8], [8,-8], [-8,8], [8,8]].forEach(([ox, oy]) => {
             ctx.beginPath();
@@ -18591,7 +22833,7 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
         ctx.strokeStyle = '#64748b';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(cx + 8, cy - 10); ctx.lineTo(cx - 12, cy + 12);
+        ctx.moveTo(cx + 8, cy - 10); ctx.lineTo(cx - 12, cy + 11);
         ctx.stroke();
     } else if (weaponId === 10) {
         // --- 10: INFERNAL LAVA CIRCLE (地狱熔岩阵) ---
@@ -18639,223 +22881,529 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
     ctx.restore();
 }
 
-function drawWeaponIcons() {
-    const boxSize = 46;
-    const gap = 10;
-    const startX = 25;
-    const startY = height - 62;
-    // 2026-11-02 修复：键位标签错位——显式设置文本对齐，防止继承残留的 center/middle
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
-
-    const isLevel0 = (getCurrentLevelId() === 'level0_test');
-
-    const normalWeapons = isLevel0
-        ? [WEAPONS.TRIPLE_SHOTGUN, WEAPONS.RUNE_SCYTHE, WEAPONS.LAVA_CIRCLE, WEAPONS.SOUL_SIPHON]
-        : [WEAPONS.RIFLE, WEAPONS.PISTOL, WEAPONS.SMG, WEAPONS.SNIPER, WEAPONS.GRENADE];
-
-    normalWeapons.forEach((w, index) => {
-        let x = startX + index * (boxSize + gap);
-        let y = startY;
-        let isUnlocked = unlockedWeapons.includes(w.id);
-        let isSelected = !!(currentWeapon && w.id === currentWeapon.id);
-
-        ctx.save();
-        if (!isUnlocked) {
-            ctx.fillStyle = isLevel0 ? 'rgba(22, 10, 12, 0.65)' : 'rgba(12, 18, 15, 0.65)';
-            ctx.strokeStyle = isLevel0 ? 'rgba(100, 60, 60, 0.3)' : 'rgba(80, 100, 90, 0.3)';
-            ctx.lineWidth = 1;
-            ctx.fillRect(x, y, boxSize, boxSize);
-            ctx.strokeRect(x, y, boxSize, boxSize);
-
-            drawWeaponSilhouette(ctx, w.id, x, y, boxSize, boxSize, isLevel0 ? 'rgba(100, 60, 60, 0.35)' : 'rgba(80, 100, 90, 0.35)', false);
-
-            // 绘制独立小标牌，绝不遮挡武器图标
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.70)';
-            ctx.fillRect(x + 2, y + 2, 17, 10);
-            ctx.strokeStyle = 'rgba(100, 60, 60, 0.4)';
-            ctx.lineWidth = 0.8;
-            ctx.strokeRect(x + 2, y + 2, 17, 10);
-
-            ctx.fillStyle = isLevel0 ? 'rgba(160, 90, 90, 0.6)' : 'rgba(100, 130, 110, 0.6)';
-            ctx.font = 'bold 9px monospace';
-            ctx.fillText(isLevel0 ? `[${index + 1}]` : `[${w.id}]`, x + 3.5, y + 9.5);
-
-        } else {
-            ctx.fillStyle = isSelected
-                ? (isLevel0 ? 'rgba(255, 51, 68, 0.30)' : 'rgba(0, 255, 102, 0.28)')
-                : (isLevel0 ? 'rgba(22, 6, 8, 0.88)' : 'rgba(4, 16, 10, 0.88)');
-            ctx.strokeStyle = isSelected
-                ? (isLevel0 ? '#FF2200' : '#FFFF00')
-                : (isLevel0 ? 'rgba(255, 51, 68, 0.50)' : 'rgba(0, 255, 102, 0.45)');
-            ctx.lineWidth = isSelected ? 2 : 1.2;
-            ctx.fillRect(x, y, boxSize, boxSize);
-            ctx.strokeRect(x, y, boxSize, boxSize);
-
-            const iconColor = isSelected ? (isLevel0 ? '#FF2200' : '#FFFF00') : (isLevel0 ? '#FF3344' : '#00FF66');
-            drawWeaponSilhouette(ctx, w.id, x, y, boxSize, boxSize, iconColor, isSelected);
-
-            // 绘制独立小标牌，绝不遮挡武器图标
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
-            ctx.fillRect(x + 2, y + 2, 17, 10);
-            ctx.strokeStyle = isSelected ? (isLevel0 ? '#FF3344' : '#00FF66') : 'rgba(255, 255, 255, 0.15)';
-            ctx.lineWidth = 0.8;
-            ctx.strokeRect(x + 2, y + 2, 17, 10);
-
-            ctx.fillStyle = isSelected ? (isLevel0 ? '#FF5566' : '#00FF66') : '#E2E8F0';
-            ctx.font = 'bold 9px monospace';
-            ctx.fillText(isLevel0 ? `[${index + 1}]` : `[${w.id}]`, x + 3.5, y + 9.5);
-        }
-
-        ctx.restore();
-    });
-
-    const currentLevelId = getCurrentLevelId();
-    if (isKillstreakSupportedLevel(currentLevelId) && !isLevel0) {
-        const ksBoxSize = 46;
-        const ksGap = 10;
-        const ksStartX = width - 180;
-
-        const isEn = (window.__gameLang === 'en');
-        ctx.save();
-        ctx.fillStyle = '#FF9900';
-        ctx.font = 'bold 11px monospace';
-        ctx.fillText(isEn ? `⚡ STREAK [${level0StreakCount}]` : `⚡ 连杀奖励 [当前: ${level0StreakCount}]`, ksStartX, startY - 8);
-        ctx.restore();
-
-        const ksRewards = [
-            {
-                num: 1,
-                id: WEAPONS.MACHINE_GUN.id,
-                reqKills: 3,
-                name: 'M240',
-                keyStr: '[6]',
-                isUnlocked: level0StreakCount >= 3 || level0MgAmmo > 0,
-                isSelected: !!(currentWeapon && currentWeapon.id === WEAPONS.MACHINE_GUN.id),
-                ammoText: level0MgAmmo > 0 ? `${level0MgAmmo}` : (level0StreakCount >= 3 ? '30' : '0')
-            },
-            {
-                num: 2,
-                id: WEAPONS.UAV.id,
-                reqKills: 5,
-                name: 'UAV',
-                keyStr: '[7]',
-                isUnlocked: level0StreakCount >= 5 || level0UavAmmo > 0,
-                isSelected: !!(currentWeapon && currentWeapon.id === WEAPONS.UAV.id),
-                ammoText: level0UavAmmo > 0 ? `${level0UavAmmo}x` : (level0StreakCount >= 5 ? '5x' : '0x')
-            },
-            {
-                num: 3,
-                id: 'BLINDZONE',
-                reqKills: 7,
-                name: isEn ? 'BLIND' : '盲区',
-                keyStr: '[8]',
-                isUnlocked: level0StreakCount >= 7 || level0InfiniteBlindTimer > 0,
-                isSelected: level0InfiniteBlindTimer > 0,
-                ammoText: level0InfiniteBlindTimer > 0 ? `${(level0InfiniteBlindTimer/60).toFixed(0)}s` : '7s'
+function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
+    // 实验分流：L7/L8 用照片/SVG 图标，其他关卡用原版 fillRect 画法
+    const lvl = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+    if (lvl !== 'level7_lab' && lvl !== 'level8_test') {
+        drawWeaponSilhouetteOriginal(ctx, weaponId, x, y, w, h, color, isSelected);
+        return;
+    }
+    ctx.save();
+    // 实验：id 1/2/4/5 用真实照片剪影（白色形状 + 染色），其他武器仍用 SVG
+    if (WEAPON_PHOTO[weaponId]) {
+        const img = getWeaponPhoto(weaponId);
+        if (img.complete && img.naturalWidth > 0) {
+            // 按原图比例适配（440x166 = 2.65:1），不拉伸，居中
+            const imgRatio = img.naturalWidth / img.naturalHeight;
+            const boxRatio = w / h;
+            let dw, dh, dx, dy;
+            if (imgRatio > boxRatio) {
+                dw = w; dh = w / imgRatio;
+                dx = x; dy = y + (h - dh) / 2;
+            } else {
+                dh = h; dw = h * imgRatio;
+                dx = x + (w - dw) / 2; dy = y;
             }
-        ];
+            // 剪影是白色的，用 source-in 染成武器颜色
+            const off = document.createElement('canvas');
+            off.width = Math.round(dw); off.height = Math.round(dh);
+            const octx = off.getContext('2d');
+            octx.drawImage(img, 0, 0, off.width, off.height);
+            octx.globalCompositeOperation = 'source-in';
+            octx.fillStyle = color;
+            octx.fillRect(0, 0, off.width, off.height);
+            ctx.drawImage(off, dx, dy);
+        }
+        ctx.restore();
+        return;
+    }
+    const img = getWeaponSvgImage(weaponId, color, isSelected);
+    // 图片首次加载是异步的，未加载完时本帧跳过，下帧即可显示
+    if (img && img.complete && img.naturalWidth > 0) {
+        ctx.drawImage(img, x, y, w, h);
+    }
+    ctx.restore();
+}
 
-        ksRewards.forEach((r, idx) => {
-            let x = ksStartX + idx * (ksBoxSize + ksGap);
+// 实验：L7/L8 换弹圆形进度条（2026-11-06 v11）：准星周围的黄色圆环，顺时针填充
+function drawReloadProgress() {
+    if (!__l78Reloading) return;
+    const lvl = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
+    if (lvl !== 'level7_lab' && lvl !== 'level8_test') return;
+    const progress = Math.min(1, __l78ReloadTimer / L78_RELOAD_FRAMES);
+    const cx = mouse.x, cy = mouse.y, r = 18;
+    ctx.save();
+    // 背景淡色完整圆环
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255, 215, 0, 0.2)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    // 前景黄色进度弧（从顶部开始顺时针）
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+}
+
+function drawWeaponIcons() {
+    const lvl = getCurrentLevelId();
+    const isL78 = (lvl === 'level7_lab' || lvl === 'level8_test');
+    if (!isL78) {
+        // 原版 46x46 武器栏（L1-L6 / L0 地狱关，含连杀奖励）
+        const boxSize = 46;
+        const gap = 10;
+        const startX = 25;
+        const startY = height - 62;
+        // 2026-11-02 修复：键位标签错位——显式设置文本对齐，防止继承残留的 center/middle
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+
+        const isLevel0 = (getCurrentLevelId() === 'level0_test');
+
+        const normalWeapons = isLevel0
+            ? [WEAPONS.TRIPLE_SHOTGUN, WEAPONS.RUNE_SCYTHE, WEAPONS.LAVA_CIRCLE, WEAPONS.SOUL_SIPHON]
+            : [WEAPONS.RIFLE, WEAPONS.PISTOL, WEAPONS.SMG, WEAPONS.SNIPER, WEAPONS.GRENADE];
+
+        normalWeapons.forEach((w, index) => {
+            let x = startX + index * (boxSize + gap);
             let y = startY;
+            let isUnlocked = unlockedWeapons.includes(w.id);
+            let isSelected = !!(currentWeapon && w.id === currentWeapon.id);
 
             ctx.save();
-            if (!r.isUnlocked) {
-                // 1. 未解锁状态
-                ctx.fillStyle = 'rgba(10, 14, 20, 0.85)';
-                ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+            if (!isUnlocked) {
+                ctx.fillStyle = isLevel0 ? 'rgba(22, 10, 12, 0.65)' : 'rgba(12, 18, 15, 0.65)';
+                ctx.strokeStyle = isLevel0 ? 'rgba(100, 60, 60, 0.3)' : 'rgba(80, 100, 90, 0.3)';
                 ctx.lineWidth = 1;
-                ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
-                ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+                ctx.fillRect(x, y, boxSize, boxSize);
+                ctx.strokeRect(x, y, boxSize, boxSize);
 
-                if (r.id === 'BLINDZONE') {
-                    ctx.beginPath();
-                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 8, 0, Math.PI * 2);
-                    ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
-                    ctx.stroke();
-                } else {
-                    drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, 'rgba(100, 116, 139, 0.4)', false);
-                }
+                drawWeaponSilhouette(ctx, w.id, x, y, boxSize, boxSize, isLevel0 ? 'rgba(100, 60, 60, 0.35)' : 'rgba(80, 100, 90, 0.35)', false);
 
-                ctx.fillStyle = '#64748B';
+                // 绘制独立小标牌，绝不遮挡武器图标
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.70)';
+                ctx.fillRect(x + 2, y + 2, 17, 10);
+                ctx.strokeStyle = 'rgba(100, 60, 60, 0.4)';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(x + 2, y + 2, 17, 10);
+
+                ctx.fillStyle = isLevel0 ? 'rgba(160, 90, 90, 0.6)' : 'rgba(100, 130, 110, 0.6)';
                 ctx.font = 'bold 9px monospace';
-                ctx.fillText(isEn ? `${r.reqKills} K` : `${r.reqKills} 杀`, x + 3, y + 11);
-
-                ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
-                ctx.font = 'bold 9px monospace';
-                ctx.fillText(r.keyStr, x + ksBoxSize - (r.keyStr.length * 5 + 3), y + ksBoxSize - 4);
-
-            } else if (!r.isSelected) {
-                // 2. 解锁但未选中状态 -> 灰色，显示连杀数和按键提示
-                ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-                ctx.strokeStyle = '#94A3B8';
-                ctx.lineWidth = 1.5;
-                ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
-                ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
-
-                const grayColor = '#94A3B8';
-
-                if (r.id === 'BLINDZONE') {
-                    ctx.beginPath();
-                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 9, 0, Math.PI * 2);
-                    ctx.strokeStyle = grayColor;
-                    ctx.lineWidth = 1.5;
-                    ctx.stroke();
-                    ctx.beginPath();
-                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 3, 0, Math.PI * 2);
-                    ctx.fillStyle = grayColor;
-                    ctx.fill();
-                } else {
-                    drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, grayColor, false);
-                }
-
-                ctx.fillStyle = grayColor;
-                ctx.font = 'bold 9px monospace';
-                ctx.fillText(isEn ? `${r.reqKills} K` : `${r.reqKills} 杀`, x + 3, y + 11);
-
-                ctx.fillStyle = grayColor;
-                ctx.font = 'bold 9px monospace';
-                ctx.fillText(r.keyStr, x + ksBoxSize - (r.keyStr.length * 5 + 3), y + ksBoxSize - 4);
+                ctx.fillText(isLevel0 ? `[${index + 1}]` : `[${w.id}]`, x + 3.5, y + 9.5);
 
             } else {
-                // 3. 选中状态 -> 橙色高亮，显示名称和弹药数/剩余数
-                ctx.fillStyle = 'rgba(255, 153, 0, 0.2)';
-                ctx.strokeStyle = '#FF9900';
-                ctx.lineWidth = 2.2;
-                ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
-                ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+                ctx.fillStyle = isSelected
+                    ? (isLevel0 ? 'rgba(255, 51, 68, 0.30)' : 'rgba(0, 255, 102, 0.28)')
+                    : (isLevel0 ? 'rgba(22, 6, 8, 0.88)' : 'rgba(4, 16, 10, 0.88)');
+                ctx.strokeStyle = isSelected
+                    ? (isLevel0 ? '#FF2200' : '#FFFF00')
+                    : (isLevel0 ? 'rgba(255, 51, 68, 0.50)' : 'rgba(0, 255, 102, 0.45)');
+                ctx.lineWidth = isSelected ? 2 : 1.2;
+                ctx.fillRect(x, y, boxSize, boxSize);
+                ctx.strokeRect(x, y, boxSize, boxSize);
 
-                const orangeColor = '#FF9900';
+                const iconColor = isSelected ? (isLevel0 ? '#FF2200' : '#FFFF00') : (isLevel0 ? '#FF3344' : '#00FF66');
+                drawWeaponSilhouette(ctx, w.id, x, y, boxSize, boxSize, iconColor, isSelected);
 
-                if (r.id === 'BLINDZONE') {
-                    ctx.beginPath();
-                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 9, 0, Math.PI * 2);
-                    ctx.strokeStyle = orangeColor;
-                    ctx.lineWidth = 2.0;
-                    ctx.stroke();
-                    ctx.beginPath();
-                    ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 3, 0, Math.PI * 2);
-                    ctx.fillStyle = orangeColor;
-                    ctx.fill();
-                } else {
-                    drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, orangeColor, true);
+                // 绘制独立小标牌，绝不遮挡武器图标
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+                ctx.fillRect(x + 2, y + 2, 17, 10);
+                ctx.strokeStyle = isSelected ? (isLevel0 ? '#FF3344' : '#00FF66') : 'rgba(255, 255, 255, 0.15)';
+                ctx.lineWidth = 0.8;
+                ctx.strokeRect(x + 2, y + 2, 17, 10);
+
+                ctx.fillStyle = isSelected ? (isLevel0 ? '#FF5566' : '#00FF66') : '#E2E8F0';
+                ctx.font = 'bold 9px monospace';
+                ctx.fillText(isLevel0 ? `[${index + 1}]` : `[${w.id}]`, x + 3.5, y + 9.5);
+            }
+
+            ctx.restore();
+        });
+
+        const currentLevelId = getCurrentLevelId();
+        if (isKillstreakSupportedLevel(currentLevelId) && !isLevel0) {
+            const ksBoxSize = 46;
+            const ksGap = 10;
+            const ksStartX = width - 180;
+
+            const isEn = (window.__gameLang === 'en');
+            ctx.save();
+            ctx.fillStyle = '#FF9900';
+            ctx.font = 'bold 11px monospace';
+            ctx.fillText(isEn ? `⚡ STREAK [${level0StreakCount}]` : `⚡ 连杀奖励 [当前: ${level0StreakCount}]`, ksStartX, startY - 8);
+            ctx.restore();
+
+            const ksRewards = [
+                {
+                    num: 1,
+                    id: WEAPONS.MACHINE_GUN.id,
+                    reqKills: 3,
+                    name: 'M240',
+                    keyStr: '[6]',
+                    isUnlocked: level0StreakCount >= 3 || level0MgAmmo > 0,
+                    isSelected: !!(currentWeapon && currentWeapon.id === WEAPONS.MACHINE_GUN.id),
+                    ammoText: level0MgAmmo > 0 ? `${level0MgAmmo}` : (level0StreakCount >= 3 ? '30' : '0')
+                },
+                {
+                    num: 2,
+                    id: WEAPONS.UAV.id,
+                    reqKills: 5,
+                    name: 'UAV',
+                    keyStr: '[7]',
+                    isUnlocked: level0StreakCount >= 5 || level0UavAmmo > 0,
+                    isSelected: !!(currentWeapon && currentWeapon.id === WEAPONS.UAV.id),
+                    ammoText: level0UavAmmo > 0 ? `${level0UavAmmo}x` : (level0StreakCount >= 5 ? '5x' : '0x')
+                },
+                {
+                    num: 3,
+                    id: 'BLINDZONE',
+                    reqKills: 7,
+                    name: isEn ? 'BLIND' : '盲区',
+                    keyStr: '[8]',
+                    isUnlocked: level0StreakCount >= 7 || level0InfiniteBlindTimer > 0,
+                    isSelected: level0InfiniteBlindTimer > 0,
+                    ammoText: level0InfiniteBlindTimer > 0 ? `${(level0InfiniteBlindTimer/60).toFixed(0)}s` : '7s'
                 }
+            ];
 
-                ctx.fillStyle = orangeColor;
-                ctx.font = 'bold 9px monospace';
-                ctx.fillText(r.name, x + 3, y + 11);
+            ksRewards.forEach((r, idx) => {
+                let x = ksStartX + idx * (ksBoxSize + ksGap);
+                let y = startY;
 
-                ctx.fillStyle = orangeColor;
+                ctx.save();
+                if (!r.isUnlocked) {
+                    // 1. 未解锁状态
+                    ctx.fillStyle = 'rgba(10, 14, 20, 0.85)';
+                    ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                    ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                    if (r.id === 'BLINDZONE') {
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 8, 0, Math.PI * 2);
+                        ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+                        ctx.stroke();
+                    } else {
+                        drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, 'rgba(100, 116, 139, 0.4)', false);
+                    }
+
+                    ctx.fillStyle = '#64748B';
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(isEn ? `${r.reqKills} K` : `${r.reqKills} 杀`, x + 3, y + 11);
+
+                    ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(r.keyStr, x + ksBoxSize - (r.keyStr.length * 5 + 3), y + ksBoxSize - 4);
+
+                } else if (!r.isSelected) {
+                    // 2. 解锁但未选中状态 -> 灰色，显示连杀数和按键提示
+                    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+                    ctx.strokeStyle = '#94A3B8';
+                    ctx.lineWidth = 1.5;
+                    ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                    ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                    const grayColor = '#94A3B8';
+
+                    if (r.id === 'BLINDZONE') {
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 9, 0, Math.PI * 2);
+                        ctx.strokeStyle = grayColor;
+                        ctx.lineWidth = 1.5;
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 3, 0, Math.PI * 2);
+                        ctx.fillStyle = grayColor;
+                        ctx.fill();
+                    } else {
+                        drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, grayColor, false);
+                    }
+
+                    ctx.fillStyle = grayColor;
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(isEn ? `${r.reqKills} K` : `${r.reqKills} 杀`, x + 3, y + 11);
+
+                    ctx.fillStyle = grayColor;
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(r.keyStr, x + ksBoxSize - (r.keyStr.length * 5 + 3), y + ksBoxSize - 4);
+
+                } else {
+                    // 3. 选中状态 -> 橙色高亮，显示名称和弹药数/剩余数
+                    ctx.fillStyle = 'rgba(255, 153, 0, 0.2)';
+                    ctx.strokeStyle = '#FF9900';
+                    ctx.lineWidth = 2.2;
+                    ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                    ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                    const orangeColor = '#FF9900';
+
+                    if (r.id === 'BLINDZONE') {
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 9, 0, Math.PI * 2);
+                        ctx.strokeStyle = orangeColor;
+                        ctx.lineWidth = 2.0;
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 3, 0, Math.PI * 2);
+                        ctx.fillStyle = orangeColor;
+                        ctx.fill();
+                    } else {
+                        drawWeaponSilhouette(ctx, r.id, x, y, ksBoxSize, ksBoxSize, orangeColor, true);
+                    }
+
+                    ctx.fillStyle = orangeColor;
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(r.name, x + 3, y + 11);
+
+                    ctx.fillStyle = orangeColor;
+                    ctx.font = 'bold 9px monospace';
+                    const label = r.ammoText;
+                    ctx.fillText(label, x + ksBoxSize - (label.length * 5 + 3), y + ksBoxSize - 4);
+                }
+                ctx.restore();
+            });
+        }
+    } else {
+        // L7/L8 新版 110x45 武器栏（照片图标）
+        // 实验：武器选择框改成展示框缩小版（等比缩小：220x90 -> 110x45）
+        const boxW = 110, boxH = 45;
+        const gap = 8;
+        const startX = 25;
+        const startY = height - boxH - 12;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+
+        const isLevel0 = (getCurrentLevelId() === 'level0_test');
+
+        const normalWeapons = isLevel0
+            ? [WEAPONS.TRIPLE_SHOTGUN, WEAPONS.RUNE_SCYTHE, WEAPONS.LAVA_CIRCLE, WEAPONS.SOUL_SIPHON]
+            : [WEAPONS.RIFLE, WEAPONS.PISTOL, WEAPONS.SMG, WEAPONS.SNIPER, WEAPONS.GRENADE];
+
+        normalWeapons.forEach((w, index) => {
+            let x = startX + index * (boxW + gap);
+            let y = startY;
+            let isUnlocked = unlockedWeapons.includes(w.id);
+            let isSelected = !!(currentWeapon && w.id === currentWeapon.id);
+
+            ctx.save();
+            // 实验 v10：弹药耗尽检测（弹匣 0 且总弹药 0），整个格子变红
+            const _ammoEarly = isUnlocked ? __l78AmmoGet(w.id) : null;
+            const isAmmoEmpty = !!(_ammoEarly && _ammoEarly.mag === 0 && _ammoEarly.reserve === 0);
+            const cellColor = isAmmoEmpty ? '#FF3344' : (isSelected ? '#38bdf8' : '#10b981');
+            // 背景框
+            ctx.fillStyle = isAmmoEmpty ? 'rgba(255, 51, 68, 0.15)' : (isSelected ? 'rgba(56, 189, 248, 0.15)' : 'rgba(2, 6, 4, 0.85)');
+            ctx.fillRect(x, y, boxW, boxH);
+            ctx.strokeStyle = isAmmoEmpty ? '#FF3344' : (isSelected ? '#38bdf8' : (isUnlocked ? '#10b981' : '#333'));
+            ctx.lineWidth = isSelected ? 2 : 1;
+            ctx.strokeRect(x, y, boxW, boxH);
+
+            if (isUnlocked) {
+                // 武器名（顶部）
+                ctx.fillStyle = cellColor;
                 ctx.font = 'bold 9px monospace';
-                const label = r.ammoText;
-                ctx.fillText(label, x + ksBoxSize - (label.length * 5 + 3), y + ksBoxSize - 4);
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                // 实验 v5：L7/L8 的 3 号位叫霰弹枪（只改显示，不改 WEAPONS 表，其他关卡还是冲锋枪）
+                // 2026-11-07：切中文后全部枪名走中文（之前只有 3 号位走了语言分支，其余写死 nameEn）；
+                // 5 号位中文用“手雷”，与右上武器列表（translations.ts）一致
+                const wname = (window.__gameLang === 'zh')
+                    ? (w.id === 3 ? '霰弹枪' : w.id === 5 ? '手雷' : (w.name || w.nameEn || '').toUpperCase())
+                    : (w.id === 3 ? 'SHOTGUN' : (w.nameEn || w.name || '').toUpperCase());
+                ctx.fillText(wname, x + 5, y + 3);
+                // 键位（右上角，实验 v10：改成 [1] [2] 格式，避免和弹药数混淆）
+                ctx.fillStyle = cellColor;
+                ctx.font = '9px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText('[' + (index + 1) + ']', x + boxW - 5, y + 3);
+                // 武器大图（居中，90x24，底部留空给弹药数）
+                // 实验 v5：3 号位是 GEN-12 霰弹枪照片，不再留空
+                {
+                    const iw = 90, ih = 24;
+                    const ix = x + (boxW - iw) / 2, iy = y + 12;
+                    const wcolor = cellColor;
+                    drawWeaponSilhouette(ctx, w.id, ix, iy, iw, ih, wcolor, isSelected);
+                }
+                // 实验 v4：步枪快慢机标识（武器名下方小字）
+                if (w.id === 1) {
+                    ctx.fillStyle = cellColor;
+                    ctx.font = 'bold 8px monospace';
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'top';
+                    ctx.fillText(window.__l7RifleAutoMode ? 'AUTO' : 'SEMI', x + 5, y + 13);
+                }
+                // 实验：弹药数拆开写——弹匣余量左下角，总弹药数右下角（无 /，颜色跟随图标）
+                const _ammo = __l78AmmoGet(w.id);
+                ctx.fillStyle = cellColor;
+                ctx.font = '9px monospace';
+                ctx.textBaseline = 'alphabetic';
+                ctx.textAlign = 'left';
+                ctx.fillText(String(_ammo.mag), x + 5, y + boxH - 4);
+                ctx.textAlign = 'right';
+                ctx.fillText(String(_ammo.reserve), x + boxW - 5, y + boxH - 4);
+            } else {
+                // 未解锁：锁图标
+                ctx.fillStyle = '#333';
+                ctx.font = 'bold 16px monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('?', x + boxW / 2, y + boxH / 2);
             }
             ctx.restore();
         });
+
+        // 连杀奖励（右下角，与新版武器栏不冲突）
+        const currentLevelId = getCurrentLevelId();
+        if (isKillstreakSupportedLevel(currentLevelId) && !isLevel0) {
+            const ksBoxSize = 46;
+            const ksGap = 10;
+            const ksStartX = width - 180;
+
+            const isEn = (window.__gameLang === 'en');
+            ctx.save();
+            ctx.fillStyle = '#10b981';
+            ctx.font = 'bold 11px monospace';
+            ctx.fillText(isEn ? `⚡ STREAK [${level0StreakCount}]` : `⚡ 连杀奖励 [当前: ${level0StreakCount}]`, ksStartX, startY - 8);
+            ctx.restore();
+
+            const ksRewards = [
+                {
+                    num: 1,
+                    id: WEAPONS.MACHINE_GUN.id,
+                    reqKills: 3,
+                    name: 'M240',
+                    keyStr: '[6]',
+                    isUnlocked: level0StreakCount >= 3 || level0MgAmmo > 0,
+                    isSelected: !!(currentWeapon && currentWeapon.id === WEAPONS.MACHINE_GUN.id),
+                    ammoText: level0MgAmmo > 0 ? `${level0MgAmmo}` : (level0StreakCount >= 3 ? '30' : '0')
+                },
+                {
+                    num: 2,
+                    id: WEAPONS.UAV.id,
+                    reqKills: 5,
+                    name: 'UAV',
+                    keyStr: '[7]',
+                    isUnlocked: level0StreakCount >= 5 || level0UavAmmo > 0,
+                    isSelected: !!(currentWeapon && currentWeapon.id === WEAPONS.UAV.id),
+                    ammoText: level0UavAmmo > 0 ? `${level0UavAmmo}x` : (level0StreakCount >= 5 ? '5x' : '0x')
+                },
+                {
+                    num: 3,
+                    id: 'BLINDZONE',
+                    reqKills: 7,
+                    name: isEn ? 'BLIND' : '盲区',
+                    keyStr: '[8]',
+                    isUnlocked: level0StreakCount >= 7 || level0InfiniteBlindTimer > 0,
+                    isSelected: level0InfiniteBlindTimer > 0,
+                    ammoText: level0InfiniteBlindTimer > 0 ? `${(level0InfiniteBlindTimer/60).toFixed(0)}s` : '7s'
+                }
+            ];
+
+            ksRewards.forEach((r, idx) => {
+                let x = ksStartX + idx * (ksBoxSize + ksGap);
+                let y = startY;
+
+                ctx.save();
+                if (!r.isUnlocked) {
+                    // 1. 未解锁状态
+                    ctx.fillStyle = 'rgba(10, 14, 20, 0.85)';
+                    ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                    ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                    if (r.id === 'BLINDZONE') {
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 8, 0, Math.PI * 2);
+                        ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+                        ctx.stroke();
+                    } else {
+                        drawWeaponSilhouetteOriginal(ctx, r.id, x, y, ksBoxSize, ksBoxSize, 'rgba(100, 116, 139, 0.4)', false);
+                    }
+
+                    ctx.fillStyle = '#64748B';
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(isEn ? `${r.reqKills} K` : `${r.reqKills} 杀`, x + 3, y + 11);
+
+                    ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(r.keyStr, x + ksBoxSize - (r.keyStr.length * 5 + 3), y + ksBoxSize - 4);
+
+                } else if (!r.isSelected) {
+                    // 2. 解锁但未选中状态 -> 灰色，显示连杀数和按键提示
+                    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+                    ctx.strokeStyle = '#94A3B8';
+                    ctx.lineWidth = 1.5;
+                    ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                    ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                    const grayColor = '#94A3B8';
+
+                    if (r.id === 'BLINDZONE') {
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 9, 0, Math.PI * 2);
+                        ctx.strokeStyle = grayColor;
+                        ctx.lineWidth = 1.5;
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 3, 0, Math.PI * 2);
+                        ctx.fillStyle = grayColor;
+                        ctx.fill();
+                    } else {
+                        drawWeaponSilhouetteOriginal(ctx, r.id, x, y, ksBoxSize, ksBoxSize, grayColor, false);
+                    }
+
+                    ctx.fillStyle = grayColor;
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(isEn ? `${r.reqKills} K` : `${r.reqKills} 杀`, x + 3, y + 11);
+
+                    ctx.fillStyle = grayColor;
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(r.keyStr, x + ksBoxSize - (r.keyStr.length * 5 + 3), y + ksBoxSize - 4);
+
+                } else {
+                    // 3. 选中状态 -> 屏幕蓝高亮，显示名称和弹药数/剩余数
+                    ctx.fillStyle = 'rgba(56, 189, 248, 0.2)';
+                    ctx.strokeStyle = '#38bdf8';
+                    ctx.lineWidth = 2.2;
+                    ctx.fillRect(x, y, ksBoxSize, ksBoxSize);
+                    ctx.strokeRect(x, y, ksBoxSize, ksBoxSize);
+
+                    const orangeColor = '#38bdf8';
+
+                    if (r.id === 'BLINDZONE') {
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 9, 0, Math.PI * 2);
+                        ctx.strokeStyle = orangeColor;
+                        ctx.lineWidth = 2.0;
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.arc(x + ksBoxSize/2, y + ksBoxSize/2, 3, 0, Math.PI * 2);
+                        ctx.fillStyle = orangeColor;
+                        ctx.fill();
+                    } else {
+                        drawWeaponSilhouetteOriginal(ctx, r.id, x, y, ksBoxSize, ksBoxSize, orangeColor, true);
+                    }
+
+                    ctx.fillStyle = orangeColor;
+                    ctx.font = 'bold 9px monospace';
+                    ctx.fillText(r.name, x + 3, y + 11);
+
+                    ctx.fillStyle = orangeColor;
+                    ctx.font = 'bold 9px monospace';
+                    const label = r.ammoText;
+                    ctx.fillText(label, x + ksBoxSize - (label.length * 5 + 3), y + ksBoxSize - 4);
+                }
+                ctx.restore();
+            });
+        }
     }
 }
 
+// 实验：大型武器展示框（右下角，220x90），显示当前武器大图
 function drawInfernalWatcher(cam) {
     if (!cam || typeof cam !== 'object') return;
     if (typeof cam.x !== 'number' || typeof cam.y !== 'number' || isNaN(cam.x) || isNaN(cam.y)) return;
@@ -18864,7 +23412,7 @@ function drawInfernalWatcher(cam) {
     if (cam.currentAngle === undefined || isNaN(cam.currentAngle)) {
         cam.currentAngle = baseAng;
     }
-    const range = (typeof cam.fovRange === 'number' && !isNaN(cam.fovRange) && cam.fovRange > 0) ? cam.fovRange : 450;
+    const range = (typeof cam.fovRange === 'number' && !isNaN(cam.fovRange) && cam.fovRange > 0) ? cam.fovRange : 520;
     const halfAngle = (typeof cam.fovAngle === 'number' && !isNaN(cam.fovAngle) && cam.fovAngle > 0) ? (cam.fovAngle / 2) : 0.42;
     const ang = (typeof cam.currentAngle === 'number' && !isNaN(cam.currentAngle)) ? cam.currentAngle : baseAng;
     const isDetecting = !!cam.detecting;
@@ -18879,6 +23427,10 @@ function drawInfernalWatcher(cam) {
     // =========================================================
     ctx.save();
     const timeNow = Date.now() * 0.001;
+    // 2026-11-07：视锥顶点移到眼睛处（魂灯烈焰核心前方 18px、石像鬼双眼中点 7px、魔眼瞳孔 3.5px）
+    // Level 0 地狱装置（魂灯/石像鬼/魔眼）视野不受岩石等障碍物遮挡
+    const eyeOff = type === 'soul_lantern' ? 18 : type === 'gargoyle_sentinel' ? 7 : 3.5;
+    const ex = Math.cos(ang) * eyeOff, ey = Math.sin(ang) * eyeOff;
     if (type === 'soul_lantern') {
         ctx.fillStyle = isDetecting ? 'rgba(168, 85, 247, 0.48)' : 'rgba(56, 189, 248, 0.25)';
         ctx.strokeStyle = isDetecting ? 'rgba(216, 180, 254, 0.9)' : 'rgba(56, 189, 248, 0.7)';
@@ -18891,26 +23443,27 @@ function drawInfernalWatcher(cam) {
     }
 
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.arc(0, 0, range, ang - halfAngle, ang + halfAngle);
+    ctx.moveTo(ex, ey);
+    ctx.arc(ex, ey, range, ang - halfAngle, ang + halfAngle);
     ctx.closePath();
     ctx.fill();
 
     ctx.lineWidth = 2.0;
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(ang - halfAngle) * range, Math.sin(ang - halfAngle) * range);
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(ang + halfAngle) * range, Math.sin(ang + halfAngle) * range);
-    ctx.arc(0, 0, range, ang - halfAngle, ang + halfAngle);
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex + Math.cos(ang - halfAngle) * range, ey + Math.sin(ang - halfAngle) * range);
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex + Math.cos(ang + halfAngle) * range, ey + Math.sin(ang + halfAngle) * range);
+    ctx.arc(ex, ey, range, ang - halfAngle, ang + halfAngle);
     ctx.stroke();
 
-    // 动态符文矩阵弧线
+    // 动态符文矩阵弧线（2026-11-07：起点抖动钳制在扇形边内，之前摆到负向时会越过扇形边约 20px）
     ctx.lineWidth = 1.2;
     ctx.strokeStyle = isDetecting ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.35)';
     for (let rFactor of [0.35, 0.65, 0.88]) {
+        const arcStart = Math.max(ang - halfAngle, ang - halfAngle + Math.sin(timeNow + rFactor) * 0.05);
         ctx.beginPath();
-        ctx.arc(0, 0, range * rFactor, ang - halfAngle + Math.sin(timeNow + rFactor) * 0.05, ang + halfAngle);
+        ctx.arc(ex, ey, range * rFactor, arcStart, ang + halfAngle);
         ctx.stroke();
     }
     ctx.restore();
@@ -19133,45 +23686,60 @@ function drawCamera(cam) {
     ctx.save();
     try {
         ctx.translate(cam.x, cam.y);
-    
+
+    // 2026-11-07：视锥顶点移到镜头处（镜片中心在前方 16.5px）；扇形按遮挡裁剪（之前是纯圆扇形，弧线会穿墙、横贯其他扇形）
+    const _camA = cam.currentAngle;
+    const _ax = Math.cos(_camA) * 16.5, _ay = Math.sin(_camA) * 16.5;
+    const _poly = (typeof getVisionConePolygon === 'function')
+        ? getVisionConePolygon(cam.x + _ax, cam.y + _ay, _camA, 0.9, 320)
+        : null;
+    ctx.save();
+    if (_poly && _poly.length >= 3) {
+        ctx.beginPath();
+        ctx.moveTo(_poly[0].x - cam.x, _poly[0].y - cam.y);
+        for (let _pi = 1; _pi < _poly.length; _pi++) ctx.lineTo(_poly[_pi].x - cam.x, _poly[_pi].y - cam.y);
+        ctx.closePath();
+        ctx.clip();
+    }
     // 1. 监控扇区视觉：显著加强的半透明锥形光，保留高对比度原色且十分凸显 (Highly visible scan cone)
     ctx.fillStyle = cam.detecting ? 'rgba(255, 51, 51, 0.32)' : 'rgba(0, 255, 102, 0.16)';
-    ctx.beginPath(); 
-    ctx.moveTo(0, 0);
-    ctx.arc(0, 0, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
-    ctx.closePath(); 
+    ctx.beginPath();
+    ctx.moveTo(_ax, _ay);
+    ctx.arc(_ax, _ay, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.closePath();
     ctx.fill();
 
     // 绘制清晰的扇区边缘线与轮廓弧线，使视野边界分外凸显
     ctx.strokeStyle = cam.detecting ? 'rgba(255, 51, 51, 0.75)' : 'rgba(0, 255, 102, 0.45)';
     ctx.lineWidth = 1.5;
-    
+
     // 左边界
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(cam.currentAngle - 0.45) * 320, Math.sin(cam.currentAngle - 0.45) * 320);
+    ctx.moveTo(_ax, _ay);
+    ctx.lineTo(_ax + Math.cos(cam.currentAngle - 0.45) * 320, _ay + Math.sin(cam.currentAngle - 0.45) * 320);
     ctx.stroke();
-    
+
     // 右边界
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(cam.currentAngle + 0.45) * 320, Math.sin(cam.currentAngle + 0.45) * 320);
+    ctx.moveTo(_ax, _ay);
+    ctx.lineTo(_ax + Math.cos(cam.currentAngle + 0.45) * 320, _ay + Math.sin(cam.currentAngle + 0.45) * 320);
     ctx.stroke();
-    
+
     // 最外圈扇区弧线
     ctx.beginPath();
-    ctx.arc(0, 0, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.arc(_ax, _ay, 320, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
     ctx.stroke();
 
     // 扫描扇区中间的同心雷达辅助线
     ctx.strokeStyle = cam.detecting ? 'rgba(255, 51, 51, 0.45)' : 'rgba(0, 255, 102, 0.3)';
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.arc(0, 0, 160, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.arc(_ax, _ay, 160, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(0, 0, 260, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
+    ctx.arc(_ax, _ay, 260, cam.currentAngle - 0.45, cam.currentAngle + 0.45);
     ctx.stroke();
+    ctx.restore();
 
     // 2. 墙体壁挂支架结构 (Camera Mounting Bracket - opposite to camera angle for realism)
     const oppositeAngle = cam.currentAngle + Math.PI;
@@ -19266,6 +23834,29 @@ function drawDropItems() {
             ctx.fillStyle = '#00CCFF'; ctx.shadowColor = '#00CCFF';
             ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.fill();
             ctx.fillStyle = '#000'; ctx.fillRect(-4, -4, 8, 8);
+        } else if (item.type === 'ammo') {
+            // 实验 v6：L7/L8 弹药包——28x28 + 子弹图标（无文字）+ 黄色光晕
+            ctx.fillStyle = '#FFCC00'; ctx.shadowColor = '#FFCC00';
+            ctx.shadowBlur = 10;
+            ctx.fillRect(-14, -14, 28, 28);
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+            ctx.strokeRect(-14, -14, 28, 28);
+            // 子弹图标：三颗细长子弹并排（左、中、右），每颗 4px 宽、间隔 2px
+            const _bx = [-6, 0, 6];
+            for (const _cx of _bx) {
+                // 弹头（铜色三角形，顶部尖）
+                ctx.fillStyle = '#B87333';
+                ctx.beginPath();
+                ctx.moveTo(_cx - 2, -4); ctx.lineTo(_cx + 2, -4); ctx.lineTo(_cx, -9);
+                ctx.closePath(); ctx.fill();
+                // 弹壳（黄色细长矩形 4x14）
+                ctx.fillStyle = '#FFD700';
+                ctx.fillRect(_cx - 2, -4, 4, 14);
+                // 底缘（底部横线）
+                ctx.fillStyle = '#B8860B';
+                ctx.fillRect(_cx - 2, 10, 4, 2);
+            }
         } else if (item.type === 'weapon') {
             const wp = item.weaponData || WEAPONS.RIFLE;
             ctx.fillStyle = 'rgba(10, 20, 15, 0.9)';
@@ -20240,6 +24831,8 @@ function drawHoundHead(ctx, hx, hy, baseAng, walkCycle, isPouncing, hitFlash, is
     }
 }
 
+// 实验优化：把 hex 颜色提亮 amt（0-255），用于渐变高光 (2026-11-06)
+
 function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendingDamage, alpha = 1.0, isObserver = false, enemyShield = 0, maxShield = 80, alert = false, flashTimer = 0, isDemon = false, isJammer = false) {
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -20247,11 +24840,13 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
 
     const isInBlind = !isPlayer && inBlindZone(x, y);
 
+    const isL78Level = (typeof getCurrentLevelId === 'function') && (getCurrentLevelId() === 'level7_lab' || getCurrentLevelId() === 'level8_test');
+
     // ------------------- 盲区高亮紫色战术轮廓 (Purple Outline in Blind Zone) -------------------
     if (isInBlind) {
         ctx.save();
-        ctx.strokeStyle = '#c084fc';
-        ctx.shadowColor = '#a855f7';
+        ctx.strokeStyle = isL78Level ? '#38bdf8' : '#c084fc';
+        ctx.shadowColor = isL78Level ? '#38bdf8' : '#a855f7';
         ctx.shadowBlur = 20;
         ctx.lineWidth = 3.5;
         ctx.beginPath();
@@ -20262,7 +24857,7 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
         }
         ctx.stroke();
 
-        ctx.strokeStyle = '#f3e8ff';
+        ctx.strokeStyle = isL78Level ? '#bae6fd' : '#f3e8ff';
         ctx.setLineDash([5, 4]);
         ctx.lineWidth = 1.5;
         ctx.beginPath();
@@ -20306,7 +24901,7 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
             ctx.fillText("🔥 DEMON 🔥", 0, -47);
         } else {
             ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; ctx.fillRect(-20, -36, 40, 5);
-            ctx.fillStyle = isPlayer ? ((getCurrentLevelId() === 'level0_test') ? '#FF3344' : '#00FF66') : (isInBlind ? '#FFFF00' : '#FF3344');
+            ctx.fillStyle = isPlayer ? ((getCurrentLevelId() === 'level0_test') ? '#FF3344' : '#00FF66') : (isInBlind ? (isL78Level ? '#38bdf8' : '#FFFF00') : '#FF3344');
             ctx.fillRect(-20, -36, (Math.max(0, hp) / maxHp) * 40, 5);
             
             if (enemyShield > 0) {
@@ -20478,11 +25073,24 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
     let gearColor2 = '#202326';         // 枪支机匣、枪托、战术靴底、墨镜镜框：哑光石墨灰 (Matte Graphite Gray)
     
     const isLvl0Player = isPlayer && (getCurrentLevelId() === 'level0_test');
+    const isL78Player = isPlayer && (getCurrentLevelId() === 'level7_lab' || getCurrentLevelId() === 'level8_test');
+    // L7 专属角色模型分支点 (2026-11-05)：player.modelVariant === 'special' 时画特殊模型
+    // 现在两个分支画一样的模型（占位），等特殊模型设计好后只改 'special' 分支里的颜色/形状，
+    // 不要改 isPlayer 判断本身，也不要在其他地方加模型分支。
+    const isL7SpecialModel = isPlayer && (getCurrentLevelId() === 'level7_lab') && (typeof player !== 'undefined' && player.modelVariant === 'special');
 
     if (isPlayer) {
-        mainColor = isLvl0Player ? '#FF3344' : '#00FF66';
+        mainColor = isLvl0Player ? '#FF3344' : (isL78Player ? '#10b981' : (isL7SpecialModel ? '#00FF66' : '#00FF66')); // L7/L8 玩家主色翡翠绿
+        if (isL78Player) {
+            // L7/L8 玩家身体/头盔 tint 成深翡翠绿（保持战术灰调，只偏色）
+            baseTacticalColor = '#0c2b21';
+            vestColor = '#0f3d2c';
+            plateColor = '#11503a';
+            gearColor = '#14663f';
+            gearColor2 = '#081f17';
+        }
     } else if (isInBlind) {
-        mainColor = '#FFFF00';
+        mainColor = isL78Level ? '#38bdf8' : '#FFFF00';
     } else if (isJammer) {
         mainColor = alert ? '#F43F5E' : '#C084FC';
         baseTacticalColor = '#1c102b';
@@ -20564,7 +25172,7 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
 
     // ------------------- 4. 技能与状态光环 -------------------
     if (isInBlind && hp > 0) {
-        ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = 2; ctx.shadowColor = '#FFFF00'; ctx.shadowBlur = 12;
+        ctx.strokeStyle = isL78Level ? '#38bdf8' : '#FFFF00'; ctx.lineWidth = 2; ctx.shadowColor = isL78Level ? '#38bdf8' : '#FFFF00'; ctx.shadowBlur = 12;
         ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.stroke();
         ctx.shadowBlur = 0;
     }
@@ -20844,7 +25452,7 @@ function drawAgent(x, y, angle, isPlayer, walkCycle, hitFlash, hp, maxHp, pendin
 
     // ------------------- 8. 文字标识 (不随视角旋转) -------------------
     if (isInBlind && hp > 0) {
-        ctx.fillStyle = '#FFFF00'; ctx.font = 'bold 10px monospace';
+        ctx.fillStyle = isL78Level ? '#38bdf8' : '#FFFF00'; ctx.font = 'bold 10px monospace';
         ctx.fillText("[IN BLIND ZONE]", x - 35, y - 46);
     } else if (!isPlayer && isJammer && hp > 0) {
         ctx.fillStyle = alert ? '#F43F5E' : '#C084FC'; ctx.font = 'bold 9px monospace';
@@ -21763,10 +26371,11 @@ function draw() {
     drawProps();
     drawTraps();
     drawBloodSacrificeSeals();
-    drawHellAltarSeals();
     // 3. 绘制普通墙体与遮挡建筑物
     obstacles.filter(o => o.type !== 'pool' && o.label !== 'SWIMMING POOL').forEach(drawObstacle);
     drawSecurityGates();
+    // 2026-11-07：血祭法阵必须浮在祭坛之上——之前画在墙体之前，黑曜石祭台（drawAbyssalAltar）会盖住法阵中心
+    drawHellAltarSeals();
     // 4. 顶层绘制车厢区域与道具文字标签，确保不被墙体遮挡
     drawZones();
     drawAllPropLabels();
@@ -21786,13 +26395,13 @@ function draw() {
                 ctx.fillStyle = 'rgba(4, 14, 9, 0.88)';
                 ctx.fillRect(0, 0, mapW, mapH);
             }
-            ctx.strokeStyle = (levelId === 'level0_test') ? '#f43f5e' : '#00FF66';
+            ctx.strokeStyle = (levelId === 'level0_test') ? '#f43f5e' : ((levelId === 'level7_lab' || levelId === 'level8_test') ? '#10b981' : '#00FF66');
             ctx.lineWidth = 2.5;
             ctx.strokeRect(2, 2, mapW - 4, mapH - 4);
         } else {
             ctx.fillStyle = 'rgba(4, 14, 9, 0.92)';
             ctx.beginPath(); ctx.arc(blindZone.x, blindZone.y, blindZone.radius, 0, Math.PI * 2); ctx.fill();
-            ctx.strokeStyle = (levelId === 'level0_test') ? '#f43f5e' : '#00FF66';
+            ctx.strokeStyle = (levelId === 'level0_test') ? '#f43f5e' : ((levelId === 'level7_lab' || levelId === 'level8_test') ? '#10b981' : '#00FF66');
             ctx.setLineDash([8, 6]); ctx.lineWidth = 2; ctx.stroke();
         }
         ctx.restore();
@@ -21864,7 +26473,8 @@ function draw() {
         const playerFovFill = (levelId === 'level0_test') ? 'rgba(255, 51, 68, 0.28)' : 'rgba(0, 255, 102, 0.28)';
         const playerFovStroke = (levelId === 'level0_test') ? 'rgba(255, 51, 68, 0.85)' : 'rgba(0, 255, 102, 0.85)';
         const effFov = getPlayerEffectiveFOV();
-        drawTacticalFOV(player.x, player.y, player.angle, effFov.fov, effFov.viewDistance, playerFovFill, playerFovStroke);
+        const playerEye = fovEyePoint(player.x, player.y, player.angle, 10);
+        drawTacticalFOV(playerEye.x, playerEye.y, player.angle, effFov.fov, effFov.viewDistance, playerFovFill, playerFovStroke);
     }
 
     const activeEnemies = Array.isArray(enemies) ? enemies.slice() : [];
@@ -21947,10 +26557,15 @@ function draw() {
                             ? (e.alert ? 'rgba(236, 72, 153, 0.85)' : 'rgba(168, 85, 247, 0.80)')
                             : (e.alert ? 'rgba(255, 51, 51, 0.8)' : (e.isObserver ? 'rgba(0, 204, 255, 0.75)' : 'rgba(255, 185, 0, 0.65)'))));
 
-                // 2026-11-02：普通敌人在盲区内视锥直接消失（不是缩小）；Observer/Jammer/恶魔/三头犬画缩小版
+                // 2026-11-07：普通敌人在盲区内视锥直接消失（不是缩小）；Observer/Jammer/恶魔/三头犬画缩小版
                 const isNormalInBlind = isInBlindTarget && !e.isObserver && !e.isJammer && !e.isDemon && !e.isCerberus;
                 if (!isNormalInBlind) {
-                    drawTacticalFOV(e.x, e.y, e.angle, fovAngle, fovRange, fovFill, fovStroke);
+                    // 2026-11-07：视锥顶点移到眼睛处（恶魔眼在前方约 4px，其余约 10px）；真实锥角/锥距存给光照 pass 用
+                    e.__fovAngle = fovAngle;
+                    e.__fovRange = fovRange;
+                    const eyeOff = e.isDemon ? 4 : 10;
+                    const eEye = fovEyePoint(e.x, e.y, e.angle, eyeOff);
+                    drawTacticalFOV(eEye.x, eEye.y, e.angle, fovAngle, fovRange, fovFill, fovStroke);
                 }
             }
             if (e.isCerberus) {
@@ -22285,6 +26900,7 @@ function draw() {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     try {
         drawWeaponIcons();
+        drawReloadProgress();
     } catch (e) {
         console.error("Error in drawWeaponIcons:", e);
     }
@@ -22311,6 +26927,7 @@ function gameLoop() {
     if (dt > 0.05) dt = 0.05; // Cap delta time at 50ms to prevent math jumps after tab idle/switching
     if (dt < 0.001) dt = 0.001;
     const frameFactor = Math.min(1.8, Math.max(0.4, dt / (1 / 60)));
+
     window.__frameFactor = frameFactor;
 
     if (typeof soundManager !== 'undefined') {
@@ -22414,6 +27031,11 @@ function updateLevel0MagicWeapons() {
                     blindEnergy = Math.min(MAX_BLIND_ENERGY, blindEnergy + 40);
                     addLog("镰刀回收拾取: 补给 (+50 防弹衣 / +40 能量)");
                     createExplosion(item.x, item.y, 14, '#00CCFF');
+                } else if (item.type === 'ammo') {
+                    const a = __l78AmmoGet(currentWeapon.id);
+                    a.reserve += 30;
+                    addLog(`镰刀回收拾取: 弹药包 (+30 发)`);
+                    createExplosion(item.x, item.y, 14, '#FFCC00');
                 } else if (item.type === 'weapon') {
                     const wp = item.weaponData;
                     if (!unlockedWeapons.includes(wp.id)) {
@@ -22731,7 +27353,7 @@ function updateHellAltarSeals() {
                 life: 80 + Math.floor(Math.random() * 40),
                 maxLife: 120,
                 color: '#f43f5e',
-                size: 2.5 + Math.random() * 3.5,
+                size: 2 + Math.random() * 1,
                 isHellRiteParticle: true,
                 spawnY: sy
             });
@@ -22739,6 +27361,11 @@ function updateHellAltarSeals() {
 
         if (seal.timer >= seal.duration) {
             hellAltarSeals.splice(i, 1);
+            // 法阵播完才弹完成窗口（动画 240 帧 ≈ 4 秒；之前是 1.5 秒就弹，遮住后半段动画）
+            if (hellAltarSeals.length === 0 && window.__hellState && window.__hellState.hellPopupPending && !isGameOver) {
+                window.__hellState.hellPopupPending = false;
+                showHellCompletePopup();
+            }
         }
     }
 }
@@ -23145,7 +27772,7 @@ if (typeof document !== 'undefined') {
 // 挂载全局方法到 window
 window.resetGame = resetGame;
 // 2026-11-01 地狱隐藏关：暴露调试接口
-window.__hellDebug = { showHellChoicePopup, showHellCompletePopup, showHellDeathPopup, isInAltarArea, checkHellQuestComplete, returnFromHell, triggerHellAltarSeal };
+window.__hellDebug = { showPreHellFallPopup, showHellChoicePopup, showHellCompletePopup, showHellDeathPopup, isInAltarArea, checkHellQuestComplete, returnFromHell, triggerHellAltarSeal };
 window.initMapLayout = initMapLayout;
 window.switchWeapon = switchWeapon;
 window.togglePause = togglePause;

@@ -360,7 +360,8 @@
               : cam.type === 'gargoyle_sentinel'
               ? (cam.detecting ? '239,68,68' : '249,115,22')
               : (cam.detecting ? '255,17,34' : '239,68,68');
-          coneGlow(ctx, cam.x + Math.cos(a) * wOff, cam.y + Math.sin(a) * wOff, a, wHalf, wRange, segs, wRgb, 0.42);
+          // Level 0 地狱装置视野不受岩石障碍物遮挡，光影辉光传空线段集 []，不被岩石截断
+          coneGlow(ctx, cam.x + Math.cos(a) * wOff, cam.y + Math.sin(a) * wOff, a, wHalf, wRange, [], wRgb, 0.42);
         } else if (!cam.type || cam.type === 'default') {
           // 2026-11-07：辉光顶点跟视锥走，移到镜头处（前方 16.5px）
           coneGlow(ctx, cam.x + Math.cos(a) * 16.5, cam.y + Math.sin(a) * 16.5, a, 0.45, 330, segs,

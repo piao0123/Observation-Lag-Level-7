@@ -641,14 +641,10 @@ export default function App() {
     <div className={`relative w-full h-screen overflow-hidden bg-[#020403] font-mono select-none ${isLevel0 ? 'text-[#FF3344]' : (isL78 ? 'text-[#10b981]' : 'text-[#00FF66]')}`}>
       {/* HUD Bar (Top Right Controls in Playing Mode) */}
       {viewState === 'playing' && (
-        <div className={`absolute top-3 right-5 z-30 flex items-center gap-1.5 bg-black/80 backdrop-blur border px-2 py-1.5 rounded text-xs shadow-lg ${
-          isLevel0
-            ? 'border-[#FF3344]/50 text-[#FF3344] shadow-[#FF3344]/20'
-            : (isL78 ? 'border-[#10b981]/40 text-[#10b981] shadow-[#10b981]/10' : 'border-[#00FF66]/40 text-[#00FF66] shadow-[#00FF66]/10')
-        }`}>
+        <div className="status-box top-bar-hud absolute top-3 right-5 z-30 flex items-center gap-1.5 backdrop-blur text-xs">
           {/* Target Objective Indicator */}
           {GAME_CONFIG.ENABLE_STORY_BRIEFING && (
-            <div className={`hidden xl:flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/60 border text-[11px] ${isLevel0 ? 'border-[#FF3344]/30 text-[#FF3344]' : (isL78 ? 'border-[#10b981]/30 text-[#10b981]' : 'border-[#00FF66]/30 text-[#00FF66]')}`}>
+            <div className={`hidden xl:flex items-center gap-1.5 px-2 py-0.5 rounded border text-[11px] ${isLevel0 ? 'bg-[rgba(22,6,8,0.7)] border-[#FF3344]/30 text-[#FF3344]' : (isL78 ? 'bg-[rgba(6,32,27,0.7)] border-[#10b981]/30 text-[#10b981]' : 'bg-[rgba(4,16,10,0.7)] border-[#00FF66]/30 text-[#00FF66]')}`}>
               <span>🎯</span>
               <span className="font-bold truncate max-w-[200px]" title={t.levelBriefing.levels[selectedLevelIndex]?.objective}>
                 {t.levelBriefing.levels[selectedLevelIndex]?.objective || (lang === 'zh' ? '坚守防线' : 'Hold Defense')}
@@ -748,7 +744,7 @@ export default function App() {
 
       {/* Vertical Weapon List (below top bar, left of wave counter) */}
       {viewState === 'playing' && (
-        <div className={`absolute top-[63px] right-[210px] z-30 hidden lg:flex flex-col items-stretch gap-0.5 ${isL78 ? 'bg-black/50' : 'bg-black/80'} backdrop-blur rounded border px-1 py-1 ${isLevel0 ? 'border-[#FF3344]/30' : (isL78 ? 'border-[#10b981]/30' : 'border-[#00FF66]/30')}`}>
+        <div className="status-box weapon-list-hud absolute top-[63px] right-[210px] z-30 hidden lg:flex flex-col items-stretch gap-0.5 backdrop-blur">
           {(isLevel0 ? [
             { id: 8, name: lang === 'zh' ? '三管猎枪' : 'Triple Shotgun' },
             { id: 9, name: lang === 'zh' ? '符文光镰' : 'Rune Scythe' },
