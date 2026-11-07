@@ -5205,7 +5205,8 @@ function update() {
             if (Math.random() < 0.1) e.confusedAngle = e.angle + (Math.random() - 0.5) * 2.2;
             e.angle += (e.confusedAngle - e.angle) * 0.12;
             // 盲区定住/减速并缓慢迷茫游走
-            let slowSpeed = 0.35;
+            // 2026-11-07：普通敌人盲区内改为极为缓慢（0.35 -> 0.12，约正常巡逻速度 1/10）
+            let slowSpeed = 0.12;
             if (enemyInIce) slowSpeed *= 0.5;
             tryMoveEnemy(e, Math.cos(e.angle) * slowSpeed, Math.sin(e.angle) * slowSpeed, 16);
             return;

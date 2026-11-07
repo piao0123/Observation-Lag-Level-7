@@ -748,7 +748,7 @@ export default function App() {
 
       {/* Vertical Weapon List (below top bar, left of wave counter) */}
       {viewState === 'playing' && (
-        <div className={`absolute top-[63px] right-[210px] z-30 hidden lg:flex flex-col items-stretch gap-0.5 bg-black/80 backdrop-blur rounded border px-1 py-1 ${isLevel0 ? 'border-[#FF3344]/30' : (isL78 ? 'border-[#10b981]/30' : 'border-[#00FF66]/30')}`}>
+        <div className={`absolute top-[63px] right-[210px] z-30 hidden lg:flex flex-col items-stretch gap-0.5 ${isL78 ? 'bg-black/50' : 'bg-black/80'} backdrop-blur rounded border px-1 py-1 ${isLevel0 ? 'border-[#FF3344]/30' : (isL78 ? 'border-[#10b981]/30' : 'border-[#00FF66]/30')}`}>
           {(isLevel0 ? [
             { id: 8, name: lang === 'zh' ? '三管猎枪' : 'Triple Shotgun' },
             { id: 9, name: lang === 'zh' ? '符文光镰' : 'Rune Scythe' },
