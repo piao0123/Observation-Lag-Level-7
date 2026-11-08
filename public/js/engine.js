@@ -139,15 +139,21 @@ function applyLevel7EnemyOverrides(enemy) {
 // 用法：在这里填武器 id → 要覆盖的属性，L7 里自动生效，其他关卡完全不受影响。
 // 示例：RIFLE: { damage: 35, cooldown: 8 }  // 只改 L7 的步枪伤害和射速
 // 注意：绝不直接改上面的 WEAPONS 全局对象（会污染所有关卡）。
+// --- Level 7 专属武器覆盖表 (2026-11-07 规范与改造) ---
+// 注意：绝不直接改 WEAPONS 全局对象（避免污染其他关卡）。
 const LEVEL7_WEAPON_OVERRIDES = {
-    // 实验 v5：L7/L8 的 3 号位是 GEN-12 霰弹枪，用三管猎枪数值做底（伤害 32x12、冷却 35f、射程 380）
-    3: { damage: 32, pellets: 12, spread: 0.28, speed: 20, radius: 3.8, range: 380, cooldown: 35, type: 'shotgun' },
+    1: { name: "步枪", damage: 32, cooldown: 14, range: 540 },
+    2: { name: "手枪", damage: 48, cooldown: 29, range: 380 },
+    3: { name: "霰弹枪", damage: 32, pellets: 8, spread: 0.12, speed: 22, radius: 3.8, range: 380, cooldown: 35, type: 'shotgun' },
+    4: { name: "狙击枪", damage: 46, cooldown: 38, range: 700, speed: 28 },
+    5: { name: "榴弹", nameEn: "Grenade", damage: 130, cooldown: 40, range: 400, speed: 12, type: 'grenade', blastRadius: 130 },
 };
 
-// 关卡专有武器动态属性适配器 (仅在 Level 0 大地图生效，绝不波及其他关卡)
-// 实验：L7/L8 有限弹药系统（2026-11-06 v4）：弹匣容量 + 有限总弹药，弹匣打空从总弹药补，总弹药为 0 则无法开火
-const L78_MAG_SIZE = { 1: 30, 2: 15, 3: 6, 4: 5, 5: 1 };
-const L78_RESERVE_INIT = { 1: 120, 2: 60, 3: 30, 4: 20, 5: 5 };
+// Level 7/8 武器弹匣容量与初始备用弹药规范
+const L78_MAG_SIZE = { 1: 30, 2: 12, 3: 6, 4: 20, 5: 4 };
+const L78_RESERVE_INIT = { 1: 90, 2: 48, 3: 24, 4: 40, 5: 12 };
+const L78_RELOAD_FRAMES_MAP = { 1: 54, 2: 54, 3: 54, 4: 75, 5: 75 };
+const L78_RELOAD_FRAMES = 54;
 const __l78Ammo = {}; // { weaponId: { mag, reserve } }
 let lastAltarHintTime = 0; // 2026-11-07：祭坛外击杀提示节流（8 秒内只提示一次）
 function __l78AmmoGet(id) {
@@ -156,8 +162,7 @@ function __l78AmmoGet(id) {
     }
     return __l78Ammo[id];
 }
-// 实验：L7/L8 自动换弹（2026-11-06 v11）：弹匣打空后进入 90 帧（1.5 秒）换弹，期间不能开火
-const L78_RELOAD_FRAMES = 90; // 所有武器统一 1.5 秒
+
 let __l78Reloading = false;   // 是否正在换弹
 let __l78ReloadTimer = 0;     // 换弹计时（帧）
 let __l78ReloadWeaponId = 0;  // 正在换弹的武器 id
@@ -178,12 +183,14 @@ function __l78CancelReload() {
 function __l78TickReload() {
     if (!__l78Reloading) return;
     __l78ReloadTimer++;
-    if (__l78ReloadTimer >= L78_RELOAD_FRAMES) {
+    const maxFrames = L78_RELOAD_FRAMES_MAP[__l78ReloadWeaponId] || 54;
+    if (__l78ReloadTimer >= maxFrames) {
         const a = __l78AmmoGet(__l78ReloadWeaponId);
-        const need = (L78_MAG_SIZE[__l78ReloadWeaponId] || 30);
+        const capacity = (L78_MAG_SIZE[__l78ReloadWeaponId] || 30);
+        const need = capacity - a.mag;
         const refill = Math.min(need, a.reserve);
         a.reserve -= refill;
-        a.mag = refill;
+        a.mag += refill;
         __l78Reloading = false;
         __l78ReloadTimer = 0;
         __l78ReloadWeaponId = 0;
@@ -211,9 +218,8 @@ function getEffectiveWeapon(wp) {
 
     // Level 7/8：查专属覆盖表，有就返回修改后的副本，没有就返回原样
     if (levelId === 'level7_lab' || levelId === 'level8_test') {
-        // 实验：步枪快慢机——全自动状态用冲锋枪数值（伤害 16、冷却 6f、射程 380）
         if (wp.id === 1 && window.__l7RifleAutoMode) {
-            return { ...wp, damage: 16, cooldown: 6, range: 380 };
+            return { ...wp, name: "步枪", damage: 18, cooldown: 10, range: 420 };
         }
         const override = LEVEL7_WEAPON_OVERRIDES[wp.id];
         if (override) return { ...wp, ...override };
@@ -2550,7 +2556,21 @@ window.addEventListener('keydown', e => {
             }
         }
     }
-    if (e.code === 'KeyR' || e.key === 'r') { if(isGameOver) resetGame(); }
+    if (e.code === 'KeyR' || e.key === 'r' || e.key === 'R') {
+        if (isGameOver) {
+            resetGame();
+        } else if (!isPaused) {
+            const _lvl = getCurrentLevelId();
+            if (_lvl === 'level7_lab' || _lvl === 'level8_test') {
+                const currentWpId = (currentWeapon ? currentWeapon.id : 1);
+                const a = __l78AmmoGet(currentWpId);
+                const cap = (L78_MAG_SIZE[currentWpId] || 30);
+                if (!__l78Reloading && a.mag < cap && a.reserve > 0) {
+                    __l78StartReload(currentWpId);
+                }
+            }
+        }
+    }
     if (e.code === 'KeyE' || e.key === 'e' || e.key === 'E') {
         if (window.__storyBriefingEnabled && window.__levelObjectiveAchieved && !isGameOver && !isPaused) {
             if (typeof window.requestLevelExtract === 'function') {
@@ -3167,9 +3187,18 @@ function spawnDropItem(x, y) {
     y = reachable.y;
 
     const curLvl = getCurrentLevelId();
-    // 实验 v5：L7/L8 每只敌人必掉一个弹药包，不掉落武器（所有武器开局已解锁）
+    // 2026-11-07 Level 7 掉落：恢复正常掉落血包和补给，大幅减少弹药掉落概率（但弹药概率仍略高于血包和补给）
     if (curLvl === 'level7_lab' || curLvl === 'level8_test') {
-        dropItems.push({ x, y, type: 'ammo', timer: 700 });
+        const rand = Math.random();
+        if (rand < 0.65) {
+            if (rand < 0.27) {
+                dropItems.push({ x, y, type: 'ammo', timer: 700 });
+            } else if (rand < 0.46) {
+                dropItems.push({ x, y, type: 'medkit', timer: 700 });
+            } else {
+                dropItems.push({ x, y, type: 'battery', timer: 700 });
+            }
+        }
         return;
     }
 
@@ -4793,10 +4822,11 @@ function update() {
                 addLog("拾取补给 (+50 防弹衣 / +40 能量)");
                 createExplosion(player.x, player.y, 10, '#00CCFF');
             } else if (item.type === 'ammo') {
-                // 实验：L7/L8 弹药包——给当前武器总弹药 +30
+                // L7/L8 弹药包：给当前武器增加 1 个弹匣容量的备用弹药
+                const magBonus = (L78_MAG_SIZE[currentWeapon.id] || 30);
                 const a = __l78AmmoGet(currentWeapon.id);
-                a.reserve += 30;
-                addLog(`拾取弹药 +30`);
+                a.reserve += magBonus;
+                addLog(`拾取弹药 (+${magBonus})`);
                 createExplosion(player.x, player.y, 12, '#FFCC00');
             } else if (item.type === 'weapon') {
                 const wp = item.weaponData;
@@ -5249,6 +5279,14 @@ function update() {
         if (e.flashTimer > 0) e.flashTimer -= ff;
         if (e.shootCooldown > 0) e.shootCooldown -= ff;
         if (e.spawnGraceTimer > 0) e.spawnGraceTimer -= ff;
+
+        // 2026-11-07 地狱关弹窗阶段敌人保持绝对静止，不靠近玩家也不攻击
+        const isLvl0Game = (typeof getCurrentLevelId === 'function' ? getCurrentLevelId() : '') === 'level0_test';
+        if (isLvl0Game && ((window.__hellState && !window.__hellState.active) || document.getElementById('hell-choice-popup'))) {
+            e.alert = false;
+            e.alertCooldown = 0;
+            return;
+        }
 
         // 盲区推迟伤害结算校验：若盲区不处于激活状态，或敌人已离开盲区，立即重挫并结算推迟伤害！
         if (e.pendingDamage > 0) {
@@ -22925,12 +22963,13 @@ function drawWeaponSilhouette(ctx, weaponId, x, y, w, h, color, isSelected) {
     ctx.restore();
 }
 
-// 实验：L7/L8 换弹圆形进度条（2026-11-06 v11）：准星周围的黄色圆环，顺时针填充
+// 实验：L7/L8 换弹圆形进度条（准星周围的黄色圆环，顺时针填充）
 function drawReloadProgress() {
     if (!__l78Reloading) return;
     const lvl = (typeof getCurrentLevelId === 'function') ? getCurrentLevelId() : '';
     if (lvl !== 'level7_lab' && lvl !== 'level8_test') return;
-    const progress = Math.min(1, __l78ReloadTimer / L78_RELOAD_FRAMES);
+    const maxFrames = (typeof L78_RELOAD_FRAMES_MAP !== 'undefined' && L78_RELOAD_FRAMES_MAP[__l78ReloadWeaponId]) ? L78_RELOAD_FRAMES_MAP[__l78ReloadWeaponId] : 54;
+    const progress = Math.min(1, __l78ReloadTimer / maxFrames);
     const cx = mouse.x, cy = mouse.y, r = 18;
     ctx.save();
     // 背景淡色完整圆环
@@ -23207,11 +23246,9 @@ function drawWeaponIcons() {
                 ctx.font = 'bold 9px monospace';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'top';
-                // 实验 v5：L7/L8 的 3 号位叫霰弹枪（只改显示，不改 WEAPONS 表，其他关卡还是冲锋枪）
-                // 2026-11-07：切中文后全部枪名走中文（之前只有 3 号位走了语言分支，其余写死 nameEn）；
-                // 5 号位中文用“手雷”，与右上武器列表（translations.ts）一致
+                // Level 7/8 武器 UI 动态显示
                 const wname = (window.__gameLang === 'zh')
-                    ? (w.id === 3 ? '霰弹枪' : w.id === 5 ? '手雷' : (w.name || w.nameEn || '').toUpperCase())
+                    ? (w.id === 3 ? '霰弹枪' : w.id === 5 ? (isL78 ? '榴弹' : '手雷') : (w.name || w.nameEn || '').toUpperCase())
                     : (w.id === 3 ? 'SHOTGUN' : (w.nameEn || w.name || '').toUpperCase());
                 ctx.fillText(wname, x + 5, y + 3);
                 // 键位（右上角，实验 v10：改成 [1] [2] 格式，避免和弹药数混淆）
@@ -23242,7 +23279,14 @@ function drawWeaponIcons() {
                 ctx.textBaseline = 'alphabetic';
                 ctx.textAlign = 'left';
                 ctx.fillText(String(_ammo.mag), x + 5, y + boxH - 4);
+                if (isSelected) {
+                    ctx.fillStyle = isAmmoEmpty ? '#FF3344' : 'rgba(56, 189, 248, 0.75)';
+                    ctx.font = 'bold 8px monospace';
+                    ctx.fillText('[R]', x + 26, y + boxH - 4);
+                }
                 ctx.textAlign = 'right';
+                ctx.fillStyle = cellColor;
+                ctx.font = '9px monospace';
                 ctx.fillText(String(_ammo.reserve), x + boxW - 5, y + boxH - 4);
             } else {
                 // 未解锁：锁图标
@@ -26633,6 +26677,64 @@ function draw() {
             tgtIdx++;
 
             ctx.restore();
+        });
+    }
+
+    // Level 7 榴弹发射器战术锁定特效 (仅当手持榴弹 id=5 且瞄准在视线范围内的敌人时显示)
+    if (!isPaused && (levelId === 'level7_lab' || levelId === 'level8_test') && currentWeapon && currentWeapon.id === 5) {
+        const worldMouse = getWorldMouse();
+        const aimAngle = Math.atan2(worldMouse.y - player.y, worldMouse.x - player.x);
+        const l7Enemies = Array.isArray(enemies) ? enemies.slice() : [];
+        
+        l7Enemies.forEach(e => {
+            if (!e || typeof e !== 'object' || typeof e.hp !== 'number' || e.hp <= 0) return;
+            
+            // 关键限制 1：榴弹不具备提前标记未发现敌人的能力！必须满足 player 能看见 enemy
+            const isVisible = canSee(player.x, player.y, e.x, e.y);
+            if (!isVisible) return;
+            
+            // 关键限制 2：瞄准判定（玩家准星方向与敌人的夹角小于 0.35 rad，或距离鼠标/玩家很近）
+            const distToPlayer = Math.hypot(e.x - player.x, e.y - player.y);
+            const distToMouse = Math.hypot(e.x - worldMouse.x, e.y - worldMouse.y);
+            const enemyAngle = Math.atan2(e.y - player.y, e.x - player.x);
+            const angleDiff = Math.abs(Math.atan2(Math.sin(enemyAngle - aimAngle), Math.cos(enemyAngle - aimAngle)));
+            
+            const effectiveRange = (getEffectiveWeapon(currentWeapon) || {}).range || 450;
+            const isAimedAt = (angleDiff < 0.35 && distToPlayer <= effectiveRange + 80) || (distToMouse < 60);
+            
+            if (isAimedAt) {
+                ctx.save();
+                ctx.translate(e.x, e.y);
+                
+                const lockColor = '#00FF66';
+                const pulses = Math.sin(Date.now() * 0.008) * 3;
+                const boxSize = 44 + pulses;
+                const half = boxSize / 2;
+                const cornerLen = 10;
+                
+                ctx.strokeStyle = lockColor;
+                ctx.fillStyle = lockColor;
+                ctx.shadowColor = lockColor;
+                ctx.shadowBlur = 10;
+                ctx.lineWidth = 1.8;
+                
+                ctx.beginPath();
+                ctx.moveTo(-half, -half + cornerLen); ctx.lineTo(-half, -half); ctx.lineTo(-half + cornerLen, -half);
+                ctx.moveTo(half - cornerLen, -half); ctx.lineTo(half, -half); ctx.lineTo(half, -half + cornerLen);
+                ctx.moveTo(half - cornerLen, half); ctx.lineTo(half, half); ctx.lineTo(half, half - cornerLen);
+                ctx.moveTo(-half + cornerLen, half); ctx.lineTo(-half, half); ctx.lineTo(-half, half - cornerLen);
+                ctx.stroke();
+                
+                ctx.beginPath();
+                ctx.arc(0, 0, 3, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.font = 'bold 9px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(`LOCK: ${Math.round(distToPlayer)}m`, 0, -half - 6);
+                
+                ctx.restore();
+            }
         });
     }
 

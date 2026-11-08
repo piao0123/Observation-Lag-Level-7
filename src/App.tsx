@@ -755,7 +755,7 @@ export default function App() {
             { id: 2, name: t.weapons.pistol },
             { id: 3, name: isL78 ? (lang === 'zh' ? '3: 霰弹枪' : '3: Shotgun') : t.weapons.smg },
             { id: 4, name: t.weapons.sniper },
-            { id: 5, name: t.weapons.grenade },
+            { id: 5, name: isL78 ? (lang === 'zh' ? '5: 榴弹' : '5: Grenade') : t.weapons.grenade },
           ]).map((wp) => (
             <button
               key={wp.id}
